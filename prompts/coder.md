@@ -46,6 +46,8 @@ rules and copied Codex skills first.
 - Do not create EF migrations unless the issue explicitly requires it and the
   user asked for migration creation.
 - Do not commit, push, merge, or delete branches.
+- Do not delete or modify `.loop.logs`, `README.loop.md`, or
+  `README.loop.state.json`; the devloop runner owns those files.
 - Preserve unrelated working tree changes.
 - Run focused tests/builds for touched areas.
 

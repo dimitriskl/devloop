@@ -18,6 +18,34 @@ codex --version
 The `--issues` path must point to a Markdown README/index containing links to
 local issue Markdown files.
 
+## The runner returns to the shell with no visible progress
+
+Check the loop state files next to the issue README:
+
+- `README.loop.md`
+- `README.loop.state.json`
+- `.loop.logs/*stderr*`
+
+Recent versions print selected issues, role status, and blocked summaries to
+the terminal. If a run still looks silent, open `README.loop.md` first.
+
+## The runner crashes with FileNotFoundError under `.loop.logs`
+
+A coder pass may delete `.loop.logs` after a reviewer asks to remove devloop
+artifacts from the change set. Update devloop and rerun; newer builds recreate
+the log folder before each role write and tell agents not to touch runner files.
+
+## Codex exec fails immediately
+
+Older devloop builds passed `-a` to `codex exec`. Codex CLI 0.140+ expects
+approval policy via config instead, for example:
+
+```bash
+codex exec -c 'approval_policy="never"' ...
+```
+
+If stderr mentions `unexpected argument '-a'`, update devloop and rerun.
+
 ## Codex returns invalid JSON
 
 The runner marks the role `BLOCKED`. Inspect `.loop.logs/*last-message*`,

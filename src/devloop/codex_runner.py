@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,56 @@ from typing import Any
 
 from .issue_pack import Issue
 from .templates import BundleContext, Preset, render_template
+
+_LEGACY_APPROVAL_FLAG: bool | None = None
+CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
+
+
+def uses_legacy_approval_flag(codex: str) -> bool:
+    global _LEGACY_APPROVAL_FLAG
+    if _LEGACY_APPROVAL_FLAG is None:
+        result = subprocess.run(
+            [codex, "exec", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        help_text = f"{result.stdout}\n{result.stderr}"
+        _LEGACY_APPROVAL_FLAG = "  -a," in help_text or "  -a <" in help_text
+    return _LEGACY_APPROVAL_FLAG
+
+
+def build_codex_exec_command(
+    codex: str,
+    repo_root: Path,
+    sandbox: str,
+    approval_policy: str,
+    schema_path: Path,
+    message_path: Path,
+) -> list[str]:
+    command = [
+        codex,
+        "exec",
+        "-C",
+        str(repo_root),
+        "-s",
+        sandbox,
+    ]
+    if uses_legacy_approval_flag(codex):
+        command.extend(["-a", approval_policy])
+    else:
+        command.extend(["-c", f'approval_policy="{approval_policy}"'])
+    command.extend(
+        [
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(message_path),
+            "--json",
+            "-",
+        ]
+    )
+    return command
 
 
 @dataclass
@@ -72,7 +123,14 @@ class CodexRunner:
         self.approval_policy = approval_policy
         self.dry_run = dry_run
         self.log_root = issues_index.parent / ".loop.logs"
+        self.ensure_log_root()
+
+    def ensure_log_root(self) -> None:
         self.log_root.mkdir(parents=True, exist_ok=True)
+
+    def write_log_text(self, path: Path, text: str) -> None:
+        self.ensure_log_root()
+        path.write_text(text, encoding="utf-8")
 
     def run_role(
         self,
@@ -97,36 +155,26 @@ class CodexRunner:
         stdout_path = self.log_root / f"{prefix}.stdout.jsonl"
         stderr_path = self.log_root / f"{prefix}.stderr.txt"
         message_path = self.log_root / f"{prefix}.last-message.json"
-        prompt_path.write_text(prompt, encoding="utf-8")
+        self.write_log_text(prompt_path, prompt)
 
         schema_path = self.bundle.schemas / "role-result.schema.json"
-        command = [
-            self.codex,
-            "exec",
-            "-C",
-            str(self.repo_root),
-            "-s",
-            self.sandbox,
-            "-a",
-            self.approval_policy,
-            "--output-schema",
-            str(schema_path),
-            "-o",
-            str(message_path),
-            "--json",
-            "-",
-        ]
-
-        result = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            cwd=self.repo_root,
-            capture_output=True,
-            check=False,
+        command = build_codex_exec_command(
+            codex=self.codex,
+            repo_root=self.repo_root,
+            sandbox=self.sandbox,
+            approval_policy=self.approval_policy,
+            schema_path=schema_path,
+            message_path=message_path,
         )
-        stdout_path.write_text(result.stdout, encoding="utf-8")
-        stderr_path.write_text(result.stderr, encoding="utf-8")
+
+        result = self.run_codex_exec_with_connection_retries(
+            command=command,
+            prompt=prompt,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        self.write_log_text(stdout_path, result.stdout)
+        self.write_log_text(stderr_path, result.stderr)
 
         if result.returncode != 0:
             return RoleResult(
@@ -138,11 +186,52 @@ class CodexRunner:
         message = message_path.read_text(encoding="utf-8") if message_path.is_file() else result.stdout
         return RoleResult.from_message(message)
 
+    def run_codex_exec_with_connection_retries(
+        self,
+        command: list[str],
+        prompt: str,
+        stdout_path: Path,
+        stderr_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        attempt = 1
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+
+        while True:
+            result = subprocess.run(
+                command,
+                input=prompt,
+                text=True,
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+            )
+            current_stderr = result.stderr
+            stdout_parts.append(result.stdout)
+            stderr_parts.append(current_stderr)
+            result.stdout = "".join(stdout_parts)
+            result.stderr = "".join(stderr_parts)
+
+            if result.returncode == 0 or not is_retryable_codex_connection_failure(current_stderr):
+                return result
+
+            retry_message = (
+                f"codex exec connection failed on attempt {attempt}; "
+                f"retrying in {CODEX_CONNECTION_RETRY_DELAY_SECONDS} seconds.\n"
+            )
+            print(retry_message.strip())
+            stderr_parts.append(retry_message)
+            result.stderr = "".join(stderr_parts)
+            self.write_log_text(stdout_path, result.stdout)
+            self.write_log_text(stderr_path, result.stderr)
+            time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
+            attempt += 1
+
     def render_dry_run_prompts(self, issue: Issue) -> None:
         for role in ("coder", "reviewer", "qa"):
             prompt = self.build_prompt(role=role, issue=issue, pass_number=1, fix_list=[])
             path = self.log_root / f"{issue.number}-{role}-dry-run.prompt.md"
-            path.write_text(prompt, encoding="utf-8")
+            self.write_log_text(path, prompt)
             print(f"[dry-run] Wrote {path}")
 
     def build_prompt(
@@ -229,3 +318,10 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 
     return None
 
+
+def is_retryable_codex_connection_failure(stderr: str) -> bool:
+    lower = stderr.lower()
+    return (
+        "failed to connect to websocket" in lower
+        or "responses_websocket" in lower
+    )
