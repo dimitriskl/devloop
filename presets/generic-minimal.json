@@ -1,0 +1,49 @@
+{
+  "name": "generic-minimal",
+  "requiredDocs": [
+    "AGENTS.md",
+    "CONTEXT.md",
+    "CONTEXT-MAP.md",
+    "docs/TDD/README.md",
+    "docs/adr",
+    "context/project-overview.md",
+    "context/ai-interaction.md",
+    "context/current-feature.md",
+    "context/DOTNET_PATTERNS.md",
+    "context/ANGULAR_PATTERNS.md"
+  ],
+  "roles": {
+    "coder": {
+      "skills": [
+        "skills/codex/tdd/SKILL.md",
+        "skills/codex/tdd/tests.md",
+        "skills/codex/tdd/mocking.md",
+        "skills/codex/tdd/interface-design.md",
+        "skills/codex/tdd/deep-modules.md",
+        "skills/codex/tdd/refactoring.md",
+        "skills/codex/csharp-expert-developer/SKILL.md",
+        "skills/codex/angular-typescript-developer/SKILL.md"
+      ],
+      "agents": [
+        "agents/claude/csharp-expert-developer.md",
+        "agents/claude/angular-typescript-developer.md"
+      ]
+    },
+    "reviewer": {
+      "skills": [
+        "skills/codex/senior-code-reviewer/SKILL.md"
+      ],
+      "agents": [
+        "agents/claude/senior-code-reviewer.md"
+      ]
+    },
+    "qa": {
+      "skills": [
+        "skills/codex/qa-automation-engineer/SKILL.md"
+      ],
+      "agents": [
+        "agents/claude/qa-automation-engineer.md"
+      ]
+    }
+  }
+}

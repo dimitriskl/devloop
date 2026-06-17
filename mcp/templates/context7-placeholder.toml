@@ -1,0 +1,8 @@
+# Context7 is optional and is not vendored in this bundle.
+# Install Context7 from its official instructions and replace this placeholder.
+
+[mcp_servers.context7]
+command = "REPLACE_WITH_CONTEXT7_COMMAND"
+args = ["REPLACE_WITH_CONTEXT7_ARGS"]
+
+

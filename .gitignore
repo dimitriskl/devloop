@@ -1,0 +1,22 @@
+# .NET build output
+**/obj/
+mcp/**/bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local secrets and machine-specific config
+appsettings.local.json
+.env
+.env.*
+
+# IDE / OS
+.vs/
+.idea/
+*.user
+Thumbs.db
+.DS_Store

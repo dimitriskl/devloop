@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dev Loop Role Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "changed_files",
+    "verification_commands",
+    "findings",
+    "fix_list",
+    "residual_risks"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "BLOCKED"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "verification_commands": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "fix_list": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "residual_risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
+
+
