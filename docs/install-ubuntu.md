@@ -17,6 +17,8 @@ chmod +x ./install/*.sh
 7. Install copied skills and agents if you want them available globally:
 
 ```bash
+chmod +x ./bin/devloop.sh
+chmod +x ./install/*.sh
 ./install/install-skills.sh
 ```
 
