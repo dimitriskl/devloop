@@ -1,0 +1,13 @@
+# Copy into $HOME/.codex/config.toml and replace DEVLOOP_ROOT.
+
+[mcp_servers.sql_diagnostics]
+command = "dotnet"
+args = [
+    "DEVLOOP_ROOT/mcp/sql_diagnostics/bin/Release/net10.0/DevLoop.SqlDiagnosticsMcp.dll",
+    "--config",
+    "DEVLOOP_ROOT/mcp/sql_diagnostics/appsettings.local.json",
+]
+startup_timeout_sec = 30
+tool_timeout_sec = 300
+
+
