@@ -37,6 +37,8 @@ Coder result:
   risk, and test quality.
 - Mark `PASS` only when no blocking issues remain.
 - Mark `FAIL` when the coder must make changes.
+- Ignore `.loop.logs`, `README.loop.md`, and `README.loop.state.json`; they are
+  expected devloop runner artifacts, not implementation changes.
 - Include exact file paths and line references when possible.
 - Do not modify code.
 

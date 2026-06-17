@@ -42,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
         print("No pending issues selected.")
         return 0
 
+    pending_numbers = ", ".join(issue.number for issue in selected_source_issues)
+    print(f"Selected issues: {pending_numbers}")
+
     worktree = resolve_worktree(
         source_repo=source_repo,
         create_worktree=args.create_worktree,
@@ -53,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         interactive=not args.non_interactive,
         dry_run=args.dry_run,
     )
+
+    if worktree.created:
+        print(f"Created implementation worktree: {worktree.repo_root}")
+    elif worktree.repo_root != source_repo:
+        print(f"Using implementation worktree: {worktree.repo_root}")
 
     repo_root = worktree.repo_root
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
@@ -80,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         issues=[issue.number for issue in issues],
         dry_run=args.dry_run,
     )
+    print(f"Loop state: {state_writer.board_path}")
 
     overall_status = 0
     for issue in issues:
@@ -94,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
             overall_status = 2
             if not args.all:
                 break
+
+    if overall_status == 0:
+        print("Dev loop finished.")
+    else:
+        print("Dev loop finished with blocked or failed issues.", file=sys.stderr)
 
     return overall_status
 
@@ -133,13 +147,16 @@ def run_issue(
     last_qa: RoleResult | None = None
 
     state_writer.record_issue_start(issue)
+    print(f"\n[{issue.number}] {issue.title}")
 
     if runner.dry_run:
         runner.render_dry_run_prompts(issue)
         state_writer.record_issue_dry_run(issue)
+        print(f"[{issue.number}] Dry run prompts rendered.")
         return RoleResult(status="PASS", summary="Dry run prompts rendered.")
 
     for pass_number in range(1, max_passes + 1):
+        print(f"[{issue.number}] Pass {pass_number}: coder")
         last_coder = runner.run_role(
             role="coder",
             issue=issue,
@@ -147,11 +164,13 @@ def run_issue(
             fix_list=fix_list,
         )
         state_writer.record_role_result(issue, "coder", pass_number, last_coder)
+        report_role_result(issue.number, "coder", last_coder)
 
         if last_coder.status != "PASS":
             state_writer.record_issue_blocked(issue, "coder", last_coder)
             return last_coder
 
+        print(f"[{issue.number}] Pass {pass_number}: reviewer")
         last_review = runner.run_role(
             role="reviewer",
             issue=issue,
@@ -159,11 +178,13 @@ def run_issue(
             coder_result=last_coder,
         )
         state_writer.record_role_result(issue, "reviewer", pass_number, last_review)
+        report_role_result(issue.number, "reviewer", last_review)
 
         if last_review.status != "PASS":
             fix_list = last_review.fix_list or last_review.findings
             continue
 
+        print(f"[{issue.number}] Pass {pass_number}: qa")
         last_qa = runner.run_role(
             role="qa",
             issue=issue,
@@ -172,6 +193,7 @@ def run_issue(
             review_result=last_review,
         )
         state_writer.record_role_result(issue, "qa", pass_number, last_qa)
+        report_role_result(issue.number, "qa", last_qa)
 
         if last_qa.status != "PASS":
             fix_list = last_qa.fix_list or last_qa.findings
@@ -179,6 +201,7 @@ def run_issue(
 
         mark_issue_completed(issue.path, last_coder, last_review, last_qa)
         state_writer.record_issue_completed(issue, last_coder, last_review, last_qa)
+        print(f"[{issue.number}] Completed.")
         return RoleResult(status="PASS", summary=f"Issue {issue.number} completed.")
 
     blocked = RoleResult(
@@ -187,7 +210,22 @@ def run_issue(
         fix_list=fix_list,
     )
     state_writer.record_issue_blocked(issue, "max-passes", blocked)
+    report_role_result(issue.number, "max-passes", blocked)
     return blocked
+
+
+def report_role_result(issue_number: str, role: str, result: RoleResult) -> None:
+    if result.status == "PASS":
+        if result.summary:
+            print(f"[{issue_number}] {role}: PASS - {result.summary}")
+        else:
+            print(f"[{issue_number}] {role}: PASS")
+        return
+
+    message = f"[{issue_number}] {role}: {result.status}"
+    if result.summary:
+        message = f"{message} - {result.summary}"
+    print(message, file=sys.stderr)
 
 
 def resolve_bundle_path(bundle_root: Path, path_text: str) -> Path:
