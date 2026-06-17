@@ -3,7 +3,7 @@
 Run one pending issue:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md
+.\bin\devloop.ps1 --prd /home/dimitris/code/diagnostics-collector/docs/diagnostic-collectorprd.md --issues /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/issues\README.md
 ```
 
 Run every pending issue:
@@ -35,5 +35,3 @@ Completed issues are updated in place:
 - `Completed: [x]`
 - checked acceptance criteria
 - appended `## Implementation Notes`
-
-
