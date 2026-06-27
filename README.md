@@ -4,7 +4,7 @@ Portable Codex development-loop runner for local PRD and issue packs.
 
 The bundle is designed to be copied to a machine that does not already have a
 target project checkout. It contains the runner, prompts, output schemas, copied
-Codex skills, copied Claude agent definitions, MCP setup templates, and setup
+Codex skills, MCP setup templates, and setup
 documentation.
 
 ## First Setup On A New PC
