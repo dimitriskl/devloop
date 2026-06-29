@@ -81,7 +81,7 @@ chmod +x ./install/*.sh
 ./install/install-skills.sh
 ```
 
-This copies bundled Codex skills and Claude agents to the user's home folders.
+This copies bundled Codex skills and Codex agent references to the user's home folders.
 
 ## 7. Optional: Configure SQL MCP
 
@@ -129,4 +129,3 @@ Use dry-run first. It creates prompts and state files but does not call Codex.
 ```
 
 If the dry run works, remove `--dry-run` and run the real loop.
-

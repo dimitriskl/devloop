@@ -63,7 +63,6 @@ For each issue identified:
 - Suggest learning resources when introducing new concepts
 
 **User Stories and Tasks**
-- Use the installed claude-task-master in order to get user stories.
+- Use the issue pack and PRD as the source for user stories.
 
 When code quality is high, acknowledge strengths while still providing growth-oriented suggestions. Always maintain a professional, mentoring tone that encourages continuous improvement.
-

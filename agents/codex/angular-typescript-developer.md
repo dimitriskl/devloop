@@ -59,7 +59,7 @@ You are a senior-level Angular TypeScript developer with deep expertise in moder
 - When needing latest documentation or best practices, explicitly request 'use context7' to access current Angular and TypeScript resources
 
 **User Stories and Tasks**
-- Use the installed claude-task-master in order to get user stories.
+- Use the issue pack and PRD as the source for user stories.
 
 # AI Coding Guidelines & Architecture Standards
 
@@ -129,7 +129,7 @@ This protocol creates a continuous improvement loop. **Following it is MANDATORY
 
 **STOP! Before writing any fix code:**
 
-1. **Search CLAUDE.md for similar issues:**
+1. **Search AGENTS.md for similar issues:**
    - Grep for: category name, error keywords, file names
    - Check "Ralph Lessons Learned" section
 
@@ -155,7 +155,7 @@ When fixing test failures, compilation errors, or runtime bugs (NOT implementing
 
 ### Step 1: Document FIRST
 
-1. Open `CLAUDE.md` in the project root
+1. Open `AGENTS.md` in the project root
 2. Find the `<!-- LESSONS START -->` marker
 3. Insert a new lesson entry BEFORE `<!-- LESSONS END -->`
 4. Use the format below
@@ -166,7 +166,7 @@ After documenting, implement the actual fix.
 
 ### Step 3: If Same Bug Recurs
 
-Find the existing entry in CLAUDE.md and increment the **Occurrences** count.
+Find the existing entry in AGENTS.md and increment the **Occurrences** count.
 
 ### Lesson Entry Format
 
@@ -205,4 +205,3 @@ Find the existing entry in CLAUDE.md and increment the **Occurrences** count.
 | Angular / Services | DI, observables, state |
 | Build / Dependencies | Package versions, missing references |
 | Build / Compilation | Type errors, module issues |
-

@@ -1,6 +1,6 @@
 # Skills And Agents
 
-The bundle includes copied Codex skills and Claude agent files.
+The bundle includes copied Codex skills and Codex agent-reference files.
 
 Use the helper script:
 
@@ -36,23 +36,22 @@ mkdir -p "$HOME/.codex/skills"
 cp -R ./skills/codex/* "$HOME/.codex/skills/"
 ```
 
-## Install Claude Agents
+## Install Codex Agent References
 
 Windows:
 
 ```powershell
-$target = "$env:USERPROFILE\.claude\agents"
+$target = "$env:USERPROFILE\.codex\agents"
 New-Item -ItemType Directory -Force -Path $target | Out-Null
-Copy-Item -Force .\agents\claude\*.md $target
+Copy-Item -Force .\agents\codex\*.md $target
 ```
 
 Ubuntu/Linux:
 
 ```bash
-mkdir -p "$HOME/.claude/agents"
-cp ./agents/claude/*.md "$HOME/.claude/agents/"
+mkdir -p "$HOME/.codex/agents"
+cp ./agents/codex/*.md "$HOME/.codex/agents/"
 ```
 
 The runner can also read the bundled copies directly through the preset, so
 global installation is useful but not required for the loop prompts.
-
