@@ -24,6 +24,10 @@ Read these copied review skill/agent instructions:
 
 {{AGENT_PATHS}}
 
+Read these Dev Loop self-improvement wiki pages from the bundle if they exist:
+
+{{BUNDLE_MEMORY_DOCS}}
+
 Coder result:
 
 ```json
@@ -57,5 +61,4 @@ Return only JSON matching this shape:
   "residual_risks": []
 }
 ```
-
 

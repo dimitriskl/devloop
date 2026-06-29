@@ -27,8 +27,12 @@ Read these copied Claude agent instructions for additional local guidance:
 
 {{AGENT_PATHS}}
 
+Read these Dev Loop self-improvement wiki pages from the bundle if they exist:
+
+{{BUNDLE_MEMORY_DOCS}}
+
 If a copied Claude agent conflicts with repository rules, follow the repository
-rules and copied Codex skills first.
+rules, copied Codex skills, and Dev Loop self-improvement wiki first.
 
 ## Fix List From Previous Gate
 
@@ -70,5 +74,4 @@ Return only JSON matching this shape:
 Use `BLOCKED` when you cannot continue because of missing input, environment, or
 an unresolved external dependency. Use `FAIL` only when you intentionally leave
 known implementation issues for a later coder pass.
-
 

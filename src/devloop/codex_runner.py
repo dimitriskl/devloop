@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -10,20 +11,34 @@ from pathlib import Path
 from typing import Any
 
 from .issue_pack import Issue
+from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
+from .subprocess_utils import output_text, run_captured_text
 from .templates import BundleContext, Preset, render_template
 
 _LEGACY_APPROVAL_FLAG: bool | None = None
 CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
 
 
+def resolve_codex_executable(codex: str) -> str:
+    """Resolve a Codex command name to a concrete executable path.
+
+    On Windows the Codex CLI is typically an npm shim (``codex.cmd`` /
+    ``codex.ps1``) with no ``codex.exe``. ``subprocess`` with ``shell=False``
+    invokes Win32 ``CreateProcess``, which does not consult ``PATHEXT``, so a
+    bare ``"codex"`` fails with ``FileNotFoundError`` (WinError 2).
+    ``shutil.which`` does honour ``PATHEXT``, so resolving up front fixes
+    Windows while staying a no-op on POSIX. If resolution fails (Codex not on
+    PATH), return the original value so the downstream error still names what
+    the user asked for.
+    """
+    return shutil.which(codex) or codex
+
+
 def uses_legacy_approval_flag(codex: str) -> bool:
     global _LEGACY_APPROVAL_FLAG
     if _LEGACY_APPROVAL_FLAG is None:
-        result = subprocess.run(
+        result = run_captured_text(
             [codex, "exec", "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
         )
         help_text = f"{result.stdout}\n{result.stderr}"
         _LEGACY_APPROVAL_FLAG = "  -a," in help_text or "  -a <" in help_text
@@ -118,7 +133,7 @@ class CodexRunner:
         self.prd_path = prd_path
         self.issues_index = issues_index
         self.preset = preset
-        self.codex = codex
+        self.codex = resolve_codex_executable(codex)
         self.sandbox = sandbox
         self.approval_policy = approval_policy
         self.dry_run = dry_run
@@ -140,6 +155,7 @@ class CodexRunner:
         fix_list: list[str] | None = None,
         coder_result: RoleResult | None = None,
         review_result: RoleResult | None = None,
+        attempt_label: str | None = None,
     ) -> RoleResult:
         prompt = self.build_prompt(
             role=role,
@@ -150,7 +166,12 @@ class CodexRunner:
             review_result=review_result,
         )
 
-        prefix = f"{issue.number}-{role}-pass{pass_number}"
+        attempt_slug = slugify_log_token(attempt_label)
+        prefix_parts = [issue.number]
+        if attempt_slug:
+            prefix_parts.append(attempt_slug)
+        prefix_parts.extend([role, f"pass{pass_number}"])
+        prefix = "-".join(prefix_parts)
         prompt_path = self.log_root / f"{prefix}.prompt.md"
         stdout_path = self.log_root / f"{prefix}.stdout.jsonl"
         stderr_path = self.log_root / f"{prefix}.stderr.txt"
@@ -198,16 +219,14 @@ class CodexRunner:
         stderr_parts: list[str] = []
 
         while True:
-            result = subprocess.run(
+            result = run_captured_text(
                 command,
-                input=prompt,
-                text=True,
+                input_text=prompt,
                 cwd=self.repo_root,
-                capture_output=True,
-                check=False,
             )
-            current_stderr = result.stderr
-            stdout_parts.append(result.stdout)
+            current_stdout = output_text(result.stdout)
+            current_stderr = output_text(result.stderr)
+            stdout_parts.append(current_stdout)
             stderr_parts.append(current_stderr)
             result.stdout = "".join(stdout_parts)
             result.stderr = "".join(stderr_parts)
@@ -233,6 +252,63 @@ class CodexRunner:
             path = self.log_root / f"{issue.number}-{role}-dry-run.prompt.md"
             self.write_log_text(path, prompt)
             print(f"[dry-run] Wrote {path}")
+
+    def run_self_improvement_compiler(
+        self,
+        state_path: Path,
+        board_path: Path,
+        wiki_root: Path,
+        max_lessons: int,
+        compiler_repo_root: Path | None = None,
+        run_context_path: Path | None = None,
+    ) -> RoleResult:
+        compiler_repo_root = compiler_repo_root or self.repo_root
+        log_root = self.log_root if compiler_repo_root == self.repo_root else wiki_root.parent / ".compiler-runs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        prompt = self.build_self_improvement_prompt(
+            state_path=state_path,
+            board_path=board_path,
+            wiki_root=wiki_root,
+            max_lessons=max_lessons,
+            run_context_path=run_context_path,
+            compiler_repo_root=compiler_repo_root,
+        )
+
+        prefix = "self-improvement-compiler"
+        prompt_path = log_root / f"{prefix}.prompt.md"
+        stdout_path = log_root / f"{prefix}.stdout.jsonl"
+        stderr_path = log_root / f"{prefix}.stderr.txt"
+        message_path = log_root / f"{prefix}.last-message.json"
+        self.write_log_text(prompt_path, prompt)
+
+        schema_path = self.bundle.schemas / "role-result.schema.json"
+        command = build_codex_exec_command(
+            codex=self.codex,
+            repo_root=compiler_repo_root,
+            sandbox=self.sandbox,
+            approval_policy=self.approval_policy,
+            schema_path=schema_path,
+            message_path=message_path,
+        )
+
+        result = self.run_codex_exec_with_connection_retries(
+            command=command,
+            prompt=prompt,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        self.write_log_text(stdout_path, result.stdout)
+        self.write_log_text(stderr_path, result.stderr)
+
+        if result.returncode != 0:
+            return RoleResult(
+                status="BLOCKED",
+                summary=f"self-improvement compiler failed with exit code {result.returncode}. See {stderr_path}.",
+                raw_message=result.stderr,
+            )
+
+        message = message_path.read_text(encoding="utf-8") if message_path.is_file() else result.stdout
+        return RoleResult.from_message(message)
 
     def build_prompt(
         self,
@@ -261,6 +337,7 @@ class CodexRunner:
             "ISSUE_TITLE": issue.title,
             "ISSUE_PATH": issue.path,
             "REQUIRED_DOCS": self.preset.required_docs,
+            "BUNDLE_MEMORY_DOCS": [self.bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"],
             "SKILL_PATHS": role_config.get("skills", []),
             "AGENT_PATHS": role_config.get("agents", []),
             "FIX_LIST": fix_list or ["None"],
@@ -269,6 +346,34 @@ class CodexRunner:
             "TIMESTAMP": datetime.now().isoformat(timespec="seconds"),
         }
         return render_template(self.bundle.prompts / template_name, values)
+
+    def build_self_improvement_prompt(
+        self,
+        state_path: Path,
+        board_path: Path,
+        wiki_root: Path,
+        max_lessons: int,
+        run_context_path: Path | None = None,
+        compiler_repo_root: Path | None = None,
+    ) -> str:
+        compiler_repo_root = compiler_repo_root or self.repo_root
+        values = {
+            "BUNDLE_ROOT": self.bundle.root,
+            "REPO_ROOT": self.repo_root,
+            "COMPILER_REPO_ROOT": compiler_repo_root,
+            "PRD_PATH": self.prd_path,
+            "ISSUES_INDEX": self.issues_index,
+            "LOOP_STATE_PATH": state_path,
+            "LOOP_BOARD_PATH": board_path,
+            "LOOP_LOG_ROOT": self.log_root,
+            "RUN_CONTEXT_PATH": run_context_path or "None",
+            "SELF_IMPROVEMENT_WIKI_ROOT": wiki_root,
+            "SELF_IMPROVEMENT_WIKI_SCHEMA": wiki_root.parent / "SCHEMA.md",
+            "SELF_IMPROVEMENT_WIKI_INDEX": wiki_root / "index.md",
+            "MAX_LESSONS": max_lessons,
+            "TIMESTAMP": datetime.now().isoformat(timespec="seconds"),
+        }
+        return render_template(self.bundle.prompts / "self-improvement.md", values)
 
 
 def result_to_dict(result: RoleResult | None) -> dict[str, Any]:
@@ -291,6 +396,13 @@ def list_of_strings(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)]
+
+
+def slugify_log_token(value: str | None) -> str:
+    if not value:
+        return ""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug[:48]
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:

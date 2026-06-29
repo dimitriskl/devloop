@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,16 +34,34 @@ class LoopStateWriter:
         self.add_event("run-start", {"issues": issues, "dry_run": dry_run})
         self.flush()
 
-    def record_issue_start(self, issue: Issue) -> None:
-        self.issue_state(issue).update(
+    def record_issue_start(
+        self,
+        issue: Issue,
+        attempt_label: str | None = None,
+        retry_round: int | None = None,
+    ) -> None:
+        started_at = now()
+        issue_state = self.issue_state(issue)
+        issue_state.update(
             {
                 "title": issue.title,
                 "path": str(issue.path),
-                "status": "In Progress",
-                "started_at": now(),
+                "status": f"In Progress ({attempt_label})" if attempt_label else "In Progress",
+                "last_started_at": started_at,
             }
         )
-        self.add_event("issue-start", {"issue": issue.number})
+        issue_state.setdefault("started_at", started_at)
+        if attempt_label:
+            issue_state["attempt_label"] = attempt_label
+        if retry_round is not None:
+            issue_state["retry_round"] = retry_round
+
+        event = {"issue": issue.number}
+        if attempt_label:
+            event["attempt"] = attempt_label
+        if retry_round is not None:
+            event["retry_round"] = retry_round
+        self.add_event("issue-start", event)
         self.flush()
 
     def record_issue_dry_run(self, issue: Issue) -> None:
@@ -52,19 +69,35 @@ class LoopStateWriter:
         self.add_event("issue-dry-run", {"issue": issue.number})
         self.flush()
 
-    def record_role_result(self, issue: Issue, role: str, pass_number: int, result: RoleResult) -> None:
+    def record_role_result(
+        self,
+        issue: Issue,
+        role: str,
+        pass_number: int,
+        result: RoleResult,
+        attempt_label: str | None = None,
+        retry_round: int | None = None,
+    ) -> None:
         issue_state = self.issue_state(issue)
-        issue_state.setdefault("passes", []).append(
-            {
-                "role": role,
-                "pass": pass_number,
-                "result": result_summary(result),
-                "timestamp": now(),
-            }
-        )
+        pass_entry = {
+            "role": role,
+            "pass": pass_number,
+            "result": result_summary(result),
+            "timestamp": now(),
+        }
+        if attempt_label:
+            pass_entry["attempt"] = attempt_label
+        if retry_round is not None:
+            pass_entry["retry_round"] = retry_round
+        issue_state.setdefault("passes", []).append(pass_entry)
+        event = {"issue": issue.number, "role": role, "pass": pass_number, "status": result.status}
+        if attempt_label:
+            event["attempt"] = attempt_label
+        if retry_round is not None:
+            event["retry_round"] = retry_round
         self.add_event(
             "role-result",
-            {"issue": issue.number, "role": role, "pass": pass_number, "status": result.status},
+            event,
         )
         self.flush()
 
@@ -74,6 +107,8 @@ class LoopStateWriter:
         coder: RoleResult,
         reviewer: RoleResult,
         qa: RoleResult,
+        attempt_label: str | None = None,
+        retry_round: int | None = None,
     ) -> None:
         issue_state = self.issue_state(issue)
         issue_state["status"] = "Completed"
@@ -84,17 +119,64 @@ class LoopStateWriter:
         )
         issue_state["review_summary"] = reviewer.summary
         issue_state["qa_summary"] = qa.summary
-        self.add_event("issue-completed", {"issue": issue.number})
+        if attempt_label:
+            issue_state["completed_attempt"] = attempt_label
+        if retry_round is not None:
+            issue_state["completed_retry_round"] = retry_round
+        event = {"issue": issue.number}
+        if attempt_label:
+            event["attempt"] = attempt_label
+        if retry_round is not None:
+            event["retry_round"] = retry_round
+        self.add_event("issue-completed", event)
         self.flush()
 
-    def record_issue_blocked(self, issue: Issue, gate: str, result: RoleResult) -> None:
+    def record_issue_blocked(
+        self,
+        issue: Issue,
+        gate: str,
+        result: RoleResult,
+        attempt_label: str | None = None,
+        retry_round: int | None = None,
+    ) -> None:
         issue_state = self.issue_state(issue)
         issue_state["status"] = "Blocked"
         issue_state["blocked_at"] = now()
         issue_state["blocked_gate"] = gate
         issue_state["blocked_summary"] = result.summary
         issue_state["fix_list"] = result.fix_list
-        self.add_event("issue-blocked", {"issue": issue.number, "gate": gate})
+        if attempt_label:
+            issue_state["blocked_attempt"] = attempt_label
+        if retry_round is not None:
+            issue_state["blocked_retry_round"] = retry_round
+        event = {"issue": issue.number, "gate": gate}
+        if attempt_label:
+            event["attempt"] = attempt_label
+        if retry_round is not None:
+            event["retry_round"] = retry_round
+        self.add_event("issue-blocked", event)
+        self.flush()
+
+    def record_blocked_retry_round_start(self, retry_round: int, issues: list[str]) -> None:
+        self.state["blocked_retry"] = {
+            "current_round": retry_round,
+            "remaining_issues": issues,
+            "updated_at": now(),
+        }
+        self.add_event("blocked-retry-start", {"retry_round": retry_round, "issues": issues})
+        self.flush()
+
+    def record_self_improvement_wiki_result(self, wiki_root: Path, result: RoleResult) -> None:
+        self.state["self_improvement_wiki"] = {
+            "path": str(wiki_root),
+            "status": result.status,
+            "summary": result.summary,
+            "changed_files": result.changed_files,
+            "findings": result.findings,
+            "residual_risks": result.residual_risks,
+            "updated_at": now(),
+        }
+        self.add_event("self-improvement-wiki", {"status": result.status})
         self.flush()
 
     def issue_state(self, issue: Issue) -> dict[str, Any]:
@@ -145,7 +227,42 @@ def render_board(state: dict[str, Any]) -> str:
 
     lines.extend(["", "## Events", ""])
     for event in state.get("events", []):
-        lines.append(f"- {event.get('timestamp')} `{event.get('type')}` issue={event.get('issue', '')} status={event.get('status', '')}")
+        details = [
+            f"issue={event.get('issue', '')}",
+            f"status={event.get('status', '')}",
+        ]
+        if event.get("retry_round") is not None:
+            details.append(f"retry_round={event.get('retry_round')}")
+        if event.get("attempt"):
+            details.append(f"attempt={event.get('attempt')}")
+        if event.get("issues"):
+            details.append(f"issues={', '.join(event.get('issues', []))}")
+        lines.append(f"- {event.get('timestamp')} `{event.get('type')}` {' '.join(details)}")
+
+    blocked_retry = state.get("blocked_retry")
+    if blocked_retry:
+        lines.extend(
+            [
+                "",
+                "## Blocked Retry",
+                "",
+                f"Current round: `{blocked_retry.get('current_round', '')}`",
+                f"Remaining issues: `{', '.join(blocked_retry.get('remaining_issues', []))}`",
+            ]
+        )
+
+    self_improvement_wiki = state.get("self_improvement_wiki")
+    if self_improvement_wiki:
+        lines.extend(
+            [
+                "",
+                "## Self-Improvement Wiki",
+                "",
+                f"Path: `{self_improvement_wiki.get('path', '')}`",
+                f"Status: `{self_improvement_wiki.get('status', '')}`",
+                f"Summary: {self_improvement_wiki.get('summary', '')}",
+            ]
+        )
 
     return "\n".join(lines) + "\n"
 
@@ -198,4 +315,3 @@ def mark_acceptance_criteria(text: str) -> str:
 
 def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
-

@@ -43,6 +43,16 @@ Ubuntu/Linux:
 The default run processes one pending issue. Add `--all` to continue through
 all pending issues in dependency order.
 
+If any issue blocks, the runner retries blocked issues at the end with clean
+Codex attempts and compact blocker context. Tune this with
+`--blocked-retry-rounds`, `--blocked-retry-max-passes`, or disable it with
+`--no-blocked-retry`.
+
+After a real run, Dev Loop compiles the most important durable lessons into its
+own self-improvement wiki at `docs/devloop-self-improvement/wiki/`. Use
+`--no-self-improvement-wiki` to skip that post-run update, or
+`--self-improvement-wiki-path` to choose a different bundle-relative path.
+
 ## Documentation
 
 All detailed documentation is under `docs/`:
@@ -51,10 +61,8 @@ All detailed documentation is under `docs/`:
 - `docs/install-windows.md`
 - `docs/install-ubuntu.md`
 - `docs/usage.md`
+- `docs/interactive-runner.md`
 - `docs/worktrees.md`
 - `docs/skills-and-agents.md`
 - `docs/mcp-setup.md`
 - `docs/troubleshooting.md`
-
-
-

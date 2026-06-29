@@ -16,7 +16,8 @@ codex --version
 ## The runner cannot find issues
 
 The `--issues` path must point to a Markdown README/index containing links to
-local issue Markdown files.
+local issue Markdown files under the same issue folder. Links outside that
+folder, such as `../PRD.md`, are ignored and will not be selected as issues.
 
 ## The runner returns to the shell with no visible progress
 
@@ -51,6 +52,23 @@ If stderr mentions `unexpected argument '-a'`, update devloop and rerun.
 The runner marks the role `BLOCKED`. Inspect `.loop.logs/*last-message*`,
 `.loop.logs/*stdout*`, and `.loop.logs/*stderr*`.
 
+## Codex output crashes with cp1253 UnicodeDecodeError
+
+Older builds let Python decode captured Codex output with the active Windows
+console code page. If stderr mentions `encodings\cp1253.py` followed by
+`NoneType found`, update devloop and rerun. Captured subprocess output should be
+decoded as UTF-8 with replacement.
+
+## Self-improvement wiki update fails
+
+The post-run self-improvement compiler is non-fatal. The issue loop result still
+stands, and the failure is recorded in `README.loop.state.json` under
+`self_improvement_wiki`.
+Inspect
+`docs/devloop-self-improvement/.compiler-runs/self-improvement-compiler.stderr.txt`
+in the Dev Loop bundle and rerun with `--no-self-improvement-wiki` if you need
+a run with no documentation changes.
+
 ## Worktree creation fails
 
 Run:
@@ -70,5 +88,3 @@ Check the generated Codex config snippet paths and verify the SQL MCP builds:
 ```powershell
 dotnet build .\mcp\sql_diagnostics\DevLoop.SqlDiagnosticsMcp.csproj -c Release
 ```
-
-

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from .subprocess_utils import run_captured_text
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,7 @@ class Issue:
         if not path.is_file():
             return False
         text = path.read_text(encoding="utf-8")
-        return bool(re.search(r"(?im)^Completed:\s*\[[xX]\]", text))
+        return is_completed_text(text)
 
 
 LINK_PATTERN = re.compile(r"\[(?P<title>[^\]]+)\]\((?P<href>[^)]+\.md)\)")
@@ -26,12 +27,9 @@ NUMBER_PATTERN = re.compile(r"(?P<number>\d{1,5})")
 
 
 def find_repo_root(start: Path) -> Path:
-    result = subprocess.run(
+    result = run_captured_text(
         ["git", "rev-parse", "--show-toplevel"],
         cwd=start,
-        text=True,
-        capture_output=True,
-        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Could not find git repository root from {start}: {result.stderr.strip()}")
@@ -41,11 +39,17 @@ def find_repo_root(start: Path) -> Path:
 def parse_issue_index(index_path: Path) -> list[Issue]:
     text = index_path.read_text(encoding="utf-8")
     issues: list[Issue] = []
+    issue_root = index_path.parent.resolve()
 
     for match in LINK_PATTERN.finditer(text):
         href = match.group("href")
         title = match.group("title").strip()
-        issue_path = (index_path.parent / href).resolve()
+        issue_path = (issue_root / href).resolve()
+
+        try:
+            issue_path.relative_to(issue_root)
+        except ValueError:
+            continue
 
         if not issue_path.is_file():
             continue
@@ -91,11 +95,30 @@ def select_issues(issues: list[Issue], run_all: bool, start_issue: str | None) -
             raise ValueError(f"No issue matches --start-issue {start_issue}")
 
         start = candidates[0]
-        selected = [issue for issue in issues if issues.index(issue) >= issues.index(start) and not issue.completed]
-        return selected if run_all else [start]
+        start_index = issues.index(start)
+        selected = [issue for issue in issues[start_index:] if not issue.completed]
+        return selected if run_all else selected[:1]
 
     if run_all:
         return pending
 
     return pending[:1]
 
+
+def is_completed_text(text: str) -> bool:
+    if re.search(r"(?im)^Completed:\s*\[[xX]\]", text):
+        return True
+
+    notes_match = re.search(r"(?ims)^## Implementation Notes\b(?P<body>.*?)(?=^## |\Z)", text)
+    if not notes_match:
+        return False
+
+    for line in notes_match.group("body").splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("completed:"):
+            continue
+        value = stripped.split(":", 1)[1].strip()
+        if value and not re.fullmatch(r"\[\s*\]", value):
+            return True
+
+    return False
