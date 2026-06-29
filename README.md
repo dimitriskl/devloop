@@ -113,7 +113,8 @@ The interactive planning loop uses:
   terms, and ADR decisions
 - `to-prd` for the canonical local PRD
 - `to-issues` for the local Markdown issue pack consumed by `devloop`
-
+- those skill are written by https://github.com/mattpocock
+  
 Codex agent-reference files live under `agents/codex/`. They are extra role
 guides read by the prompts; the canonical automation still comes from the
 runner, presets, prompts, and `skills/codex/`.
