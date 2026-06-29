@@ -25,8 +25,8 @@
         "skills/codex/angular-typescript-developer/SKILL.md"
       ],
       "agents": [
-        "agents/claude/csharp-expert-developer.md",
-        "agents/claude/angular-typescript-developer.md"
+        "agents/codex/csharp-expert-developer.md",
+        "agents/codex/angular-typescript-developer.md"
       ]
     },
     "reviewer": {
@@ -34,7 +34,7 @@
         "skills/codex/senior-code-reviewer/SKILL.md"
       ],
       "agents": [
-        "agents/claude/senior-code-reviewer.md"
+        "agents/codex/senior-code-reviewer.md"
       ]
     },
     "qa": {
@@ -42,7 +42,7 @@
         "skills/codex/qa-automation-engineer/SKILL.md"
       ],
       "agents": [
-        "agents/claude/qa-automation-engineer.md"
+        "agents/codex/qa-automation-engineer.md"
       ]
     }
   }

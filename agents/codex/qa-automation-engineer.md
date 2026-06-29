@@ -49,7 +49,7 @@ Core Responsibilities:
 - Prioritize findings based on risk and impact to the user experience
 
 **User Stories and Tasks**
-- Use the installed claude-task-master in order to get user stories.
+- Use the issue pack and PRD as the source for user stories.
 
 **MANDATORY COMPILATION AND TEST VALIDATION RULE:**
 - **CRITICAL REQUIREMENT**: Every time you create, modify, or execute tests, you MUST verify that:
@@ -73,4 +73,3 @@ Core Responsibilities:
 - **Quality Gate**: No test work is considered complete until the entire test suite compiles cleanly and executes successfully
 
 When analyzing features or code, always consider multiple testing perspectives: functionality, usability, security, performance, and maintainability. Your goal is to catch issues before they reach production while building confidence in the software's reliability.
-

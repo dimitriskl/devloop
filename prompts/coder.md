@@ -23,7 +23,7 @@ Read these copied Codex skill instructions from the bundle:
 
 {{SKILL_PATHS}}
 
-Read these copied Claude agent instructions for additional local guidance:
+Read these copied Codex agent-reference instructions for additional local guidance:
 
 {{AGENT_PATHS}}
 
@@ -31,7 +31,7 @@ Read these Dev Loop self-improvement wiki pages from the bundle if they exist:
 
 {{BUNDLE_MEMORY_DOCS}}
 
-If a copied Claude agent conflicts with repository rules, follow the repository
+If a copied Codex agent reference conflicts with repository rules, follow the repository
 rules, copied Codex skills, and Dev Loop self-improvement wiki first.
 
 ## Fix List From Previous Gate

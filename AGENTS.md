@@ -4,7 +4,7 @@
 
 This repository contains a portable Dev Loop runner for local PRD and issue-pack workflows. The Python runner lives in `src/devloop/`: `cli.py` orchestrates runs, `issue_pack.py` parses issues, `codex_runner.py` invokes Codex, `state.py` writes loop state, and `worktree.py` handles worktrees.
 
-Wrapper scripts are in `bin/`. Documentation is under `docs/`. Prompt templates, schemas, and presets are in `prompts/`, `schemas/`, and `presets/`. Bundled Codex skills and Claude agent references live in `skills/codex/` and `agents/claude/`. The optional SQL diagnostics MCP server is under `mcp/sql_diagnostics/`.
+Wrapper scripts are in `bin/`. Documentation is under `docs/`. Prompt templates, schemas, and presets are in `prompts/`, `schemas/`, and `presets/`. Bundled Codex skills and Codex agent references live in `skills/codex/` and `agents/codex/`. The optional SQL diagnostics MCP server is under `mcp/sql_diagnostics/`.
 
 ## Build, Test, and Development Commands
 
