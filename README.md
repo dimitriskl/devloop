@@ -135,6 +135,7 @@ All detailed documentation is under `docs/`:
 - `docs/new-pc-setup.md`
 - `docs/install-windows.md`
 - `docs/install-ubuntu.md`
+- `docs/install-macos.md`
 - `docs/usage.md`
 - `docs/interactive-runner.md`
 - `docs/worktrees.md`
