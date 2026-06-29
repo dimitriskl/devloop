@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from .subprocess_utils import run_captured_text
 
 
 @dataclass(frozen=True)
@@ -55,15 +56,11 @@ def resolve_worktree(
         print(f"[dry-run] Would run in {source_repo}: {' '.join(command)}")
         return WorktreeSelection(repo_root=worktree_path, created=False)
 
-    result = subprocess.run(
+    result = run_captured_text(
         command,
         cwd=source_repo,
-        text=True,
-        capture_output=True,
-        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
 
     return WorktreeSelection(repo_root=worktree_path.resolve(), created=True)
-

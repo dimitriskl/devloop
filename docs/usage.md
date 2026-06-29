@@ -1,5 +1,27 @@
 # Usage
 
+## Interactive plan-to-development flow
+
+Use `devloop-plan` when you want the runner to start from an idea, drive an
+interactive Codex planning session, create `prd/` and `issues/` artifacts, and
+then offer to start the existing implementation loop.
+
+Windows:
+
+```powershell
+.\bin\devloop-plan.ps1 --repo C:\LocalCode\eConnectorV2
+```
+
+Ubuntu/macOS:
+
+```bash
+./bin/devloop-plan.sh --repo /path/to/project
+```
+
+See `docs/interactive-runner.md` for the full flow.
+
+## Existing PRD and issue pack
+
 Run one pending issue:
 
 Windows:
@@ -10,21 +32,9 @@ Windows:
 
 Ubuntu/Linux:
 
-````bash
-./bin/devloop.sh \
-  --prd /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/production-diagnostic-collector-prd.md \
-  --issues /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/issues/README.md```
-
-./bin/devloop.sh \
-  --prd /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/production-diagnostic-collector-prd.md \
-  --issues /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/issues/README.md \
-  --no-worktree
-
-  ./bin/devloop.sh \
-  --prd /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/production-diagnostic-collector-prd.md \
-  --issues /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/issues/README.md \
-  --no-worktree
-
+```bash
+./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md
+```
 
 Run every pending issue:
 
@@ -32,7 +42,7 @@ Windows:
 
 ```powershell
 .\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --all
-````
+```
 
 Ubuntu/Linux:
 
@@ -40,11 +50,9 @@ Ubuntu/Linux:
 ./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md --all
 ```
 
-./bin/devloop.sh \
- --prd /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/production-diagnostic-collector-prd.md \
- --issues /home/dimitris/code/diagnostics-collector/docs/diagnostic-collector/issues/README.md \
- --all \
- --no-worktree
+Completed issue files are skipped. With `--all`, the runner selects only blocked
+or unfinished issues. With `--start-issue`, if the requested issue is already
+completed, the runner starts at the next unfinished issue in the index.
 
 Start at a specific issue:
 
@@ -58,6 +66,21 @@ Ubuntu/Linux:
 
 ```bash
 ./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md --start-issue 0004
+```
+
+Blocked issues are retried after the normal run. Each retry round starts a clean
+Codex attempt for one blocked issue at a time and passes only a compact blocker
+summary into the coder prompt. Defaults are three retry rounds and one pass per
+clean retry.
+
+```powershell
+.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --all --blocked-retry-rounds 5
+```
+
+Disable blocked retries:
+
+```powershell
+.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --all --no-blocked-retry
 ```
 
 Preview prompts without invoking Codex:
@@ -85,3 +108,27 @@ Completed issues are updated in place:
 - `Completed: [x]`
 - checked acceptance criteria
 - appended `## Implementation Notes`
+
+After a real run, the runner updates a Markdown self-improvement wiki in the
+Dev Loop bundle:
+
+- `docs/devloop-self-improvement/SCHEMA.md`
+- `docs/devloop-self-improvement/wiki/index.md`
+- `docs/devloop-self-improvement/wiki/lessons-learned.md`
+
+The compiler promotes durable lessons, such as user instructions, implementation
+lessons, bugs and fixes, blocked causes, repeated reviewer/QA findings,
+environment mistakes, and reusable repo patterns. It skips raw logs and secrets.
+Dry runs do not update the wiki.
+
+Disable the post-run memory update:
+
+```powershell
+.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --no-self-improvement-wiki
+```
+
+Use a different bundle-relative wiki path:
+
+```powershell
+.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --self-improvement-wiki-path docs\custom-self-improvement\wiki
+```

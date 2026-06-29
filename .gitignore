@@ -13,6 +13,7 @@ venv/
 appsettings.local.json
 .env
 .env.*
+docs/devloop-self-improvement/.compiler-runs/
 
 # IDE / OS
 .vs/
