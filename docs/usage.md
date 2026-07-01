@@ -20,10 +20,12 @@ Ubuntu/macOS:
 
 See `docs/interactive-runner.md` for the full flow.
 
-When `--repo` is omitted, the first run has no target default. After you select a
-valid target checkout, later runs show that checkout as the default. When
-`--goal` is omitted, type the change request inside Codex; arrow-key editing and
-Alt+V image paste are available when your installed Codex CLI supports them.
+When `--repo` is omitted, the first run has no target default. If the selected
+folder does not exist, the runner asks whether to create it, then asks whether to
+initialize Git in the new folder so it can be used as a target checkout. After
+you select a valid target checkout, later runs show that checkout as the default.
+When `--goal` is omitted, type the change request inside Codex; arrow-key editing
+and Alt+V image paste are available when your installed Codex CLI supports them.
 
 ## Existing PRD and issue pack
 

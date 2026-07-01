@@ -97,14 +97,21 @@ def choose_target_repo(repo_arg: str | None) -> Path:
             else:
                 raw = input(f"Target project root [{default}]: ").strip()
         candidate = (Path(raw).expanduser() if raw else default).resolve()
+        created = ensure_target_directory(candidate)
         if not candidate.is_dir():
-            print(f"Directory not found: {candidate}", file=sys.stderr)
             repo_arg = None
             continue
 
         try:
             repo_root = git_repo_root(candidate)
         except RuntimeError as exc:
+            if created:
+                print("The target project must be a Git checkout before Dev Loop can continue.", file=sys.stderr)
+                if ask_yes_no("Initialize a Git repository in the new folder?", default=True):
+                    run_git(["init"], cwd=candidate)
+                    repo_root = git_repo_root(candidate)
+                    save_last_target_repo(repo_root)
+                    return repo_root
             print(str(exc), file=sys.stderr)
             repo_arg = None
             continue
@@ -113,6 +120,28 @@ def choose_target_repo(repo_arg: str | None) -> Path:
             print(f"Using Git repo root: {repo_root}")
         save_last_target_repo(repo_root)
         return repo_root
+
+
+def ensure_target_directory(path: Path) -> bool:
+    if path.is_dir():
+        return False
+
+    if path.exists():
+        print(f"Path exists but is not a directory: {path}", file=sys.stderr)
+        return False
+
+    print(f"Directory not found: {path}", file=sys.stderr)
+    if not ask_yes_no("Create this project folder?", default=False):
+        return False
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"Could not create project folder {path}: {exc}", file=sys.stderr)
+        return False
+
+    print(f"Created project folder: {path}")
+    return True
 
 
 def load_last_target_repo() -> Path | None:
