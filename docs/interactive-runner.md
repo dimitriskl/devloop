@@ -19,8 +19,11 @@ the Dev Loop implementation runner with the generated PRD and issue-pack paths.
 
 ## Flow
 
-1. Select the target checkout. The first run has no default. After a valid
-   selection, that checkout is saved and shown as the default on later runs.
+1. Select the target checkout. The first run has no default. If the folder does
+   not exist, the runner asks whether to create it, then asks whether to
+   initialize Git in the new folder so it can be used as a target checkout.
+   After a valid selection, that checkout is saved and shown as the default on
+   later runs.
 2. Choose current branch, a new branch, or a new worktree.
 3. Codex opens interactively. If `--goal` was not passed, describe the feature
    or fix inside Codex. Use the normal Codex input behavior, including

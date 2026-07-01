@@ -81,11 +81,13 @@ Ubuntu/macOS:
 
 `devloop-plan` asks for the target checkout. On the first run there is no target
 default; after a valid selection it saves that checkout and shows it as the
-default on later runs. It then asks whether to use the current branch, create a
-new branch, or create a new worktree for planning. If you do not pass `--goal`,
-the change request is typed inside Codex, so normal Codex input features such as
-arrow-key editing and Alt+V image paste are available when your installed CLI
-supports them. The planning session follows this sequence:
+default on later runs. If the selected folder does not exist, the runner asks
+whether to create it, then asks whether to initialize Git in the new folder so it
+can be used as a target checkout. It then asks whether to use the current branch,
+create a new branch, or create a new worktree for planning. If you do not pass
+`--goal`, the change request is typed inside Codex, so normal Codex input
+features such as arrow-key editing and Alt+V image paste are available when your
+installed CLI supports them. The planning session follows this sequence:
 
 1. `$grill-with-docs` sharpens the change through questions and records domain
    terms or ADRs when justified.
