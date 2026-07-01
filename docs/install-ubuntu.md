@@ -11,6 +11,7 @@ For a plain setup guide, start with `docs/new-pc-setup.md`.
 
 ```bash
 chmod +x ./bin/devloop.sh
+chmod +x ./bin/devloop-plan.sh
 chmod +x ./install/*.sh
 ```
 
@@ -18,6 +19,7 @@ chmod +x ./install/*.sh
 
 ```bash
 chmod +x ./bin/devloop.sh
+chmod +x ./bin/devloop-plan.sh
 chmod +x ./install/*.sh
 ./install/install-skills.sh
 ```
@@ -29,5 +31,5 @@ python3 --version
 codex --version
 git --version
 ./bin/devloop.sh --help
+./bin/devloop-plan.sh --help
 ```
-

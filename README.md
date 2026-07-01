@@ -16,7 +16,7 @@ Dev Loop has two entrypoints:
   session, creates the PRD and issue pack, then offers to start `devloop`.
 
 Use `devloop-plan` when you still need to decide what to build. Use `devloop`
-when `prd/<change>.md` and `issues/<change>/README.md` already exist.
+when `prd/<change>/<change>.md` and `prd/<change>/issues/README.md` already exist.
 
 ## First Setup On A New PC
 
@@ -37,8 +37,8 @@ Windows:
 
 ```powershell
 .\bin\devloop.ps1 `
-  --prd E:\path\to\feature-prd.md `
-  --issues E:\path\to\issues\README.md `
+  --prd E:\path\to\prd\feature\feature.md `
+  --issues E:\path\to\prd\feature\issues\README.md `
   --preset .\presets\generic-minimal.json
 ```
 
@@ -46,8 +46,8 @@ Ubuntu/Linux:
 
 ```bash
 ./bin/devloop.sh \
-  --prd /path/to/feature-prd.md \
-  --issues /path/to/issues/README.md \
+  --prd /path/to/prd/feature/feature.md \
+  --issues /path/to/prd/feature/issues/README.md \
   --preset ./presets/generic-minimal.json
 ```
 
@@ -60,9 +60,10 @@ Codex attempts and compact blocker context. Tune this with
 `--no-blocked-retry`.
 
 After a real run, Dev Loop compiles the most important durable lessons into its
-own self-improvement wiki at `docs/devloop-self-improvement/wiki/`. Use
-`--no-self-improvement-wiki` to skip that post-run update, or
-`--self-improvement-wiki-path` to choose a different bundle-relative path.
+own self-improvement wiki at `docs/devloop-self-improvement/wiki/`. The role
+agents read that wiki by default. Use `--no-self-improvement-wiki` to skip both
+wiki reading and post-run updates, or `--self-improvement-wiki-path` to choose a
+different bundle-relative path.
 
 ## Quick Start: Plan Then Build
 
@@ -78,21 +79,30 @@ Ubuntu/macOS:
 ./bin/devloop-plan.sh --repo /path/to/project
 ```
 
-`devloop-plan` asks whether to use the current branch, create a new branch, or
-create a new worktree. It then asks what you want to achieve and starts Codex
-interactively. The planning session follows this sequence:
+`devloop-plan` asks for the target checkout. On the first run there is no target
+default; after a valid selection it saves that checkout and shows it as the
+default on later runs. It then asks whether to use the current branch, create a
+new branch, or create a new worktree for planning. If you do not pass `--goal`,
+the change request is typed inside Codex, so normal Codex input features such as
+arrow-key editing and Alt+V image paste are available when your installed CLI
+supports them. The planning session follows this sequence:
 
 1. `$grill-with-docs` sharpens the change through questions and records domain
    terms or ADRs when justified.
-2. `$to-prd` writes `prd/<change-name>.md`.
-3. `$to-issues` writes `issues/<change-name>/README.md` and numbered issue
+2. `$to-prd` writes `prd/<change-name>/<change-name>.md`.
+3. `$to-issues` writes `prd/<change-name>/issues/README.md` and numbered issue
    files with real Markdown links.
-4. The wrapper detects those paths and asks whether to run `devloop`.
+4. The wrapper detects those paths, asks whether to continue to development,
+   and collects start issue, all-issues mode, worktree, branch, and wiki choices.
+
+Development defaults to a dedicated implementation worktree and using the Dev
+Loop self-improvement wiki. When a run finishes successfully, the runner asks
+whether to merge the implementation branch or worktree into another branch.
 
 The final handoff command is equivalent to:
 
 ```powershell
-.\bin\devloop.ps1 --prd C:\path\to\project\prd\example.md --issues C:\path\to\project\issues\example\README.md --start-issue 0001 --all --no-worktree --no-self-improvement-wiki
+.\bin\devloop.ps1 --prd C:\path\to\project\prd\example\example.md --issues C:\path\to\project\prd\example\issues\README.md --start-issue 0001 --all --create-worktree --worktree-path C:\path\to\project-example-dev --branch-name devloop/example
 ```
 
 ## How Skills Are Used

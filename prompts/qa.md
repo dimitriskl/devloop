@@ -12,6 +12,10 @@ You are the QA automation gate for a local PRD issue loop.
 - Issue file: `{{ISSUE_PATH}}`
 - Pass: `{{PASS_NUMBER}}`
 
+## Overall Goal
+
+{{RUN_GOAL}}
+
 ## Required Reading
 
 Read the issue file, PRD, changed tests, changed production files, and relevant
@@ -24,6 +28,9 @@ Read these copied QA skill/agent instructions:
 {{SKILL_PATHS}}
 
 {{AGENT_PATHS}}
+
+You are one role in a multi-agent loop. Validate the implementation after the
+coding and senior review gates have passed.
 
 Read these Dev Loop self-improvement wiki pages from the bundle if they exist:
 

@@ -3,8 +3,8 @@
 ## Interactive plan-to-development flow
 
 Use `devloop-plan` when you want the runner to start from an idea, drive an
-interactive Codex planning session, create `prd/` and `issues/` artifacts, and
-then offer to start the existing implementation loop.
+interactive Codex planning session, create `prd/<change>/` artifacts, and then
+offer to start the existing implementation loop.
 
 Windows:
 
@@ -20,6 +20,11 @@ Ubuntu/macOS:
 
 See `docs/interactive-runner.md` for the full flow.
 
+When `--repo` is omitted, the first run has no target default. After you select a
+valid target checkout, later runs show that checkout as the default. When
+`--goal` is omitted, type the change request inside Codex; arrow-key editing and
+Alt+V image paste are available when your installed Codex CLI supports them.
+
 ## Existing PRD and issue pack
 
 Run one pending issue:
@@ -27,13 +32,13 @@ Run one pending issue:
 Windows:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md
 ```
 
 Ubuntu/Linux:
 
 ```bash
-./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md
+./bin/devloop.sh --prd /home/you/repo/prd/feature/feature.md --issues /home/you/repo/prd/feature/issues/README.md
 ```
 
 Run every pending issue:
@@ -41,13 +46,13 @@ Run every pending issue:
 Windows:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --all
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --all
 ```
 
 Ubuntu/Linux:
 
 ```bash
-./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md --all
+./bin/devloop.sh --prd /home/you/repo/prd/feature/feature.md --issues /home/you/repo/prd/feature/issues/README.md --all
 ```
 
 Completed issue files are skipped. With `--all`, the runner selects only blocked
@@ -59,13 +64,13 @@ Start at a specific issue:
 Windows:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --start-issue 0004
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --start-issue 0004
 ```
 
 Ubuntu/Linux:
 
 ```bash
-./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md --start-issue 0004
+./bin/devloop.sh --prd /home/you/repo/prd/feature/feature.md --issues /home/you/repo/prd/feature/issues/README.md --start-issue 0004
 ```
 
 Blocked issues are retried after the normal run. Each retry round starts a clean
@@ -74,13 +79,13 @@ summary into the coder prompt. Defaults are three retry rounds and one pass per
 clean retry.
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --all --blocked-retry-rounds 5
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --all --blocked-retry-rounds 5
 ```
 
 Disable blocked retries:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --all --no-blocked-retry
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --all --no-blocked-retry
 ```
 
 Preview prompts without invoking Codex:
@@ -88,13 +93,13 @@ Preview prompts without invoking Codex:
 Windows:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --dry-run --no-worktree
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --dry-run --no-worktree
 ```
 
 Ubuntu/Linux:
 
 ```bash
-./bin/devloop.sh --prd /home/you/repo/docs/feature/prd.md --issues /home/you/repo/docs/feature/issues/README.md --dry-run --no-worktree
+./bin/devloop.sh --prd /home/you/repo/prd/feature/feature.md --issues /home/you/repo/prd/feature/issues/README.md --dry-run --no-worktree
 ```
 
 The runner creates loop state next to the issue README in the active worktree:
@@ -109,8 +114,8 @@ Completed issues are updated in place:
 - checked acceptance criteria
 - appended `## Implementation Notes`
 
-After a real run, the runner updates a Markdown self-improvement wiki in the
-Dev Loop bundle:
+After a real run, the runner reads and updates a Markdown self-improvement wiki
+in the Dev Loop bundle by default:
 
 - `docs/devloop-self-improvement/SCHEMA.md`
 - `docs/devloop-self-improvement/wiki/index.md`
@@ -121,14 +126,19 @@ lessons, bugs and fixes, blocked causes, repeated reviewer/QA findings,
 environment mistakes, and reusable repo patterns. It skips raw logs and secrets.
 Dry runs do not update the wiki.
 
-Disable the post-run memory update:
+Disable wiki reading and the post-run memory update:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --no-self-improvement-wiki
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --no-self-improvement-wiki
 ```
 
 Use a different bundle-relative wiki path:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\feature\prd.md --issues E:\repo\docs\feature\issues\README.md --self-improvement-wiki-path docs\custom-self-improvement\wiki
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --self-improvement-wiki-path docs\custom-self-improvement\wiki
 ```
+
+In interactive mode, development defaults to a dedicated implementation
+worktree. After all selected issues pass coder, senior review, and QA gates, the
+runner asks whether to merge the implementation branch or worktree into another
+branch. It skips automatic merge if either checkout has uncommitted changes.

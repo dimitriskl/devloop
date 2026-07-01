@@ -10,18 +10,18 @@ Break a plan into independently-grabbable issues using vertical slices (tracer b
 
 ## Local Artifact Rules
 
-Create issue packs under the project root's `issues/` folder:
+Create issue packs inside the PRD-specific folder:
 
-- Use `<project-root>/issues/<prd-file-stem>/`.
+- Use `<project-root>/prd/<prd-file-stem>/issues/`.
 - Derive `<prd-file-stem>` from the source PRD filename without `.md`.
-- Example: `prd/stock-version-conflict-retry.md` produces `issues/stock-version-conflict-retry/`.
+- Example: `prd/stock-version-conflict-retry/stock-version-conflict-retry.md` produces `prd/stock-version-conflict-retry/issues/`.
 - Create the issue-pack folder if it does not exist.
-- Write an index at `issues/<prd-file-stem>/README.md`.
+- Write an index at `prd/<prd-file-stem>/issues/README.md`.
 - Write issue files in the same folder using numbered kebab-case names, for example `0001-add-retry-boundary.md`.
 - The README must use real Markdown links to the issue files, for example `[Issue 0001: Add Retry Boundary](./0001-add-retry-boundary.md)`.
 - If the issue pack already exists, read it first and repair or extend it in place; do not silently overwrite existing issue files.
 
-If the source is not a PRD file, choose a concise kebab-case pack name from the plan title and still use `issues/<pack-name>/`.
+If the source is not a PRD file, choose a concise kebab-case pack name from the plan title and still use `prd/<pack-name>/issues/`.
 
 ## Process
 
