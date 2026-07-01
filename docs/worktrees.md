@@ -6,7 +6,7 @@ choose one.
 Interactive mode:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\design\docs\prd.md --issues E:\design\docs\issues\README.md
+.\bin\devloop.ps1 --prd E:\design\prd\feature\feature.md --issues E:\design\prd\feature\issues\README.md
 ```
 
 If worktree flags are omitted, the runner asks:
@@ -15,12 +15,16 @@ If worktree flags are omitted, the runner asks:
 2. The implementation worktree path.
 3. The implementation branch name.
 
+The interactive default is yes. If the PRD and issue pack were created but not
+committed yet, the runner copies the PRD folder or legacy PRD/issue files into
+the implementation worktree before starting coder/reviewer/QA passes.
+
 Non-interactive creation:
 
 ```powershell
 .\bin\devloop.ps1 `
-  --prd E:\design\docs\prd.md `
-  --issues E:\design\docs\issues\README.md `
+  --prd E:\design\prd\feature\feature.md `
+  --issues E:\design\prd\feature\issues\README.md `
   --create-worktree `
   --worktree-path E:\worktrees\my-feature-impl `
   --branch-name impl/my-feature-0001 `
@@ -30,9 +34,10 @@ Non-interactive creation:
 Use the current worktree directly:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\docs\prd.md --issues E:\repo\docs\issues\README.md --no-worktree
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --no-worktree
 ```
 
-The runner does not commit, push, merge, or delete worktrees.
-
-
+The runner does not commit, push, or delete worktrees. After a successful
+development run, it asks whether to merge the implementation branch or worktree
+into another branch. Automatic merge is skipped when the implementation or target
+checkout has uncommitted changes.

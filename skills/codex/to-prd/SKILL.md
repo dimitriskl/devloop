@@ -8,15 +8,17 @@ This skill takes the current conversation context and codebase understanding and
 
 ## Local Artifact Rules
 
-Save every PRD as a Markdown file under the project root's `prd/` folder:
+Save every PRD in its own folder under the project root's `prd/` folder:
 
-- Use `<project-root>/prd/<change-name>.md`.
+- Use `<project-root>/prd/<change-name>/<change-name>.md`.
 - Derive `<change-name>` from the requested change or feature name.
-- Use lowercase kebab-case, for example `stock-version-conflict-retry.md`.
+- Use lowercase kebab-case, for example `stock-version-conflict-retry/stock-version-conflict-retry.md`.
 - Create `prd/` if it does not exist.
+- Create the PRD-specific folder if it does not exist.
 - Do not place new PRDs under ad hoc `docs/<feature>/` or tool-specific folders unless the user explicitly overrides the location.
+- Keep PRD-specific execution artifacts inside this folder, including the local issue pack and loop state.
 
-After writing the PRD, report the exact PRD path. The companion `$to-issues` skill must use the PRD file stem as the issue-pack subfolder name, for example `issues/stock-version-conflict-retry/`.
+After writing the PRD, report the exact PRD path. The companion `$to-issues` skill must create the issue pack inside the same PRD folder, for example `prd/stock-version-conflict-retry/issues/`.
 
 ## Process
 
@@ -26,7 +28,7 @@ After writing the PRD, report the exact PRD path. The companion `$to-issues` ski
 
 Check with the user that these seams match their expectations.
 
-3. Write the PRD using the template below, then save it to the local PRD path from the Local Artifact Rules. If an external issue tracker is explicitly configured and requested, you may also publish there, but the local `prd/<change-name>.md` file remains the canonical artifact.
+3. Write the PRD using the template below, then save it to the local PRD path from the Local Artifact Rules. If an external issue tracker is explicitly configured and requested, you may also publish there, but the local `prd/<change-name>/<change-name>.md` file remains the canonical artifact.
 
 <prd-template>
 

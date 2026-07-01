@@ -31,8 +31,8 @@ def resolve_worktree(
         return WorktreeSelection(repo_root=source_repo, created=False)
 
     if not create_worktree and interactive:
-        answer = input("Create a dedicated implementation worktree? [y/N] ").strip().lower()
-        create_worktree = answer in {"y", "yes"}
+        answer = input("Create a dedicated implementation worktree? [Y/n] ").strip().lower()
+        create_worktree = not answer or answer in {"y", "yes"}
 
     if not create_worktree:
         return WorktreeSelection(repo_root=source_repo, created=False)

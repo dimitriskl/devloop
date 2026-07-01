@@ -22,7 +22,7 @@ Windows check:
 python --version
 ```
 
-Ubuntu check:
+Ubuntu/macOS check:
 
 ```bash
 python3 --version
@@ -41,7 +41,7 @@ Check:
 codex --version
 ```
 
-The same command should work on Ubuntu/Linux.
+The same command should work on Ubuntu/Linux and macOS.
 
 ## 4. Install Git
 
@@ -74,7 +74,7 @@ Windows:
 .\install\install-skills.ps1
 ```
 
-Ubuntu/Linux:
+Ubuntu/macOS:
 
 ```bash
 chmod +x ./install/*.sh
@@ -109,11 +109,13 @@ Windows:
 .\bin\devloop.ps1 --help
 ```
 
-Ubuntu/Linux:
+Ubuntu/macOS:
 
 ```bash
 chmod +x ./bin/devloop.sh
+chmod +x ./bin/devloop-plan.sh
 ./bin/devloop.sh --help
+./bin/devloop-plan.sh --help
 ```
 
 ## 9. Run A Dry Run
@@ -122,8 +124,8 @@ Use dry-run first. It creates prompts and state files but does not call Codex.
 
 ```powershell
 .\bin\devloop.ps1 `
-  --prd E:\repo\docs\feature\prd.md `
-  --issues E:\repo\docs\feature\issues\README.md `
+  --prd E:\repo\prd\feature\feature.md `
+  --issues E:\repo\prd\feature\issues\README.md `
   --no-worktree `
   --dry-run
 ```

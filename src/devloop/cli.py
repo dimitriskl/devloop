@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from .self_improvement_wiki import (
     write_self_improvement_context,
 )
 from .state import LoopStateWriter, mark_issue_completed
+from .subprocess_utils import run_captured_text
 from .templates import BundleContext, load_preset
 from .worktree import resolve_worktree
 
@@ -40,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"Issue README/index file not found: {issues_index}")
 
     source_repo = find_repo_root(issues_index.parent)
+    source_branch = git_current_branch(source_repo)
     source_issues = parse_issue_index(issues_index)
 
     if not source_issues:
@@ -78,6 +81,13 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = worktree.repo_root
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
     issues_index_in_repo = map_path_to_worktree(issues_index, source_repo, repo_root)
+    if repo_root != source_repo and not args.dry_run:
+        ensure_planning_artifacts_in_worktree(
+            prd_path=prd_path,
+            issues_index=issues_index,
+            source_repo=source_repo,
+            target_repo=repo_root,
+        )
     issues = [map_issue_to_worktree(issue, source_repo, repo_root) for issue in selected_source_issues]
 
     bundle = BundleContext.from_file(Path(__file__).resolve())
@@ -93,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
         dry_run=args.dry_run,
+        use_self_improvement_wiki=not args.no_self_improvement_wiki,
     )
 
     state_writer.record_run_start(
@@ -175,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if overall_status == 0:
         print("Dev loop finished.")
+        offer_merge_followup(
+            source_repo=source_repo,
+            implementation_repo=repo_root,
+            source_branch=source_branch,
+            interactive=not args.non_interactive and not args.dry_run,
+        )
     else:
         print("Dev loop finished with blocked or failed issues.", file=sys.stderr)
 
@@ -201,7 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approval-policy", default="never", choices=["never", "on-request", "untrusted", "on-failure"], help="Codex approval policy. Default: never.")
     parser.add_argument("--self-improvement-wiki-path", default=DEFAULT_SELF_IMPROVEMENT_WIKI_PATH, help=f"Bundle-relative path to the Dev Loop self-improvement wiki. Default: {DEFAULT_SELF_IMPROVEMENT_WIKI_PATH}.")
     parser.add_argument("--self-improvement-max-lessons", dest="self_improvement_max_lessons", type=int, default=5, help="Maximum durable self-improvement lessons to add or update after a run. Default: 5.")
-    parser.add_argument("--no-self-improvement-wiki", action="store_true", help="Skip the post-run Dev Loop self-improvement wiki update.")
+    parser.add_argument("--no-self-improvement-wiki", action="store_true", help="Do not read or update the Dev Loop self-improvement wiki.")
     parser.add_argument("--create-worktree", action="store_true", help="Create a dedicated implementation worktree.")
     parser.add_argument("--no-worktree", action="store_true", help="Use the issue worktree directly.")
     parser.add_argument("--worktree-path", help="Path for a new implementation worktree.")
@@ -479,6 +496,49 @@ def resolve_bundle_path(bundle_root: Path, path_text: str) -> Path:
     return (bundle_root / path).resolve()
 
 
+def ensure_planning_artifacts_in_worktree(
+    *,
+    prd_path: Path,
+    issues_index: Path,
+    source_repo: Path,
+    target_repo: Path,
+) -> None:
+    target_prd = map_path_to_worktree(prd_path, source_repo, target_repo)
+    target_issues_index = map_path_to_worktree(issues_index, source_repo, target_repo)
+    if target_prd.is_file() and target_issues_index.is_file():
+        return
+
+    for source_path in planning_artifact_roots(prd_path, issues_index):
+        copy_path_to_worktree(source_path, source_repo, target_repo)
+
+
+def planning_artifact_roots(prd_path: Path, issues_index: Path) -> list[Path]:
+    prd_folder = prd_path.parent.resolve()
+    try:
+        issues_index.resolve().relative_to(prd_folder)
+    except ValueError:
+        return [prd_path, issues_index.parent]
+    return [prd_folder]
+
+
+def copy_path_to_worktree(source_path: Path, source_repo: Path, target_repo: Path) -> None:
+    try:
+        relative = source_path.resolve().relative_to(source_repo.resolve())
+    except ValueError:
+        return
+
+    target_path = target_repo / relative
+    if source_path.is_dir():
+        shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+    elif source_path.is_file():
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+    else:
+        return
+
+    print(f"Copied planning artifact into implementation worktree: {target_path}")
+
+
 def map_path_to_worktree(path: Path, source_repo: Path, target_repo: Path) -> Path:
     try:
         relative = path.resolve().relative_to(source_repo.resolve())
@@ -495,6 +555,117 @@ def map_issue_to_worktree(issue: Issue, source_repo: Path, target_repo: Path) ->
         path=mapped_path,
         completed=Issue.is_completed_file(mapped_path),
     )
+
+
+def offer_merge_followup(
+    *,
+    source_repo: Path,
+    implementation_repo: Path,
+    source_branch: str,
+    interactive: bool,
+) -> None:
+    if not interactive:
+        return
+
+    implementation_branch = git_current_branch(implementation_repo)
+    if not implementation_branch:
+        print("Merge prompt skipped because the implementation branch could not be detected.", file=sys.stderr)
+        return
+
+    if not ask_yes_no(
+        f"Development completed. Merge implementation branch '{implementation_branch}' into another branch now?",
+        default=False,
+    ):
+        return
+
+    target_default = source_branch if source_branch and source_branch != implementation_branch else "development"
+    target_branch = ask_required("Target branch", default=target_default)
+    merge_implementation_branch(
+        source_repo=source_repo,
+        implementation_repo=implementation_repo,
+        implementation_branch=implementation_branch,
+        target_branch=target_branch,
+    )
+
+
+def merge_implementation_branch(
+    *,
+    source_repo: Path,
+    implementation_repo: Path,
+    implementation_branch: str,
+    target_branch: str,
+) -> None:
+    implementation_status = git_status_porcelain(implementation_repo)
+    if implementation_status:
+        print(
+            "Automatic merge skipped because the implementation worktree has uncommitted changes. "
+            "Commit or stash them first, then merge the branch.",
+            file=sys.stderr,
+        )
+        print(f"Implementation worktree: {implementation_repo}")
+        print(f"Target branch: {target_branch}")
+        print(f"Implementation branch: {implementation_branch}")
+        return
+
+    target_status = git_status_porcelain(source_repo)
+    if target_status:
+        print(
+            "Automatic merge skipped because the target checkout has uncommitted changes. "
+            "Clean or stash that checkout first.",
+            file=sys.stderr,
+        )
+        print(f"Target checkout: {source_repo}")
+        return
+
+    checkout = run_captured_text(["git", "checkout", target_branch], cwd=source_repo)
+    if checkout.returncode != 0:
+        print(f"git checkout {target_branch} failed: {checkout.stderr.strip()}", file=sys.stderr)
+        return
+
+    merge = run_captured_text(["git", "merge", implementation_branch], cwd=source_repo)
+    if merge.returncode != 0:
+        print(f"git merge {implementation_branch} failed: {merge.stderr.strip()}", file=sys.stderr)
+        return
+
+    print(f"Merged {implementation_branch} into {target_branch}.")
+
+
+def git_current_branch(repo_root: Path) -> str:
+    result = run_captured_text(["git", "branch", "--show-current"], cwd=repo_root)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def git_status_porcelain(repo_root: Path) -> str:
+    result = run_captured_text(["git", "status", "--porcelain"], cwd=repo_root)
+    if result.returncode != 0:
+        return result.stderr.strip() or result.stdout.strip()
+    return result.stdout.strip()
+
+
+def ask_yes_no(prompt: str, *, default: bool) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    while True:
+        raw = input(f"{prompt} [{suffix}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print("Expected yes or no.", file=sys.stderr)
+
+
+def ask_required(prompt: str, *, default: str | None = None) -> str:
+    while True:
+        suffix = f" [{default}]" if default else ""
+        value = input(f"{prompt}{suffix}: ").strip()
+        if value:
+            return value
+        if default:
+            return default
+        print("Value is required.", file=sys.stderr)
 
 
 def print_json(data: object) -> None:

@@ -17,6 +17,10 @@ from .templates import BundleContext, Preset, render_template
 
 _LEGACY_APPROVAL_FLAG: bool | None = None
 CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
+DEVLOOP_RUN_GOAL = (
+    "All selected issues from the issue pack must be developed, reviewed, "
+    "and tested so the finished product has as few bugs and deficiencies as practical."
+)
 
 
 def resolve_codex_executable(codex: str) -> str:
@@ -127,6 +131,7 @@ class CodexRunner:
         sandbox: str,
         approval_policy: str,
         dry_run: bool,
+        use_self_improvement_wiki: bool,
     ) -> None:
         self.bundle = bundle
         self.repo_root = repo_root
@@ -137,6 +142,7 @@ class CodexRunner:
         self.sandbox = sandbox
         self.approval_policy = approval_policy
         self.dry_run = dry_run
+        self.use_self_improvement_wiki = use_self_improvement_wiki
         self.log_root = issues_index.parent / ".loop.logs"
         self.ensure_log_root()
 
@@ -337,7 +343,8 @@ class CodexRunner:
             "ISSUE_TITLE": issue.title,
             "ISSUE_PATH": issue.path,
             "REQUIRED_DOCS": self.preset.required_docs,
-            "BUNDLE_MEMORY_DOCS": [self.bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"],
+            "RUN_GOAL": DEVLOOP_RUN_GOAL,
+            "BUNDLE_MEMORY_DOCS": self.bundle_memory_docs(),
             "SKILL_PATHS": role_config.get("skills", []),
             "AGENT_PATHS": role_config.get("agents", []),
             "FIX_LIST": fix_list or ["None"],
@@ -346,6 +353,11 @@ class CodexRunner:
             "TIMESTAMP": datetime.now().isoformat(timespec="seconds"),
         }
         return render_template(self.bundle.prompts / template_name, values)
+
+    def bundle_memory_docs(self) -> list[Path | str]:
+        if not self.use_self_improvement_wiki:
+            return ["Disabled for this run."]
+        return [self.bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"]
 
     def build_self_improvement_prompt(
         self,

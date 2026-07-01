@@ -22,5 +22,5 @@ python --version
 codex --version
 git --version
 .\bin\devloop.ps1 --help
+.\bin\devloop-plan.ps1 --help
 ```
-

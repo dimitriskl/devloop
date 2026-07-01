@@ -10,6 +10,6 @@ workflow improvements that should benefit future runs across target projects.
 
 ## Maintenance
 
-Dev Loop updates this wiki at the end of real runs unless
-`--no-self-improvement-wiki` is used. Review changes like any other runner
-documentation.
+Dev Loop reads this wiki during role prompts and updates it at the end of real
+runs unless `--no-self-improvement-wiki` is used. Review changes like any other
+runner documentation.
