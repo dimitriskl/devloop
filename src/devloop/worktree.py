@@ -50,7 +50,18 @@ def resolve_worktree(
     if not branch_name:
         raise ValueError("Branch name cannot be empty.")
 
-    command = ["git", "worktree", "add", "-b", branch_name, str(worktree_path)]
+    worktree_path = worktree_path.resolve()
+    existing_worktree = find_registered_worktree(source_repo, worktree_path)
+    if existing_worktree is not None:
+        existing_branch = existing_worktree.get("branch", "")
+        if not branch_matches(existing_branch, branch_name):
+            raise RuntimeError(
+                "Requested worktree path is already registered on branch "
+                f"'{display_branch(existing_branch)}', not '{branch_name}'."
+            )
+        return WorktreeSelection(repo_root=worktree_path, created=False)
+
+    command = build_worktree_add_command(source_repo, worktree_path, branch_name)
 
     if dry_run:
         print(f"[dry-run] Would run in {source_repo}: {' '.join(command)}")
@@ -64,3 +75,63 @@ def resolve_worktree(
         raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
 
     return WorktreeSelection(repo_root=worktree_path.resolve(), created=True)
+
+
+def build_worktree_add_command(source_repo: Path, worktree_path: Path, branch_name: str) -> list[str]:
+    if branch_exists(source_repo, branch_name):
+        return ["git", "worktree", "add", str(worktree_path), branch_name]
+    return ["git", "worktree", "add", "-b", branch_name, str(worktree_path)]
+
+
+def branch_exists(source_repo: Path, branch_name: str) -> bool:
+    result = run_captured_text(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=source_repo,
+    )
+    return result.returncode == 0
+
+
+def find_registered_worktree(source_repo: Path, worktree_path: Path) -> dict[str, str] | None:
+    result = run_captured_text(["git", "worktree", "list", "--porcelain"], cwd=source_repo)
+    if result.returncode != 0:
+        raise RuntimeError(f"git worktree list failed: {result.stderr.strip()}")
+
+    requested = worktree_path.resolve()
+    for item in parse_worktree_list(result.stdout):
+        item_path = Path(item.get("path", "")).resolve()
+        if item_path == requested:
+            return item
+
+    return None
+
+
+def parse_worktree_list(output: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+
+    for line in output.splitlines():
+        if not line.strip():
+            if current is not None:
+                items.append(current)
+                current = None
+            continue
+
+        if line.startswith("worktree "):
+            if current is not None:
+                items.append(current)
+            current = {"path": line.removeprefix("worktree ")}
+        elif line.startswith("branch ") and current is not None:
+            current["branch"] = line.removeprefix("branch ")
+
+    if current is not None:
+        items.append(current)
+
+    return items
+
+
+def branch_matches(existing_branch: str, requested_branch: str) -> bool:
+    return existing_branch == requested_branch or existing_branch == f"refs/heads/{requested_branch}"
+
+
+def display_branch(branch: str) -> str:
+    return branch.removeprefix("refs/heads/") or "detached"

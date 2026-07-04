@@ -28,30 +28,48 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     bundle = BundleContext.from_file(Path(__file__).resolve())
-    repo_root = choose_target_repo(args.repo)
-    repo_root = apply_branch_strategy(repo_root)
 
-    goal = args.goal.strip() if args.goal else ""
-    started_at = time.time()
-    codex_result = run_codex_planning_session(
-        codex=args.codex,
-        repo_root=repo_root,
-        bundle_root=bundle.root,
-        sandbox=args.sandbox,
-        approval_policy=args.approval_policy,
-        goal=goal,
-    )
-    if codex_result != 0:
-        print(f"Codex planning session exited with code {codex_result}.", file=sys.stderr)
-        return codex_result
+    if args.prd:
+        try:
+            artifacts = resolve_existing_prd_artifacts(args.prd)
+            repo_root = git_repo_root(artifacts.prd_path.parent)
+        except (RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
 
-    artifacts = resolve_planning_artifacts(repo_root, started_at)
-    print()
-    print(f"PRD: {artifacts.prd_path}")
-    print(f"Issue index: {artifacts.issues_index}")
+        print()
+        print(f"Target checkout: {repo_root}")
+        print(f"Current branch: {current_branch(repo_root) or 'unknown'}")
+        print(f"PRD: {artifacts.prd_path}")
+        print(f"Issue index: {artifacts.issues_index}")
+        print_prd_status(artifacts)
 
-    if not ask_yes_no("Continue to development now?", default=True):
-        return 0
+        if not ask_yes_no("Continue development from this PRD now?", default=True):
+            return 0
+    else:
+        repo_root = choose_target_repo(args.repo)
+        repo_root = apply_branch_strategy(repo_root)
+
+        goal = args.goal.strip() if args.goal else ""
+        started_at = time.time()
+        codex_result = run_codex_planning_session(
+            codex=args.codex,
+            repo_root=repo_root,
+            bundle_root=bundle.root,
+            sandbox=args.sandbox,
+            approval_policy=args.approval_policy,
+            goal=goal,
+        )
+        if codex_result != 0:
+            print(f"Codex planning session exited with code {codex_result}.", file=sys.stderr)
+            return codex_result
+
+        artifacts = resolve_planning_artifacts(repo_root, started_at)
+        print()
+        print(f"PRD: {artifacts.prd_path}")
+        print(f"Issue index: {artifacts.issues_index}")
+
+        if not ask_yes_no("Continue to development now?", default=True):
+            return 0
 
     command = build_devloop_command(bundle.root, repo_root, artifacts)
     print()
@@ -75,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--repo", help="Target project checkout. Defaults to an interactive prompt.")
+    parser.add_argument("--prd", help="Existing PRD file or PRD folder to resume directly. Skips planning and starts from the development prompts.")
     parser.add_argument("--goal", help="Initial feature or fix description. If omitted, Codex asks for it interactively.")
     parser.add_argument("--codex", default="codex", help="Codex executable path or command name. Default: codex.")
     parser.add_argument("--sandbox", default="workspace-write", help="Codex sandbox mode. Default: workspace-write.")
@@ -238,7 +257,7 @@ def run_codex_planning_session(
     print()
     print("Starting Codex planning session.")
     print("Type the change request inside Codex; Codex input supports arrow navigation and Alt+V image paste when your installed CLI supports it.")
-    print("Exit Codex after the PRD folder and issue pack are written.")
+    print("After Codex reports the PRD and issue README paths, type /quit or press Ctrl+C to return here and continue to development.")
     print(format_command([*command[:-1], "<planning prompt>"]))
     return subprocess.run(command, cwd=repo_root, check=False).returncode
 
@@ -263,7 +282,7 @@ Required workflow:
 5. Keep PRD-specific execution information inside {repo_root / "prd" / "<prd-name>"} unless a repository-wide glossary or ADR update is genuinely required.
 6. The issue README must contain real Markdown links to numbered issue files.
 7. Do not start implementation and do not run Dev Loop yourself from inside Codex.
-8. Do not print a Dev Loop command or a long handoff message. When the artifacts are ready, ask the user to exit this Codex planning session so the wrapper can ask development parameters.
+8. Do not print a Dev Loop command or a long handoff message. When the artifacts are ready, ask the user to exit this Codex planning session so the wrapper can ask development parameters. If the user says to continue, go to development, or similar, explain that this Codex subprocess must be closed first; tell them to type `/quit` or press Ctrl+C to return to the Dev Loop wrapper.
 9. Before that final question, report only the exact PRD path and issue README path.
 
 {initial_goal_block(goal)}
@@ -299,6 +318,110 @@ def resolve_planning_artifacts(repo_root: Path, started_at: float) -> PlanningAr
     prd_path = ask_existing_file("PRD path")
     issues_index = ask_existing_file("Issue README path")
     return PlanningArtifacts(prd_path=prd_path, issues_index=issues_index)
+
+
+def resolve_existing_prd_artifacts(prd_arg: str) -> PlanningArtifacts:
+    path = Path(prd_arg).expanduser().resolve()
+    if not path.exists():
+        raise ValueError(f"PRD path not found: {path}")
+
+    if path.is_dir():
+        prd_folder = path
+        prd_path = find_prd_file_in_folder(prd_folder)
+        if prd_path is None:
+            raise ValueError(f"No PRD Markdown file found in: {prd_folder}")
+    elif path.is_file():
+        if path.name.lower() == "readme.md" and path.parent.name.lower() == "issues":
+            prd_folder = path.parent.parent
+            prd_path = find_prd_file_in_folder(prd_folder)
+            if prd_path is None:
+                raise ValueError(f"No PRD Markdown file found next to issue folder: {prd_folder}")
+            return PlanningArtifacts(prd_path=prd_path.resolve(), issues_index=path.resolve())
+
+        prd_path = path
+        prd_folder = path.parent
+    else:
+        raise ValueError(f"PRD path is not a file or directory: {path}")
+
+    issues_index = find_issue_index_for_prd(prd_folder, prd_path)
+    if issues_index is None:
+        raise ValueError(
+            "Could not find issue index for PRD. Expected "
+            f"{prd_folder / 'issues' / 'README.md'}"
+        )
+
+    return PlanningArtifacts(prd_path=prd_path.resolve(), issues_index=issues_index.resolve())
+
+
+def find_issue_index_for_prd(prd_folder: Path, prd_path: Path) -> Path | None:
+    for candidate in (prd_folder / "issues" / "README.md", prd_folder / "README.md"):
+        if candidate.is_file():
+            return candidate
+
+    try:
+        repo_root = git_repo_root(prd_folder)
+    except RuntimeError:
+        return None
+
+    legacy_index = repo_root / "issues" / prd_path.stem / "README.md"
+    if legacy_index.is_file():
+        return legacy_index
+
+    return None
+
+
+def print_prd_status(artifacts: PlanningArtifacts) -> None:
+    state_path = find_status_state_path(artifacts)
+    print()
+    if state_path is None:
+        print("Status: no Dev Loop status file yet. Completed issue files will still be skipped.")
+        return
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Status file could not be read: {state_path} ({exc})", file=sys.stderr)
+        return
+
+    issues = state.get("issues", {})
+    if not isinstance(issues, dict):
+        issues = {}
+
+    completed = sorted(
+        number
+        for number, details in issues.items()
+        if isinstance(details, dict) and details.get("status") == "Completed"
+    )
+    blocked = sorted(
+        number
+        for number, details in issues.items()
+        if isinstance(details, dict) and details.get("status") == "Blocked"
+    )
+    in_progress = sorted(
+        number
+        for number, details in issues.items()
+        if isinstance(details, dict) and str(details.get("status", "")).startswith("In Progress")
+    )
+
+    print(f"Status file: {state_path}")
+    print(f"Completed issues: {format_issue_list(completed)}")
+    print(f"Blocked issues: {format_issue_list(blocked)}")
+    print(f"In-progress issues: {format_issue_list(in_progress)}")
+
+
+def find_status_state_path(artifacts: PlanningArtifacts) -> Path | None:
+    candidates = [
+        artifacts.prd_path.parent / "devloop.status.json",
+        artifacts.issues_index.with_name(f"{artifacts.issues_index.stem}.loop.state.json"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def format_issue_list(issues: list[str]) -> str:
+    return ", ".join(issues) if issues else "none"
 
 
 def find_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts]:
@@ -398,12 +521,14 @@ def build_devloop_command(bundle_root: Path, repo_root: Path, artifacts: Plannin
     print()
     print("Development parameters")
 
-    start_issue = input("Start issue [0001]: ").strip() or "0001"
-    if start_issue:
+    start_issue = normalize_start_issue(input('Start issue, or "all" for every pending issue [all]: '))
+    if start_issue is None:
+        command.append("--all")
+    else:
         command.extend(["--start-issue", start_issue])
 
-    if ask_yes_no("Run all pending issues?", default=True):
-        command.append("--all")
+        if ask_yes_no("Run all pending issues from the selected start issue?", default=True):
+            command.append("--all")
 
     if ask_yes_no("Use a dedicated implementation worktree?", default=True):
         slug = artifact_slug(artifacts)
@@ -419,10 +544,19 @@ def build_devloop_command(bundle_root: Path, repo_root: Path, artifacts: Plannin
     else:
         command.append("--no-worktree")
 
-    if not ask_yes_no("Use the Dev Loop self-improvement wiki during and after development?", default=True):
+    if ask_yes_no("Use the Dev Loop self-improvement wiki during and after development?", default=True):
+        command.append("--self-improvement-wiki")
+    else:
         command.append("--no-self-improvement-wiki")
 
     return command
+
+
+def normalize_start_issue(raw_start_issue: str) -> str | None:
+    start_issue = raw_start_issue.strip()
+    if not start_issue or start_issue.lower() in {"all", "*"}:
+        return None
+    return start_issue
 
 
 def default_worktree_path(repo_root: Path, slug: str) -> Path:

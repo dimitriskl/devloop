@@ -78,8 +78,16 @@ git worktree list
 git status --short --branch
 ```
 
-Make sure the branch name is unique and the target directory does not already
-contain another checkout.
+If the exact same worktree path is already registered on the requested branch,
+rerun the same command. Current builds reuse that worktree instead of trying to
+create the branch again.
+
+If Git reports that the branch already exists but the worktree path is not
+registered, either choose a new branch name or remove/rename the old branch
+yourself before rerunning.
+
+If the path is registered on a different branch, choose a different worktree path
+or rerun with the branch name that matches that checkout.
 
 ## MCP does not start
 

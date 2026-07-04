@@ -37,6 +37,10 @@ Use the current worktree directly:
 .\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --no-worktree
 ```
 
+Rerunning the same `--create-worktree --worktree-path ... --branch-name ...`
+command after a crash reuses the registered worktree when that path is already
+checked out on the requested branch.
+
 The runner does not commit, push, or delete worktrees. After a successful
 development run, it asks whether to merge the implementation branch or worktree
 into another branch. Automatic merge is skipped when the implementation or target

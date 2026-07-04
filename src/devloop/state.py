@@ -15,6 +15,8 @@ class LoopStateWriter:
         self.issues_index = issues_index
         self.state_path = issues_index.with_name(f"{issues_index.stem}.loop.state.json")
         self.board_path = issues_index.with_name(f"{issues_index.stem}.loop.md")
+        self.prd_state_path: Path | None = None
+        self.prd_board_path: Path | None = None
         self.state: dict[str, Any] = {
             "started_at": now(),
             "issues_index": str(issues_index),
@@ -23,6 +25,8 @@ class LoopStateWriter:
         }
 
     def record_run_start(self, repo_root: Path, prd_path: Path, issues: list[str], dry_run: bool) -> None:
+        self.prd_state_path = prd_path.parent / "devloop.status.json"
+        self.prd_board_path = prd_path.parent / "devloop.status.md"
         self.state.update(
             {
                 "repo_root": str(repo_root),
@@ -192,8 +196,19 @@ class LoopStateWriter:
         )
 
     def flush(self) -> None:
-        self.state_path.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
-        self.board_path.write_text(render_board(self.state), encoding="utf-8")
+        state_text = json.dumps(self.state, indent=2)
+        board_text = render_board(self.state)
+        write_text_creating_parent(self.state_path, state_text)
+        write_text_creating_parent(self.board_path, board_text)
+        if self.prd_state_path is not None:
+            write_text_creating_parent(self.prd_state_path, state_text)
+        if self.prd_board_path is not None:
+            write_text_creating_parent(self.prd_board_path, board_text)
+
+
+def write_text_creating_parent(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def result_summary(result: RoleResult) -> dict[str, Any]:

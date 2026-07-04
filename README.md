@@ -95,7 +95,10 @@ installed CLI supports them. The planning session follows this sequence:
 3. `$to-issues` writes `prd/<change-name>/issues/README.md` and numbered issue
    files with real Markdown links.
 4. The wrapper detects those paths, asks whether to continue to development,
-   and collects start issue, all-issues mode, worktree, branch, and wiki choices.
+   and collects start issue/all-issues mode, worktree, branch, and wiki choices.
+
+After Codex reports the PRD and issue README paths, exit the planning session
+with `/quit` or Ctrl+C so the wrapper can continue to the development prompts.
 
 Development defaults to a dedicated implementation worktree and using the Dev
 Loop self-improvement wiki. When a run finishes successfully, the runner asks
@@ -104,8 +107,20 @@ whether to merge the implementation branch or worktree into another branch.
 The final handoff command is equivalent to:
 
 ```powershell
-.\bin\devloop.ps1 --prd C:\path\to\project\prd\example\example.md --issues C:\path\to\project\prd\example\issues\README.md --start-issue 0001 --all --create-worktree --worktree-path C:\path\to\project-example-dev --branch-name devloop/example
+.\bin\devloop.ps1 --prd C:\path\to\project\prd\example\example.md --issues C:\path\to\project\prd\example\issues\README.md --all --create-worktree --worktree-path C:\path\to\project-example-dev --branch-name devloop/example --self-improvement-wiki
 ```
+
+To continue an existing PRD without reopening planning:
+
+```powershell
+.\bin\devloop-plan.ps1 --prd C:\path\to\project\prd\example\example.md
+```
+
+The runner finds `issues\README.md`, prints the PRD status, and asks for the
+development parameters. Dev Loop writes `devloop.status.json` and
+`devloop.status.md` in the PRD folder, while keeping the older
+`issues\README.loop.state.json` and `issues\README.loop.md` files for
+compatibility. Reruns with `all` continue only blocked or unfinished issues.
 
 ## How Skills Are Used
 

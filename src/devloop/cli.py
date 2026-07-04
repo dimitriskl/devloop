@@ -88,7 +88,18 @@ def main(argv: list[str] | None = None) -> int:
             source_repo=source_repo,
             target_repo=repo_root,
         )
-    issues = [map_issue_to_worktree(issue, source_repo, repo_root) for issue in selected_source_issues]
+    mapped_source_issues = [map_issue_to_worktree(issue, source_repo, repo_root) for issue in source_issues]
+    issues = select_issues(
+        mapped_source_issues,
+        run_all=args.all,
+        start_issue=args.start_issue,
+    )
+
+    if not issues:
+        print("No pending issues selected in implementation worktree.")
+        return 0
+
+    report_mapped_selection(selected_source_issues, issues)
 
     bundle = BundleContext.from_file(Path(__file__).resolve())
     preset = load_preset(resolve_bundle_path(bundle.root, args.preset))
@@ -103,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
         dry_run=args.dry_run,
-        use_self_improvement_wiki=not args.no_self_improvement_wiki,
+        use_self_improvement_wiki=args.self_improvement_wiki,
     )
 
     state_writer.record_run_start(
@@ -149,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     elif blocked_issues and args.no_blocked_retry:
         print("Blocked issue retry skipped because --no-blocked-retry was set.", file=sys.stderr)
 
-    if not args.no_self_improvement_wiki:
+    if args.self_improvement_wiki:
         if args.dry_run:
             print("Dev Loop self-improvement wiki update skipped for dry run.")
         else:
@@ -218,7 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approval-policy", default="never", choices=["never", "on-request", "untrusted", "on-failure"], help="Codex approval policy. Default: never.")
     parser.add_argument("--self-improvement-wiki-path", default=DEFAULT_SELF_IMPROVEMENT_WIKI_PATH, help=f"Bundle-relative path to the Dev Loop self-improvement wiki. Default: {DEFAULT_SELF_IMPROVEMENT_WIKI_PATH}.")
     parser.add_argument("--self-improvement-max-lessons", dest="self_improvement_max_lessons", type=int, default=5, help="Maximum durable self-improvement lessons to add or update after a run. Default: 5.")
-    parser.add_argument("--no-self-improvement-wiki", action="store_true", help="Do not read or update the Dev Loop self-improvement wiki.")
+    wiki_group = parser.add_mutually_exclusive_group()
+    wiki_group.add_argument("--self-improvement-wiki", dest="self_improvement_wiki", action="store_true", default=True, help="Read and update the Dev Loop self-improvement wiki. This is the default.")
+    wiki_group.add_argument("--no-self-improvement-wiki", dest="self_improvement_wiki", action="store_false", help="Do not read or update the Dev Loop self-improvement wiki.")
     parser.add_argument("--create-worktree", action="store_true", help="Create a dedicated implementation worktree.")
     parser.add_argument("--no-worktree", action="store_true", help="Use the issue worktree directly.")
     parser.add_argument("--worktree-path", help="Path for a new implementation worktree.")
@@ -586,6 +599,13 @@ def offer_merge_followup(
         implementation_branch=implementation_branch,
         target_branch=target_branch,
     )
+
+
+def report_mapped_selection(source_issues: list[Issue], mapped_issues: list[Issue]) -> None:
+    source_numbers = [issue.number for issue in source_issues]
+    mapped_numbers = [issue.number for issue in mapped_issues]
+    if mapped_numbers != source_numbers:
+        print(f"Selected issues in implementation worktree: {', '.join(mapped_numbers)}")
 
 
 def merge_implementation_branch(

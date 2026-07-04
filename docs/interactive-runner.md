@@ -11,6 +11,12 @@ the Dev Loop implementation runner with the generated PRD and issue-pack paths.
 & 'F:\devloop\bin\devloop-plan.ps1' --repo 'C:\LocalCode\eConnectorV2'
 ```
 
+Continue an existing PRD without reopening planning:
+
+```powershell
+& 'F:\devloop\bin\devloop-plan.ps1' --prd 'C:\LocalCode\eConnectorV2\prd\example\example.md'
+```
+
 ## Ubuntu Or Mac
 
 ```bash
@@ -29,7 +35,8 @@ the Dev Loop implementation runner with the generated PRD and issue-pack paths.
    or fix inside Codex. Use the normal Codex input behavior, including
    arrow-key editing and Alt+V image paste when your installed CLI supports it.
 4. Codex follows `$grill-with-docs`, `$to-prd`, then `$to-issues`.
-5. Exit Codex after it reports the generated PRD and issue README paths.
+5. Exit Codex after it reports the generated PRD and issue README paths. Type
+   `/quit` or press Ctrl+C so the wrapper can continue.
 6. Confirm the detected `prd/<prd-stem>/<prd-stem>.md` and
    `prd/<prd-stem>/issues/README.md` pair.
 7. Choose whether to continue to development, then answer the development
@@ -40,12 +47,20 @@ expected under `prd/<prd-file-stem>/issues/README.md` with real Markdown links
 to numbered issue files. Loop state, logs, and other PRD execution artifacts stay
 under the same PRD folder.
 
+For each PRD run, Dev Loop writes `devloop.status.json` and
+`devloop.status.md` in the PRD folder. It also keeps the compatibility files
+next to the issue index: `issues/README.loop.state.json` and
+`issues/README.loop.md`. When `devloop-plan --prd ...` is used, the wrapper
+prints that status and then starts the development prompts. Choosing `all`
+continues only blocked or unfinished issues because completed issue files are
+skipped by the implementation runner.
+
 ## Final Dev Loop Options
 
 Before starting implementation, the runner asks for:
 
-- start issue, defaulting to `0001`
-- whether to run all pending issues
+- start issue, or `all` for every pending issue, defaulting to `all`
+- whether to run all pending issues from the selected start issue
 - whether Dev Loop should create a dedicated implementation worktree, defaulting
   to yes
 - whether to use the Dev Loop self-improvement wiki during and after
@@ -54,7 +69,7 @@ Before starting implementation, the runner asks for:
 For the common worktree/wiki run, it builds the equivalent of:
 
 ```powershell
-& 'F:\devloop\bin\devloop.ps1' --prd 'C:\LocalCode\eConnectorV2\prd\example\example.md' --issues 'C:\LocalCode\eConnectorV2\prd\example\issues\README.md' --start-issue 0001 --all --create-worktree --worktree-path 'C:\LocalCode\eConnectorV2-example-dev' --branch-name 'devloop/example'
+& 'F:\devloop\bin\devloop.ps1' --prd 'C:\LocalCode\eConnectorV2\prd\example\example.md' --issues 'C:\LocalCode\eConnectorV2\prd\example\issues\README.md' --all --create-worktree --worktree-path 'C:\LocalCode\eConnectorV2-example-dev' --branch-name 'devloop/example' --self-improvement-wiki
 ```
 
 After a successful development run, `devloop` asks whether to merge the

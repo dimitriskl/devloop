@@ -4,6 +4,62 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Entries
 
+## Gate Sensitive Diagnostics At Every Read Surface
+
+- Applies to: coder, reviewer, QA, log/audit/diagnostic features, permissions
+- Lesson: Sensitive diagnostic records that include raw SQL or payload text need authorization at the frontend route, backend read endpoints, missing-context path, and tenant scope; one gate alone is insufficient.
+- Evidence: Issue 0005 clean retries failed first because `/logs` and human `LogsController` reads were not Logs-rights gated, then failed again because missing company context could pass and `GetAll`, `Get(Guid)`, and `GetLogSources` were not tenant-scoped.
+- Action: For log/audit features, add regressions for no rights, missing company context, cross-company isolation, and allowed access before marking the slice complete.
+- Last seen: 2026-07-03
+
+## Verify Routed Deep Links At The Owning Shell
+
+- Applies to: coder, reviewer, QA, Angular routes and query-param filters
+- Lesson: Query-param behavior is not proven by testing an inner component when the route renders a different shell or hides that component behind a popup.
+- Evidence: Issue 0005 failed review when `/logs?source=sql-navigator` reached the routed `TaskExecutionExplorerComponent` shell while the filtered `LogsComponent` stayed hidden in a closed popup; pass 2 fixed the owning shell to render the raw Logs grid for source-filter links.
+- Action: Add route/shell-level tests for deep links and make the owning routed component open or route to the visible surface for query modes.
+- Last seen: 2026-07-04
+
+## Check Frontend Dependency Availability Before Angular Gates
+
+- Applies to: coder, reviewer, QA, Angular worktrees
+- Lesson: Missing `node_modules`, `package-lock.json`, or `@angular/build` builder packages are setup residuals, not application failures.
+- Evidence: Issues 0001 and 0005 repeatedly could not start Karma or Angular build because the worktree lacked local frontend dependencies/builders, including the July 4 SQL Navigator logs run where dependency probes returned missing before Angular compilation.
+- Action: Start Angular verification with `Test-Path` checks for web `node_modules`, `package-lock.json`, and required builder packages; report unavailable browser/build gates explicitly and use TypeScript, i18n, and backend gates where available.
+- Last seen: 2026-07-04
+
+## Treat Disk-Full Runtime Failures As Infrastructure Blockers
+
+- Applies to: Dev Loop runner, Codex sandbox/runtime, issue execution
+- Lesson: When shell setup and fallback runtimes both fail before file inspection with disk-full errors, the issue is blocked by host or temp storage, not code.
+- Evidence: Issue 0005 first pass could not read files because PowerShell helper setup and Node REPL kernel asset writes both failed with disk error 112.
+- Action: Stop the issue pass, ask the operator to free space on the sandbox or temp drive, then rerun; do not infer repository state from failed pre-command setup.
+- Last seen: 2026-07-03
+
+## Prove Missing Parents Before WooCommerce Side Effects
+
+- Applies to: coder, reviewer, QA, translation and integration workflows
+- Lesson: Missing-parent and missing-identity checks must run before any WooCommerce-facing preprocessing, lookup, create, update, or ledger write-back.
+- Evidence: Issue 0002 needed two review fixes: the NodeService path called a product preprocessor before parent-ledger resolution, and the full orchestrator path only rejected null parent IDs while allowing blank or whitespace IDs into `translation_of`.
+- Action: In negative-path tests, register strict preprocessors and strict API mocks, cover both simplified and full orchestrator paths, and treat null, empty, and whitespace external IDs as unsynced before side effects.
+- Last seen: 2026-07-03
+
+## Require Positive Evidence Before Ledger Adoption
+
+- Applies to: coder, reviewer, QA, duplicate recovery and ledger write-back
+- Lesson: A single non-parent search result is not enough to adopt an existing external record when the result will drive an authoritative ledger update.
+- Evidence: Issue 0003 pass 1 could adopt one non-parent WooCommerce SKU match without `lang == en` or `translation_of == parentWooCommerceId`, then write `Translations["en"]` or `EnglishWooId` to the parent ledger; pass 2 required positive translation evidence.
+- Action: Remove sole-candidate fallbacks from duplicate recovery paths unless they also prove the required identity, and add regressions that assert no PUT and no ledger write-back for unproven matches.
+- Last seen: 2026-07-03
+
+## Prove SQL JSON Storage Shape
+
+- Applies to: coder, reviewer, QA, support SQL artifacts and JSON-backed contracts
+- Lesson: Script-text assertions are not enough for SQL JSON mutations; prove the persisted scalar/object shape that runtime deserialization expects.
+- Evidence: Issue 0004 pass 1 tests passed, but review simulated the `JSON_MODIFY` update and found `jsonTemplate` would be stored as a nested object instead of scalar JSON text; pass 2 used `CONCAT` and SQL guards to preserve the shape.
+- Action: For JSON-updating SQL scripts, add a read-only SQL simulation or focused guard that checks `JSON_VALUE` and `JSON_QUERY` behavior against the persisted contract.
+- Last seen: 2026-07-03
+
 ## Treat ChromeHeadless Startup Failures As Local Gate Residuals
 
 - Applies to: coder, reviewer, QA, Angular Karma gates on Windows
@@ -84,10 +140,10 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: Preserve the restore command in verification evidence and avoid repeated network-dependent restores inside later passes.
 - Last seen: 2026-06-30
 
-## Record Alternate Completion Evidence When Issue Files Are Read-Only
+## Preserve Issue Markdown Before Recording Alternate Evidence
 
 - Applies to: coder, Dev Loop sandboxing, issue-pack completion evidence
-- Lesson: If sandbox permissions prevent updating issue markdown checkboxes, completion evidence still needs to be recorded in writable project evidence files and surfaced as a residual risk.
-- Evidence: Issue 0005 pass 1 could not update issue acceptance boxes under `issues\...`; the coder recorded completion in `context/current-ttd.md` and the TDD spec instead.
-- Action: Do not force edits outside writable roots; update the nearest writable evidence docs and report exactly which issue-file markers remain stale.
-- Last seen: 2026-06-30
+- Lesson: Issue markdown files are control-plane artifacts; do not delete or depend on recreating them when sandbox permissions may allow edits to product files but deny issue-pack file creation.
+- Evidence: Issue 0005 could not update issue acceptance boxes, and Issue 0004 later stayed blocked through three clean retries after the required issue markdown was missing and both `apply_patch` and direct creation were denied at the issue-pack path.
+- Action: Before patching issue files, verify the file exists and avoid delete/recreate flows; when issue markers cannot be updated, record completion evidence in writable project docs, report the exact stale or missing marker, and stop retrying once the same permission blocker is proven.
+- Last seen: 2026-07-03
