@@ -4,6 +4,46 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Entries
 
+## Start Gates From A Clean Tracked Diff
+
+- Applies to: coder, reviewer, QA, dirty worktrees and verification gates
+- Lesson: A passing no-build or partial focused gate is not enough when tracked non-loop deletions are present; restore or isolate unrelated deletions before accepting issue evidence.
+- Evidence: Issue 0002 pass 1 had a missing shared test project and 726 deleted tracked non-loop files, so clean focused test compilation failed even though the stale no-build ProductTranslations assembly passed.
+- Action: Before reviewer or QA gates, run a deleted-file check and require source-built focused tests once tracked deletions have been restored.
+- Last seen: 2026-07-04
+
+## Keep Object-Specific Paths Out Of Legacy Metadata
+
+- Applies to: coder, reviewer, QA, template orchestration paths and compatibility metadata
+- Lesson: New object-specific template paths must bypass legacy metadata branches that were designed for another object type.
+- Evidence: Issue 0003 pass 1 failed because the full API orchestrator ran the legacy Products child-translation block for ProductTranslations templates carrying stale MasterTemplateId and LanguageCode metadata.
+- Action: Gate legacy branches by the exact object type they serve, and add regressions with stale or rejected metadata on the new object type.
+- Last seen: 2026-07-04
+
+## Treat SQL Id As The ProductTranslations Row Identity
+
+- Applies to: coder, reviewer, QA, ledger write-back and sync-row lookup
+- Lesson: When the PRD says a returned SQL Id identifies the exact sync row to update, do not add non-identity filters that can reject that row.
+- Evidence: Issue 0003 pass 2 failed because both orchestrators looked up the ProductTranslations ledger row by Id, CompanyId, and SiteType; a valid SQL-selected row with a different stored SiteType was treated as missing.
+- Action: Keep only required tenant/data-safety constraints around authoritative row IDs, and test mismatched non-identity fields plus no duplicate row insertion.
+- Last seen: 2026-07-04
+
+## Resolve Durable Rows Before Fallible Rendering
+
+- Applies to: coder, reviewer, QA, row-level error persistence and integration payloads
+- Lesson: If a row has a durable identity, load that row before fallible payload rendering so validation or placeholder failures can be persisted to the operator-visible source row.
+- Evidence: Issue 0005 pass 1 failed because ProductTranslations JSON rendering happened before SQL Id sync-row lookup, leaving missing-alias failures only as in-memory row errors instead of persisted ErrorMessage/ErrorDetails.
+- Action: Order integration execution as identify row, render or validate payload, persist row error on failure, then call the external system only after the row-safe payload succeeds.
+- Last seen: 2026-07-04
+
+## Use Structural DOCX QA When Renderers Are Missing
+
+- Applies to: coder, reviewer, QA, generated documentation and DOCX artifacts
+- Lesson: When LibreOffice or another visual renderer is unavailable, validate generated DOCX files structurally and by required content, and report visual render QA as a residual risk.
+- Evidence: Issue 0006 passed after the generator reproduced a temp DOCX and OpenXML package, XML, required-text, table, and paragraph checks passed, while soffice was not installed.
+- Action: For DOCX slices, keep the generator reproducible, inspect the package entries and document text, compare required acceptance content, and explicitly call out skipped visual rendering.
+- Last seen: 2026-07-04
+
 ## Gate Sensitive Diagnostics At Every Read Surface
 
 - Applies to: coder, reviewer, QA, log/audit/diagnostic features, permissions
