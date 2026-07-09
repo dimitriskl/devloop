@@ -47,6 +47,31 @@ class FindCandidatesTests(unittest.TestCase):
             self.assertEqual(labels, ["agent:real-agent", "skill:agents"])
 
 
+class DefaultCloneRunnerTests(unittest.TestCase):
+    def test_install_default_runner_is_env_guarded(self) -> None:
+        import inspect
+
+        signature = inspect.signature(github_install.install_from_github)
+        self.assertIs(
+            signature.parameters["runner"].default,
+            github_install._default_clone_runner,
+        )
+
+    def test_default_clone_runner_sets_prompt_guard_env(self) -> None:
+        captured: dict = {}
+
+        def fake_run(command, *, cwd=None, input_text=None, env=None):
+            captured["command"] = list(command)
+            captured["env"] = env
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch("devloop.github_install.run_captured_text", fake_run):
+            github_install._default_clone_runner(["git", "clone", "url", "dest"])
+
+        self.assertEqual(captured["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(captured["env"]["GCM_INTERACTIVE"], "never")
+
+
 class ParseRefTests(unittest.TestCase):
     def test_plain_url(self) -> None:
         self.assertEqual(

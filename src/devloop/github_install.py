@@ -1,13 +1,28 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from .subprocess_utils import run_captured_text
+
+
+def _default_clone_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run a git clone with interactive credential prompts disabled.
+
+    ``GIT_TERMINAL_PROMPT=0`` makes git fail fast instead of blocking on a
+    username/password prompt, and ``GCM_INTERACTIVE=never`` suppresses the Git
+    Credential Manager pop-up on Windows. Tests inject their own single-argument
+    runner, so this env guard only applies to the real default path.
+    """
+    return run_captured_text(
+        command,
+        env={"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+    )
 
 
 @dataclass(frozen=True)
@@ -59,7 +74,7 @@ def install_from_github(
     url: str,
     bundle_root: Path,
     *,
-    runner: Callable = run_captured_text,
+    runner: Callable = _default_clone_runner,
     confirm: Callable[[str], bool],
 ) -> InstallResult:
     clone_url, subpath = parse_github_ref(url)
@@ -78,10 +93,10 @@ def install_from_github(
                 str(clone_dir),
             ]
         )
-        # Note: --config credential.helper= disables stored-credential prompts, but
-        # stdlib subprocess_utils.run_captured_text does not accept an env override,
-        # so we cannot also set GIT_TERMINAL_PROMPT=0 here. An interactive terminal
-        # prompt (e.g. for a private repo needing a password) could still block.
+        # Note: --config credential.helper= disables stored-credential helpers, and
+        # the default runner (_default_clone_runner) additionally sets
+        # GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never so a private repo needing
+        # a password fails fast instead of blocking on an interactive prompt.
         if result.returncode != 0:
             return InstallResult(
                 installed=[],

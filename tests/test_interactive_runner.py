@@ -111,7 +111,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertIn(str(preset), args)
 
 
-class FindRecentArtifactsTests(unittest.TestCase):
+class FindNewArtifactsTests(unittest.TestCase):
     def make_prd_pair(self, root: Path, name: str) -> None:
         prd = root / "prd" / name / f"{name}.md"
         prd.parent.mkdir(parents=True)
@@ -120,7 +120,70 @@ class FindRecentArtifactsTests(unittest.TestCase):
         issues.parent.mkdir(parents=True)
         issues.write_text("issues", encoding="utf-8")
 
-    def test_preexisting_prd_is_not_detected_as_recent(self) -> None:
+    def test_worktree_checkout_of_old_prd_is_not_detected(self) -> None:
+        # Simulates `git worktree add` materializing a pre-existing PRD pair with
+        # fresh (now) mtimes moments before started_at is captured. The snapshot is
+        # taken first (mtimes are naturally >= started_at - slack), so the probe
+        # must ignore it despite the fresh checkout mtimes.
+        import time
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_prd_pair(root, "old-feature")
+            baseline = interactive_runner.snapshot_artifacts(root)
+            started_at = time.time()
+            result = interactive_runner.find_new_artifacts(root, started_at, baseline)
+        self.assertEqual(result, [])
+
+    def test_new_pair_written_after_snapshot_is_detected(self) -> None:
+        import time
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline = interactive_runner.snapshot_artifacts(root)
+            started_at = time.time() - 1
+            self.make_prd_pair(root, "new-feature")
+            result = interactive_runner.find_new_artifacts(root, started_at, baseline)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(str(result[0].prd_path).endswith("new-feature.md"))
+
+    def test_snapshotted_pair_retouched_forward_is_detected(self) -> None:
+        import os
+        import time
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_prd_pair(root, "edited-feature")
+            baseline = interactive_runner.snapshot_artifacts(root)
+            started_at = time.time()
+            # Codex edits the snapshotted PRD after the chat begins: mtime advances.
+            future = time.time() + 60
+            prd = root / "prd" / "edited-feature" / "edited-feature.md"
+            issues = root / "prd" / "edited-feature" / "issues" / "README.md"
+            os.utime(prd, (future, future))
+            os.utime(issues, (future, future))
+            result = interactive_runner.find_new_artifacts(root, started_at, baseline)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(str(result[0].prd_path).endswith("edited-feature.md"))
+
+    def test_readme_fallback_index_is_ignored_by_probe(self) -> None:
+        # A pair whose only index is prd/<name>/README.md (no issues/ dir) must be
+        # ignored by the live probe, even though the --prd/manual paths accept it.
+        import time
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prd_folder = root / "prd" / "fallback"
+            prd_folder.mkdir(parents=True)
+            (prd_folder / "fallback.md").write_text("prd", encoding="utf-8")
+            (prd_folder / "README.md").write_text("index", encoding="utf-8")
+            started_at = time.time() - 1
+            result = interactive_runner.find_new_artifacts(root, started_at, {})
+        self.assertEqual(result, [])
+
+    def test_preexisting_old_prd_is_not_detected(self) -> None:
+        # An old pair (stale mtimes, absent from a fresh worktree snapshot) that is
+        # not fresh enough is filtered out by the freshness slack alone.
         import os
         import time
 
@@ -132,19 +195,8 @@ class FindRecentArtifactsTests(unittest.TestCase):
                 os.utime(path, (past, past))
             os.utime(root / "prd" / "old-feature", (past, past))
             started_at = time.time()
-            result = interactive_runner.find_recent_artifacts(root, started_at)
+            result = interactive_runner.find_new_artifacts(root, started_at, {})
         self.assertEqual(result, [])
-
-    def test_newly_written_prd_is_detected(self) -> None:
-        import time
-
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            started_at = time.time() - 10
-            self.make_prd_pair(root, "new-feature")
-            result = interactive_runner.find_recent_artifacts(root, started_at)
-        self.assertEqual(len(result), 1)
-        self.assertTrue(str(result[0].prd_path).endswith("new-feature.md"))
 
 
 if __name__ == "__main__":

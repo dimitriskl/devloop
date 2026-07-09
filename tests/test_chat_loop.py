@@ -312,6 +312,126 @@ class RunPlanningChatTests(unittest.TestCase):
             )
         self.assertEqual(result, "MANUAL")
 
+    def test_failed_resume_falls_back_to_fresh_exec(self) -> None:
+        turns: list[list[str]] = []
+        state = {"count": 0}
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            state["count"] += 1
+            # turn 1: initial planning exec (ok, first session id)
+            # turn 2: resume for the first user message (fails)
+            # turn 3: fresh exec fallback (ok, NEW session id)
+            # turn 4: resume of the NEW session (ok) -> probe then succeeds
+            if state["count"] == 2:
+                return 1, "resume failed"
+            if state["count"] == 3:
+                return 0, "session id: 0198aaaa-1111-2222-3333-444455556666\nok\n"
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "DONE" if state["count"] >= 4 else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["first message", "second message", "third message"]),
+            )
+        self.assertEqual(result, "DONE")
+        # turn 3 (index 2): fresh exec fallback, not a resume; prompt carries the
+        # continuation note plus the user's message text.
+        self.assertNotIn("resume", turns[2])
+        self.assertIn("Continuing an interrupted Dev Loop planning session", turns[2][-1])
+        self.assertIn("second message", turns[2][-1])
+        # turn 4 (index 3): resumes the NEW session id captured from turn 3.
+        self.assertEqual(turns[3][2], "resume")
+        self.assertEqual(turns[3][3], "0198aaaa-1111-2222-3333-444455556666")
+
+    def test_keyboard_interrupt_during_turn_keeps_loop_alive(self) -> None:
+        state = {"count": 0}
+
+        def turn_runner(command, cwd):
+            state["count"] += 1
+            if state["count"] == 2:
+                raise KeyboardInterrupt
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "DONE" if state["count"] >= 3 else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["first", "second"]),
+            )
+        # The interrupt on turn 2 does not escape; the loop consumes "second"
+        # (turn 3) and finishes normally.
+        self.assertEqual(result, "DONE")
+        self.assertGreaterEqual(state["count"], 3)
+
+    def test_unknown_slash_command_is_sent_as_turn(self) -> None:
+        turns: list[list[str]] = []
+        state = {"count": 0}
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            state["count"] += 1
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "DONE" if state["count"] >= 2 else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["/unknown stuff"]),
+            )
+        self.assertEqual(result, "DONE")
+        # turn 1 = initial exec; turn 2 = the "/unknown stuff" line sent verbatim.
+        self.assertEqual(turns[1][-1], "/unknown stuff")
+
+    def test_status_reports_no_artifacts_line(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        def turn_runner(command, cwd):
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as raw, redirect_stdout(buf):
+            chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["/status"]),
+            )
+        self.assertIn("Artifacts: none detected yet", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -274,7 +274,7 @@ def run_issue(
         return RoleResult(status="PASS", summary="Dry run prompts rendered.")
 
     for pass_number in range(1, max_passes + 1):
-        context = f"{progress or f'issue {issue.number}'} · pass {pass_number}"
+        context = f"{progress or f'issue {issue.number}'} / pass {pass_number}"
         print(statusui.render_banner(Stage.DEVELOPMENT, context))
         print(f"[{issue.number}] Pass {pass_number}: coder")
         last_coder = runner.run_role(

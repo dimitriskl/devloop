@@ -22,6 +22,11 @@ UUID_PATTERN = re.compile(
 )
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
+# Only these tokens are treated as slash commands. Anything else that starts
+# with "/" (unknown /foo tokens, absolute POSIX paths like /home/x.png) falls
+# through and is sent to Codex as a normal message.
+KNOWN_COMMANDS = {"/help", "/status", "/options", "/paste", "/done", "/quit"}
+
 HELP_TEXT = """Commands:
   Alt+V    attach a screenshot from the clipboard (use /paste if unavailable)
   /paste   attach a screenshot from the clipboard
@@ -56,6 +61,7 @@ class ChatSession:
     started: bool = False
     pending_images: list[Path] = field(default_factory=list)
     image_counter: int = 0
+    consecutive_failures: int = 0
 
     def build_turn_command(self, message: str, first_prompt: str | None = None) -> list[str]:
         command: list[str] = [self.config.codex, "exec"]
@@ -137,11 +143,27 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
         return 127, message
     captured: list[str] = []
     assert process.stdout is not None
-    for line in process.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        captured.append(line)
-    process.wait()
+    try:
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            captured.append(line)
+        process.wait()
+    except KeyboardInterrupt:
+        # Do not let the child linger: terminate it, drain any buffered output,
+        # then report the conventional 130 exit code with the partial output.
+        process.terminate()
+        try:
+            remainder = process.stdout.read()
+            if remainder:
+                captured.append(remainder)
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            process.kill()
+        return 130, "".join(captured)
     return process.returncode, "".join(captured)
 
 
@@ -205,7 +227,7 @@ def run_planning_chat(
             if not text:
                 continue
 
-            if text.startswith("/"):
+            if text.split()[0].lower() in KNOWN_COMMANDS:
                 handled, result, finished = _handle_command(
                     text, session, callbacks, editor, paste_hook
                 )
@@ -218,23 +240,42 @@ def run_planning_chat(
                 if image not in session.pending_images:
                     session.pending_images.append(image)
 
-            if not session.started:
-                returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
-                if returncode == 0:
-                    session.started = True
+            try:
+                if not session.started:
+                    returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
+                    if returncode == 0:
+                        session.started = True
+                        session.consecutive_failures = 0
+                    else:
+                        session.consecutive_failures += 1
+                        continue
+                    # The goal text the user just typed still needs to reach Codex.
+                    returncode, output = _run_turn(session, turn_runner, message=text)
+                elif session.consecutive_failures >= 1:
+                    # The previous resume turn failed. Rather than resuming the same
+                    # failing session again, start a fresh `codex exec` session whose
+                    # prompt carries a one-line continuation note; the repository files
+                    # hold the real context.
+                    continuation = (
+                        "Continuing an interrupted Dev Loop planning session; prior "
+                        f"context is in the repository files.\n\n{text}"
+                    )
+                    returncode, output = _run_fresh_turn(session, turn_runner, continuation)
                 else:
-                    continue
-                # The goal text the user just typed still needs to reach Codex.
-                returncode, output = _run_turn(session, turn_runner, message=text)
-            else:
-                returncode, output = _run_turn(session, turn_runner, message=text)
+                    returncode, output = _run_turn(session, turn_runner, message=text)
+            except KeyboardInterrupt:
+                print("\nCodex turn interrupted.")
+                session.consecutive_failures += 1
+                continue
 
             if returncode != 0:
+                session.consecutive_failures += 1
                 print(
                     f"Codex turn failed (exit {returncode}). Retry, rephrase, or /quit.",
                     file=sys.stderr,
                 )
                 continue
+            session.consecutive_failures = 0
             session.pending_images.clear()
     finally:
         shutil.rmtree(image_dir, ignore_errors=True)
@@ -254,6 +295,25 @@ def _run_turn(
     return returncode, output
 
 
+def _run_fresh_turn(
+    session: ChatSession,
+    turn_runner: TurnRunner,
+    prompt: str,
+) -> tuple[int, str]:
+    """Start a brand-new `codex exec` session (never resume) with ``prompt``.
+
+    Used to recover after a resume turn fails: the old (failing) session id is
+    replaced with the one parsed from this fresh session so subsequent turns
+    resume the new session.
+    """
+    command = session.build_turn_command("", first_prompt=prompt)
+    returncode, output = turn_runner(command, session.config.repo_root)
+    if returncode == 0:
+        session.session_id = parse_session_id(output)
+        session.started = True
+    return returncode, output
+
+
 def _handle_command(
     text: str,
     session: ChatSession,
@@ -269,6 +329,10 @@ def _handle_command(
     if command == "/status":
         print(statusui.render_banner(Stage.ANALYSIS))
         print(callbacks.status_summary())
+        # Detection exits the chat loop the moment a probe succeeds, so mid-chat
+        # the probe is always None here; report that honestly.
+        if callbacks.probe_artifacts() is None:
+            print("Artifacts: none detected yet")
         if session.pending_images:
             print(f"Pending images: {len(session.pending_images)}")
         return True, None, False
@@ -292,7 +356,8 @@ def _handle_command(
         if _confirm_abort(editor):
             return True, None, True
         return True, None, False
-    print(f"Unknown command: {command}. Type /help for commands.")
+    # Unreachable: the loop only routes KNOWN_COMMANDS here. Fall through as a
+    # no-op rather than emitting a misleading "unknown command" hint.
     return True, None, False
 
 

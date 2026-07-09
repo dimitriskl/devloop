@@ -21,6 +21,11 @@ from .templates import BundleContext
 
 PLAN_STATE_FILE = "devloop-plan.json"
 
+# A PRD/issue pair counts as "fresh" if its newest file mtime is within this many
+# seconds of the moment planning started. Shared by find_artifacts (resolution
+# paths) and find_new_artifacts (the live probe).
+ARTIFACT_FRESHNESS_SLACK_SECONDS = 5
+
 
 @dataclass(frozen=True)
 class PlanningArtifacts:
@@ -31,7 +36,16 @@ class PlanningArtifacts:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        return _run_planning(parser, args)
+    except KeyboardInterrupt:
+        # Top-level backstop: covers the chat loop, the /options menus, and the
+        # handoff input() prompts so a mid-run Ctrl+C exits cleanly.
+        print("\nAborted.")
+        return 130
 
+
+def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     bundle = BundleContext.from_file(Path(__file__).resolve())
     state_path = plan_state_path()
     selection = catalog_module.load_selection(state_path)
@@ -56,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
 
     goal = args.goal.strip() if args.goal else ""
     started_at = time.time()
+    # Snapshot pre-existing PRD/issue pairs before the chat begins. `git worktree
+    # add` (branch strategy 3) materializes old pairs with fresh checkout mtimes,
+    # so the live probe must ignore anything in this snapshot unless its files are
+    # modified past their snapshotted mtime.
+    baseline = snapshot_artifacts(repo_root)
 
     found_catalog = catalog_module.discover(bundle.root)
     skill_paths = catalog_module.planning_skill_paths(selection, found_catalog)
@@ -76,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         approval_policy=args.approval_policy,
     )
     callbacks = ChatCallbacks(
-        probe_artifacts=lambda: _first_or_none(find_recent_artifacts(repo_root, started_at)),
+        probe_artifacts=lambda: _first_or_none(find_new_artifacts(repo_root, started_at, baseline)),
         manual_artifacts=lambda: _manual_artifacts(),
         open_options=lambda: run_options_menu(bundle.root, selection, state_path),
         status_summary=lambda: _status_summary(repo_root, selection),
@@ -392,7 +411,14 @@ def run_handoff(
         if params.use_worktree:
             print(f"Branch:         {params.branch_name}")
         print("Wiki:           always on (read + updated)")
-        raw = input("Press Enter to start development, /options to adjust, /quit to stop: ").strip().lower()
+        if selection.has_role_overrides():
+            print("Preset:         session role overrides (via /options)")
+        else:
+            print("Preset:         embedded defaults")
+        raw = input(
+            "Press Enter to start development, /options to adjust, "
+            "/reset-roles to clear role overrides, /quit to stop: "
+        ).strip().lower()
         if raw == "":
             break
         if raw == "/quit":
@@ -400,7 +426,13 @@ def run_handoff(
         if raw == "/options":
             adjust_handoff_params(params)
             continue
-        print("Unrecognized input. Press Enter, or type /options or /quit.")
+        if raw == "/reset-roles":
+            selection.role_skills = {}
+            selection.role_agents = {}
+            catalog_module.save_selection(state_path, selection)
+            print("Role overrides cleared; using embedded defaults.")
+            continue
+        print("Unrecognized input. Press Enter, or type /options, /reset-roles, or /quit.")
 
     preset_path = catalog_module.write_session_preset(
         bundle_root,
@@ -519,26 +551,6 @@ def initial_goal_block(goal: str) -> str:
     )
 
 
-def resolve_planning_artifacts(repo_root: Path, started_at: float) -> PlanningArtifacts:
-    candidates = find_artifacts(repo_root, started_at)
-    if candidates:
-        if len(candidates) == 1:
-            return candidates[0]
-
-        print()
-        print("Detected multiple PRD / issue-pack pairs:")
-        for index, candidate in enumerate(candidates, start=1):
-            print(f"  {index}. {candidate.prd_path.name} -> {candidate.issues_index}")
-        choice = ask_choice("Select artifact pair", {str(i) for i in range(1, len(candidates) + 1)}, default="1")
-        return candidates[int(choice) - 1]
-
-    print()
-    print("Could not detect a matching PRD folder and issue README pair.")
-    prd_path = ask_existing_file("PRD path")
-    issues_index = ask_existing_file("Issue README path")
-    return PlanningArtifacts(prd_path=prd_path, issues_index=issues_index)
-
-
 def resolve_existing_prd_artifacts(prd_arg: str) -> PlanningArtifacts:
     path = Path(prd_arg).expanduser().resolve()
     if not path.exists():
@@ -655,19 +667,51 @@ def find_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts
     older: list[PlanningArtifacts] = []
     for candidate in sorted(candidates, key=artifact_mtime, reverse=True):
         newest_mtime = artifact_mtime(candidate)
-        if newest_mtime >= started_at - 5:
+        if newest_mtime >= started_at - ARTIFACT_FRESHNESS_SLACK_SECONDS:
             recent.append(candidate)
         else:
             older.append(candidate)
     return recent or older[:3]
 
 
-def find_recent_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts]:
-    return [
-        artifacts
-        for artifacts in find_artifacts(repo_root, started_at)
-        if artifact_mtime(artifacts) >= started_at - 5
-    ]
+def snapshot_artifacts(repo_root: Path) -> dict[Path, float]:
+    """Record PRD/issue pairs that exist before planning starts.
+
+    Pairs in this snapshot are ignored by the live probe unless their
+    files are modified after the chat begins, regardless of checkout
+    mtimes (git worktree add materializes old files with fresh mtimes).
+    """
+    return {
+        artifacts.prd_path: artifact_mtime(artifacts)
+        for artifacts in find_artifacts(repo_root, 0.0)
+    }
+
+
+def find_new_artifacts(
+    repo_root: Path,
+    started_at: float,
+    baseline: dict[Path, float],
+) -> list[PlanningArtifacts]:
+    """Return only PRD/issue pairs that genuinely appeared/changed after start.
+
+    A pair is "new" when its newest mtime is fresh (>= started_at - slack) AND it
+    is either absent from the pre-chat snapshot or has advanced past its
+    snapshotted mtime. Requiring a real ``issues/`` directory keeps the probe from
+    firing on the ``prd/<name>/README.md`` fallback (which the --prd/manual paths
+    still accept).
+    """
+    fresh: list[PlanningArtifacts] = []
+    for artifacts in find_artifacts(repo_root, started_at):
+        if artifacts.issues_index.parent.name != "issues":
+            continue
+        mtime = artifact_mtime(artifacts)
+        if mtime < started_at - ARTIFACT_FRESHNESS_SLACK_SECONDS:
+            continue
+        known = baseline.get(artifacts.prd_path)
+        if known is not None and mtime <= known:
+            continue
+        fresh.append(artifacts)
+    return fresh
 
 
 def find_prd_folder_artifacts(repo_root: Path, prd_dir: Path) -> list[PlanningArtifacts]:
