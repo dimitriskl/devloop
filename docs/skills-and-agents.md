@@ -55,3 +55,27 @@ cp ./agents/codex/*.md "$HOME/.codex/agents/"
 
 The runner can also read the bundled copies directly through the preset, so
 global installation is useful but not required for the loop prompts.
+
+## Drop-In Extensions
+
+Dev Loop discovers agents and skills from the bundle at startup:
+
+- A skill is a folder under `skills/codex/` containing a `SKILL.md` file.
+- An agent is a single `.md` file under `agents/codex/`.
+
+Copy a folder or file into place and it appears in the `/options` pickers on
+the next planning session. Nothing needs registering.
+
+## Install From GitHub
+
+Inside the planning chat, `/options` -> "Add skill or agent from GitHub"
+accepts a repository URL with an optional `#subpath`:
+
+    https://github.com/someone/skills-repo#skills/my-skill
+
+Dev Loop clones the repository shallowly to a temporary folder, lists every
+skill (folder with `SKILL.md`) and agent (`.md` file inside an `agents/`
+directory) it finds under the subpath, asks for confirmation, and moves the
+approved items into `skills/codex/` and `agents/codex/`. Existing names are
+never overwritten. Review third-party skill content before using it: skills
+are instructions that Codex will follow inside your repository.

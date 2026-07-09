@@ -20,12 +20,22 @@ Ubuntu/macOS:
 
 See `docs/interactive-runner.md` for the full flow.
 
+### Stage pipeline
+
+The session always moves through four stages: `analysis -> development ->
+review -> qa`. A banner showing the pipeline and the active stage prints at
+every stage transition and again before every input prompt, so the current
+stage stays visible no matter how much output has scrolled by. Set
+`NO_COLOR=1` to disable the banner's color highlighting; consoles that cannot
+encode the default Unicode markers automatically fall back to ASCII markers.
+
 When `--repo` is omitted, the first run has no target default. If the selected
 folder does not exist, the runner asks whether to create it, then asks whether to
 initialize Git in the new folder so it can be used as a target checkout. After
 you select a valid target checkout, later runs show that checkout as the default.
-When `--goal` is omitted, type the change request inside Codex; arrow-key editing
-and Alt+V image paste are available when your installed Codex CLI supports them.
+When `--goal` is omitted, type the change request at the chat prompt; devloop's
+own line editor provides arrow-key editing, command history, and Alt+V
+screenshot paste regardless of what the installed Codex CLI supports natively.
 
 ## Existing PRD and issue pack
 

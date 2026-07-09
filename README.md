@@ -12,8 +12,10 @@ documentation.
 Dev Loop has two entrypoints:
 
 - `devloop` runs implementation from an existing PRD and local issue pack.
-- `devloop-plan` starts from an idea, opens an interactive Codex planning
-  session, creates the PRD and issue pack, then offers to start `devloop`.
+- `devloop-plan` starts from an idea and runs one continuous session:
+  a Codex-backed planning chat (analysis), then development, review, and QA,
+  with the current stage always visible. Paste screenshots with Alt+V.
+  No exit or Ctrl+C is ever needed between stages.
 
 Use `devloop-plan` when you still need to decide what to build. Use `devloop`
 when `prd/<change>/<change>.md` and `prd/<change>/issues/README.md` already exist.
@@ -79,30 +81,38 @@ Ubuntu/macOS:
 ./bin/devloop-plan.sh --repo /path/to/project
 ```
 
+The session shows a stage banner (`analysis -> development -> review -> qa`).
+Chat with Codex to sharpen the change; when the PRD and issue pack are
+written, press Enter on the summary screen to start development. Type
+`/options` at any prompt to pick agents/skills or install new ones from
+GitHub; type `/help` for all commands. The self-improvement wiki is always
+used: planning reads it, and every run updates it.
+
 `devloop-plan` asks for the target checkout. On the first run there is no target
 default; after a valid selection it saves that checkout and shows it as the
 default on later runs. If the selected folder does not exist, the runner asks
 whether to create it, then asks whether to initialize Git in the new folder so it
 can be used as a target checkout. It then asks whether to use the current branch,
 create a new branch, or create a new worktree for planning. If you do not pass
-`--goal`, the change request is typed inside Codex, so normal Codex input
-features such as arrow-key editing and Alt+V image paste are available when your
-installed CLI supports them. The planning session follows this sequence:
+`--goal`, the change request is typed at the chat prompt; devloop's own line
+editor provides arrow-key editing, command history, and Alt+V screenshot paste
+regardless of what the installed Codex CLI supports natively. The planning
+session follows this sequence:
 
 1. `$grill-with-docs` sharpens the change through questions and records domain
    terms or ADRs when justified.
 2. `$to-prd` writes `prd/<change-name>/<change-name>.md`.
 3. `$to-issues` writes `prd/<change-name>/issues/README.md` and numbered issue
    files with real Markdown links.
-4. The wrapper detects those paths, asks whether to continue to development,
-   and collects start issue/all-issues mode, worktree, branch, and wiki choices.
+4. The wrapper detects those paths on disk and flips straight to the
+   DEVELOPMENT summary screen; there is nothing to exit or quit.
 
-After Codex reports the PRD and issue README paths, exit the planning session
-with `/quit` or Ctrl+C so the wrapper can continue to the development prompts.
-
-Development defaults to a dedicated implementation worktree and using the Dev
-Loop self-improvement wiki. When a run finishes successfully, the runner asks
-whether to merge the implementation branch or worktree into another branch.
+Press Enter on that summary screen to start development immediately with
+sensible defaults (all pending issues, a dedicated worktree, the
+self-improvement wiki always on), or type `/options` to change the start
+issue, worktree, or branch first. When a run finishes successfully, the
+runner asks whether to merge the implementation branch or worktree into
+another branch.
 
 The final handoff command is equivalent to:
 
@@ -116,11 +126,12 @@ To continue an existing PRD without reopening planning:
 .\bin\devloop-plan.ps1 --prd C:\path\to\project\prd\example\example.md
 ```
 
-The runner finds `issues\README.md`, prints the PRD status, and asks for the
-development parameters. Dev Loop writes `devloop.status.json` and
-`devloop.status.md` in the PRD folder, while keeping the older
-`issues\README.loop.state.json` and `issues\README.loop.md` files for
-compatibility. Reruns with `all` continue only blocked or unfinished issues.
+The runner finds `issues\README.md`, prints the PRD status, and shows the
+DEVELOPMENT summary screen (Enter to start, `/options` to adjust). Dev Loop
+writes `devloop.status.json` and `devloop.status.md` in the PRD folder, while
+keeping the older `issues\README.loop.state.json` and `issues\README.loop.md`
+files for compatibility. Reruns with `all` continue only blocked or unfinished
+issues.
 
 ## How Skills Are Used
 
@@ -134,7 +145,9 @@ The main implementation loop uses `presets/generic-minimal.json`:
 - reviewer: senior code review guidance
 - QA: focused verification guidance
 
-The interactive planning loop uses:
+The interactive planning loop uses these skills by default; type `/options` in
+the planning chat to pick a different set, override per-role agents/skills, or
+install more from GitHub:
 
 - `grill-with-docs` and `domain-modeling` for design clarification, glossary
   terms, and ADR decisions
