@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import unittest
@@ -27,8 +28,10 @@ class FakeRunner:
 class WindowsCaptureTests(unittest.TestCase):
     def test_success_invokes_windows_powershell_and_returns_path(self) -> None:
         def runner(command):
-            dest = Path(command[-1])
-            dest.write_bytes(PNG_BYTES)
+            script = command[-1]
+            match = re.search(r"\.Save\('([^']+)'", script)
+            assert match is not None
+            Path(match.group(1)).write_bytes(PNG_BYTES)
             return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
 
         with tempfile.TemporaryDirectory() as raw:

@@ -43,7 +43,7 @@ def capture_clipboard_image(
 
 def _capture_windows(dest: Path, runner: Runner) -> Path | None:
     script = _WINDOWS_SCRIPT.format(dest=str(dest).replace("'", "''"))
-    command = ["powershell.exe", "-NoProfile", "-Command", script, str(dest)]
+    command = ["powershell.exe", "-NoProfile", "-Command", script]
     try:
         result = runner(command)
     except FileNotFoundError:
