@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from devloop import github_install
 
@@ -28,6 +29,22 @@ def repo_with_skill_and_agent(clone_dir: Path) -> None:
     agents = clone_dir / "agents"
     agents.mkdir(parents=True)
     (agents / "my-agent.md").write_text("agent", encoding="utf-8")
+
+
+class FindCandidatesTests(unittest.TestCase):
+    def test_skill_folder_named_agents_is_not_double_classified(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            skill_dir = root / "skills" / "agents"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("skill", encoding="utf-8")
+            agents_dir = root / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "real-agent.md").write_text("agent", encoding="utf-8")
+
+            candidates = github_install.find_candidates(root)
+            labels = sorted(f"{c.kind}:{c.name}" for c in candidates)
+            self.assertEqual(labels, ["agent:real-agent", "skill:agents"])
 
 
 class ParseRefTests(unittest.TestCase):
@@ -134,6 +151,34 @@ class InstallTests(unittest.TestCase):
                 confirm=lambda message: True,
             )
             self.assertEqual(result.installed, ["skill:my-skill"])
+
+    def test_copy_failure_is_contained_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bundle = Path(raw)
+            with mock.patch(
+                "devloop.github_install.shutil.copy2", side_effect=OSError("disk full")
+            ):
+                result = github_install.install_from_github(
+                    "https://github.com/o/r",
+                    bundle,
+                    runner=fake_git_runner(repo_with_skill_and_agent),
+                    confirm=lambda message: True,
+                )
+            self.assertEqual(result.installed, ["skill:my-skill"])
+            self.assertIn("Failed:", result.message)
+            self.assertIn("disk full", result.message)
+
+    def test_subpath_traversal_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bundle = Path(raw)
+            result = github_install.install_from_github(
+                "https://github.com/o/r#../outside",
+                bundle,
+                runner=fake_git_runner(repo_with_skill_and_agent),
+                confirm=lambda message: True,
+            )
+            self.assertEqual(result.installed, [])
+            self.assertIn("Invalid subpath", result.message)
 
 
 if __name__ == "__main__":
