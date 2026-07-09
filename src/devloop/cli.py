@@ -19,6 +19,8 @@ from .state import LoopStateWriter, mark_issue_completed
 from .subprocess_utils import run_captured_text
 from .templates import BundleContext, load_preset
 from .worktree import resolve_worktree
+from . import statusui
+from .statusui import Stage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,12 +129,13 @@ def main(argv: list[str] | None = None) -> int:
 
     overall_status = 0
     blocked_issues: dict[str, Issue] = {}
-    for issue in issues:
+    for position, issue in enumerate(issues, start=1):
         issue_result = run_issue(
             issue=issue,
             runner=runner,
             state_writer=state_writer,
             max_passes=args.max_passes,
+            progress=issue_progress_label(position, len(issues), issue.number),
         )
 
         if issue_result.status in {"BLOCKED", "FAIL"}:
@@ -240,6 +243,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def issue_progress_label(position: int, total: int, issue_number: str) -> str:
+    return f"issue {issue_number} ({position}/{total})"
+
+
 def run_issue(
     issue: Issue,
     runner: CodexRunner,
@@ -248,6 +255,8 @@ def run_issue(
     initial_fix_list: list[str] | None = None,
     attempt_label: str | None = None,
     retry_round: int | None = None,
+    *,
+    progress: str = "",
 ) -> RoleResult:
     fix_list = list(initial_fix_list or [])
     last_coder: RoleResult | None = None
@@ -265,6 +274,8 @@ def run_issue(
         return RoleResult(status="PASS", summary="Dry run prompts rendered.")
 
     for pass_number in range(1, max_passes + 1):
+        context = f"{progress or f'issue {issue.number}'} · pass {pass_number}"
+        print(statusui.render_banner(Stage.DEVELOPMENT, context))
         print(f"[{issue.number}] Pass {pass_number}: coder")
         last_coder = runner.run_role(
             role="coder",
@@ -293,6 +304,7 @@ def run_issue(
             )
             return last_coder
 
+        print(statusui.render_banner(Stage.REVIEW, context))
         print(f"[{issue.number}] Pass {pass_number}: reviewer")
         last_review = runner.run_role(
             role="reviewer",
@@ -315,6 +327,7 @@ def run_issue(
             fix_list = last_review.fix_list or last_review.findings
             continue
 
+        print(statusui.render_banner(Stage.QA, context))
         print(f"[{issue.number}] Pass {pass_number}: qa")
         last_qa = runner.run_role(
             role="qa",
