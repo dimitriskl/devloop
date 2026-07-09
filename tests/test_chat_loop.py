@@ -103,6 +103,16 @@ class BuildTurnCommandTests(unittest.TestCase):
         self.assertIn("--skip-git-repo-check", command)
 
 
+class RunStreamingTests(unittest.TestCase):
+    def test_missing_executable_returns_127_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            returncode, output = chat_loop.run_streaming(
+                ["definitely-not-a-real-binary-xyz"], Path(raw)
+            )
+        self.assertEqual(returncode, 127)
+        self.assertIn("not found", output)
+
+
 class FakeEditor:
     def __init__(self, lines: list[str]) -> None:
         self.lines = list(lines)
@@ -215,6 +225,72 @@ class RunPlanningChatTests(unittest.TestCase):
                 editor=FakeEditor(["first try", "second try"]),
             )
         self.assertEqual(result, "OK")
+
+    def test_first_turn_failure_retries_initial_before_message(self) -> None:
+        turns: list[list[str]] = []
+        state = {"count": 0}
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            state["count"] += 1
+            if state["count"] == 1:
+                return 1, "boom"
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "DONE" if state["count"] >= 3 else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["build a login page"]),
+            )
+        self.assertEqual(result, "DONE")
+        self.assertEqual(len(turns), 3)
+        # turn 1: failed initial exec; turn 2: retried initial exec (plain, not resume)
+        self.assertNotIn("resume", turns[1])
+        self.assertEqual(turns[1][-1], "PLAN")
+        # turn 3: the user's message as a resume turn
+        self.assertEqual(turns[2][2], "resume")
+        self.assertEqual(turns[2][-1], "build a login page")
+
+    def test_image_temp_dir_removed_on_exit(self) -> None:
+        created: list[Path] = []
+        real_mkdtemp = chat_loop.tempfile.mkdtemp
+
+        def tracking_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(Path(path))
+            return path
+
+        def turn_runner(command, cwd):
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "DONE",
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(chat_loop.tempfile, "mkdtemp", tracking_mkdtemp):
+            chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor([]),
+            )
+        image_dirs = [p for p in created if p.name.startswith("devloop-images-")]
+        self.assertEqual(len(image_dirs), 1)
+        self.assertFalse(image_dirs[0].exists())
 
     def test_done_command_uses_manual_fallback(self) -> None:
         def turn_runner(command, cwd):

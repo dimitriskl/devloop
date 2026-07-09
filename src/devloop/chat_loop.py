@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -118,17 +119,22 @@ def detect_image_paths(message: str) -> list[Path]:
 
 
 def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
-    process = subprocess.Popen(
-        list(command),
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
+    try:
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        message = f"Codex executable not found: {command[0]}. Is Codex CLI installed and on PATH?"
+        print(message, file=sys.stderr)
+        return 127, message
     captured: list[str] = []
     assert process.stdout is not None
     for line in process.stdout:
@@ -160,75 +166,78 @@ def run_planning_chat(
         session.image_counter += 1
         return f"[image {session.image_counter} attached] "
 
-    if editor is None:
-        editor = LineEditor(on_paste_image=paste_hook)
+    try:
+        if editor is None:
+            editor = LineEditor(on_paste_image=paste_hook)
 
-    print(statusui.render_banner(Stage.ANALYSIS))
-    print("Describe the change. Type /help for commands; Alt+V pastes a screenshot.")
-
-    returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
-    if returncode == 0:
-        session.started = True
-    else:
-        print(
-            f"Codex could not start (exit {returncode}). "
-            "Your next message will retry the planning session.",
-            file=sys.stderr,
-        )
-
-    while True:
-        artifacts = callbacks.probe_artifacts()
-        if artifacts is not None:
-            print("\nPRD and issue pack detected; continuing to development.")
-            return artifacts
-
-        # The banner stays visible: reprint it before every input prompt so the
-        # current stage survives any amount of scrolled Codex output.
         print(statusui.render_banner(Stage.ANALYSIS))
-        try:
-            line = editor.read_line(statusui.stage_prompt(Stage.ANALYSIS))
-        except EOFError:
-            return None
-        except KeyboardInterrupt:
-            if _confirm_abort(editor):
-                return None
-            continue
+        print("Describe the change. Type /help for commands; Alt+V pastes a screenshot.")
 
-        text = line.strip()
-        if not text:
-            continue
-
-        if text.startswith("/"):
-            handled, result, finished = _handle_command(
-                text, session, callbacks, editor, paste_hook
-            )
-            if finished:
-                return result
-            if handled:
-                continue
-
-        for image in detect_image_paths(text):
-            if image not in session.pending_images:
-                session.pending_images.append(image)
-
-        if not session.started:
-            returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
-            if returncode == 0:
-                session.started = True
-            else:
-                continue
-            # The goal text the user just typed still needs to reach Codex.
-            returncode, output = _run_turn(session, turn_runner, message=text)
+        returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
+        if returncode == 0:
+            session.started = True
         else:
-            returncode, output = _run_turn(session, turn_runner, message=text)
-
-        if returncode != 0:
             print(
-                f"Codex turn failed (exit {returncode}). Retry, rephrase, or /quit.",
+                f"Codex could not start (exit {returncode}). "
+                "Your next message will retry the planning session.",
                 file=sys.stderr,
             )
-            continue
-        session.pending_images.clear()
+
+        while True:
+            artifacts = callbacks.probe_artifacts()
+            if artifacts is not None:
+                print("\nPRD and issue pack detected; continuing to development.")
+                return artifacts
+
+            # The banner stays visible: reprint it before every input prompt so the
+            # current stage survives any amount of scrolled Codex output.
+            print(statusui.render_banner(Stage.ANALYSIS))
+            try:
+                line = editor.read_line(statusui.stage_prompt(Stage.ANALYSIS))
+            except EOFError:
+                return None
+            except KeyboardInterrupt:
+                if _confirm_abort(editor):
+                    return None
+                continue
+
+            text = line.strip()
+            if not text:
+                continue
+
+            if text.startswith("/"):
+                handled, result, finished = _handle_command(
+                    text, session, callbacks, editor, paste_hook
+                )
+                if finished:
+                    return result
+                if handled:
+                    continue
+
+            for image in detect_image_paths(text):
+                if image not in session.pending_images:
+                    session.pending_images.append(image)
+
+            if not session.started:
+                returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
+                if returncode == 0:
+                    session.started = True
+                else:
+                    continue
+                # The goal text the user just typed still needs to reach Codex.
+                returncode, output = _run_turn(session, turn_runner, message=text)
+            else:
+                returncode, output = _run_turn(session, turn_runner, message=text)
+
+            if returncode != 0:
+                print(
+                    f"Codex turn failed (exit {returncode}). Retry, rephrase, or /quit.",
+                    file=sys.stderr,
+                )
+                continue
+            session.pending_images.clear()
+    finally:
+        shutil.rmtree(image_dir, ignore_errors=True)
 
 
 def _run_turn(
