@@ -79,6 +79,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertTrue(str(paths[0]).endswith("SKILL.md"))
 
+    def test_round_trip_preserves_empty_planning_skills(self) -> None:
+        selection = Selection.defaults()
+        selection.planning_skills = []
+        restored = Selection.from_dict(selection.to_dict())
+        self.assertEqual(restored.planning_skills, [])
+
 
 class PersistenceTests(unittest.TestCase):
     def test_save_preserves_other_state_keys(self) -> None:

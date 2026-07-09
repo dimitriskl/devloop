@@ -72,7 +72,7 @@ class Selection:
             return cls.defaults()
         planning = data.get("planning_skills")
         selection = cls.defaults()
-        if isinstance(planning, list) and planning:
+        if isinstance(planning, list):
             selection.planning_skills = [str(item) for item in planning]
         role_skills = data.get("role_skills")
         if isinstance(role_skills, dict):
