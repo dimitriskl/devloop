@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         approval_policy=args.approval_policy,
     )
     callbacks = ChatCallbacks(
-        probe_artifacts=lambda: _first_or_none(find_artifacts(repo_root, started_at)),
+        probe_artifacts=lambda: _first_or_none(find_recent_artifacts(repo_root, started_at)),
         manual_artifacts=lambda: _manual_artifacts(),
         open_options=lambda: run_options_menu(bundle.root, selection, state_path),
         status_summary=lambda: _status_summary(repo_root, selection),
@@ -660,6 +660,14 @@ def find_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts
         else:
             older.append(candidate)
     return recent or older[:3]
+
+
+def find_recent_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts]:
+    return [
+        artifacts
+        for artifacts in find_artifacts(repo_root, started_at)
+        if artifact_mtime(artifacts) >= started_at - 5
+    ]
 
 
 def find_prd_folder_artifacts(repo_root: Path, prd_dir: Path) -> list[PlanningArtifacts]:

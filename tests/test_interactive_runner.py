@@ -111,5 +111,41 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertIn(str(preset), args)
 
 
+class FindRecentArtifactsTests(unittest.TestCase):
+    def make_prd_pair(self, root: Path, name: str) -> None:
+        prd = root / "prd" / name / f"{name}.md"
+        prd.parent.mkdir(parents=True)
+        prd.write_text("prd", encoding="utf-8")
+        issues = root / "prd" / name / "issues" / "README.md"
+        issues.parent.mkdir(parents=True)
+        issues.write_text("issues", encoding="utf-8")
+
+    def test_preexisting_prd_is_not_detected_as_recent(self) -> None:
+        import os
+        import time
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_prd_pair(root, "old-feature")
+            past = time.time() - 3600
+            for path in (root / "prd").rglob("*"):
+                os.utime(path, (past, past))
+            os.utime(root / "prd" / "old-feature", (past, past))
+            started_at = time.time()
+            result = interactive_runner.find_recent_artifacts(root, started_at)
+        self.assertEqual(result, [])
+
+    def test_newly_written_prd_is_detected(self) -> None:
+        import time
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            started_at = time.time() - 10
+            self.make_prd_pair(root, "new-feature")
+            result = interactive_runner.find_recent_artifacts(root, started_at)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(str(result[0].prd_path).endswith("new-feature.md"))
+
+
 if __name__ == "__main__":
     unittest.main()
