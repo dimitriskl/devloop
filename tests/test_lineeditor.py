@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+import unittest
+
+from devloop.lineeditor import LineEditor
+
+
+def editor(paste_result: str | None = "[image 1 attached] ") -> LineEditor:
+    return LineEditor(on_paste_image=lambda: paste_result, write=lambda text: None)
+
+
+class TypingTests(unittest.TestCase):
+    def test_plain_text_and_enter(self) -> None:
+        line = editor().feed("> ", list("hello") + ["\r"])
+        self.assertEqual(line, "hello")
+
+    def test_backspace_removes_before_cursor(self) -> None:
+        line = editor().feed("> ", list("heyy") + ["\x7f", "\r"])
+        self.assertEqual(line, "hey")
+
+    def test_left_arrow_then_insert(self) -> None:
+        keys = list("ac") + ["\x1b", "[", "D", "b", "\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "abc")
+
+
+class AltVTests(unittest.TestCase):
+    def test_alt_v_inserts_paste_token(self) -> None:
+        keys = list("see ") + ["\x1b", "v"] + ["\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "see [image 1 attached] ")
+
+    def test_alt_v_with_no_image_inserts_nothing(self) -> None:
+        keys = list("ok") + ["\x1b", "v", "\r"]
+        line = editor(paste_result=None).feed("> ", keys)
+        self.assertEqual(line, "ok")
+
+
+class HistoryTests(unittest.TestCase):
+    def test_up_arrow_recalls_previous_line(self) -> None:
+        ed = editor()
+        ed.feed("> ", list("first") + ["\r"])
+        line = ed.feed("> ", ["\x1b", "[", "A", "\r"])
+        self.assertEqual(line, "first")
+
+    def test_down_arrow_restores_stash(self) -> None:
+        ed = editor()
+        ed.feed("> ", list("first") + ["\r"])
+        keys = list("dra") + ["\x1b", "[", "A", "\x1b", "[", "B", "ft", "\r"]
+        # up recalls "first", down restores the stashed draft "dra"
+        line = ed.feed("> ", [key for key in keys])
+        self.assertEqual(line, "draft")
+
+
+class ControlTests(unittest.TestCase):
+    def test_ctrl_c_raises_keyboard_interrupt(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            editor().feed("> ", ["\x03"])
+
+    def test_ctrl_d_on_empty_raises_eof(self) -> None:
+        with self.assertRaises(EOFError):
+            editor().feed("> ", ["\x04"])
+
+    def test_exhausted_keys_raise_eof(self) -> None:
+        with self.assertRaises(EOFError):
+            editor().feed("> ", list("abc"))
+
+
+if __name__ == "__main__":
+    unittest.main()
