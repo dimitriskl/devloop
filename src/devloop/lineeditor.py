@@ -147,6 +147,13 @@ class LineEditor:
         self._fallback_hint_shown = False
 
     def read_line(self, prompt: str) -> str:
+        """Read one line from the terminal.
+
+        Must be called from the main thread: on POSIX, cbreak mode leaves
+        ISIG enabled, so a real Ctrl+C arrives as SIGINT (Python's default
+        handler raises KeyboardInterrupt on the main thread), not as a
+        raw \\x03 byte.
+        """
         keys = _make_key_source()
         if keys is None:
             if not self._fallback_hint_shown:

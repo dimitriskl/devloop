@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+import io
 import unittest
+from unittest import mock
 
 from devloop.lineeditor import LineEditor
 
@@ -64,6 +67,59 @@ class ControlTests(unittest.TestCase):
     def test_exhausted_keys_raise_eof(self) -> None:
         with self.assertRaises(EOFError):
             editor().feed("> ", list("abc"))
+
+
+class CursorAndBoundaryTests(unittest.TestCase):
+    def test_right_arrow_moves_cursor_back_right(self) -> None:
+        keys = list("ab") + ["\x1b", "[", "D", "\x1b", "[", "C", "c", "\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "abc")
+
+    def test_home_then_insert_at_start(self) -> None:
+        keys = list("bc") + ["\x1b", "[", "H", "a", "\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "abc")
+
+    def test_end_returns_cursor_to_end(self) -> None:
+        keys = list("ab") + ["\x1b", "[", "H", "\x1b", "[", "F", "c", "\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "abc")
+
+    def test_backspace_at_start_is_noop(self) -> None:
+        keys = ["\x7f"] + list("ok") + ["\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "ok")
+
+    def test_left_arrow_at_start_is_noop(self) -> None:
+        keys = ["\x1b", "[", "D"] + list("ok") + ["\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "ok")
+
+    def test_up_with_no_history_is_noop(self) -> None:
+        keys = ["\x1b", "[", "A"] + list("ok") + ["\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "ok")
+
+    def test_down_without_prior_up_is_noop(self) -> None:
+        keys = ["\x1b", "[", "B"] + list("ok") + ["\r"]
+        line = editor().feed("> ", keys)
+        self.assertEqual(line, "ok")
+
+
+class ReadLineFallbackTests(unittest.TestCase):
+    def test_non_tty_falls_back_to_input_with_one_time_hint(self) -> None:
+        ed = editor()
+        fake_stdin = io.StringIO("typed line\n")
+        printed: list[str] = []
+        with mock.patch("devloop.lineeditor.sys.stdin", fake_stdin), \
+             mock.patch("builtins.input", side_effect=["typed line", "second"]), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            first = ed.read_line("> ")
+            second = ed.read_line("> ")
+        self.assertEqual(first, "typed line")
+        self.assertEqual(second, "second")
+        hints = [line for line in printed if "/paste" in line]
+        self.assertEqual(len(hints), 1)
 
 
 if __name__ == "__main__":
