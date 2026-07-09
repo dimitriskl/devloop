@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -12,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from . import catalog as catalog_module
+from . import statusui
+from .chat_loop import ChatCallbacks, ChatConfig, run_planning_chat
+from .github_install import install_from_github
+from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
+from .statusui import Stage
 from .templates import BundleContext
 
 PLAN_STATE_FILE = "devloop-plan.json"
@@ -28,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     bundle = BundleContext.from_file(Path(__file__).resolve())
+    state_path = plan_state_path()
+    selection = catalog_module.load_selection(state_path)
 
     if args.prd:
         try:
@@ -42,46 +49,96 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PRD: {artifacts.prd_path}")
         print(f"Issue index: {artifacts.issues_index}")
         print_prd_status(artifacts)
+        return run_handoff(bundle.root, repo_root, artifacts, selection, state_path)
 
-        if not ask_yes_no("Continue development from this PRD now?", default=True):
-            return 0
-    else:
-        repo_root = choose_target_repo(args.repo)
-        repo_root = apply_branch_strategy(repo_root)
+    repo_root = choose_target_repo(args.repo)
+    repo_root = apply_branch_strategy(repo_root)
 
-        goal = args.goal.strip() if args.goal else ""
-        started_at = time.time()
-        codex_result = run_codex_planning_session(
-            codex=args.codex,
-            repo_root=repo_root,
-            bundle_root=bundle.root,
-            sandbox=args.sandbox,
-            approval_policy=args.approval_policy,
-            goal=goal,
-        )
-        if codex_result != 0:
-            print(f"Codex planning session exited with code {codex_result}.", file=sys.stderr)
-            return codex_result
+    goal = args.goal.strip() if args.goal else ""
+    started_at = time.time()
 
-        artifacts = resolve_planning_artifacts(repo_root, started_at)
-        print()
-        print(f"PRD: {artifacts.prd_path}")
-        print(f"Issue index: {artifacts.issues_index}")
+    found_catalog = catalog_module.discover(bundle.root)
+    skill_paths = catalog_module.planning_skill_paths(selection, found_catalog)
+    wiki_index = bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"
+    initial_prompt = build_planning_prompt(
+        repo_root=repo_root,
+        bundle_root=bundle.root,
+        goal=goal,
+        skill_paths=skill_paths,
+        wiki_index=wiki_index,
+    )
 
-        if not ask_yes_no("Continue to development now?", default=True):
-            return 0
+    config = ChatConfig(
+        codex=args.codex,
+        repo_root=repo_root,
+        bundle_root=bundle.root,
+        sandbox=args.sandbox,
+        approval_policy=args.approval_policy,
+    )
+    callbacks = ChatCallbacks(
+        probe_artifacts=lambda: _first_or_none(find_artifacts(repo_root, started_at)),
+        manual_artifacts=lambda: _manual_artifacts(),
+        open_options=lambda: run_options_menu(bundle.root, selection, state_path),
+        status_summary=lambda: _status_summary(repo_root, selection),
+    )
 
-    command = build_devloop_command(bundle.root, repo_root, artifacts)
-    print()
-    print("Dev Loop command:")
-    print(format_command(command))
-
-    if not ask_yes_no("Start Dev Loop development with these parameters now?", default=True):
+    artifacts = run_planning_chat(
+        config=config,
+        initial_prompt=initial_prompt,
+        callbacks=callbacks,
+    )
+    if artifacts is None:
+        print("Planning aborted.")
         return 0
 
+    if isinstance(artifacts, list):
+        artifacts = _choose_artifacts(artifacts)
+
     print()
-    print("Starting Dev Loop.")
-    return subprocess.run(command, cwd=bundle.root, check=False).returncode
+    print(f"PRD: {artifacts.prd_path}")
+    print(f"Issue index: {artifacts.issues_index}")
+    return run_handoff(bundle.root, repo_root, artifacts, selection, state_path)
+
+
+def _first_or_none(candidates: list[PlanningArtifacts]) -> "PlanningArtifacts | list[PlanningArtifacts] | None":
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    return candidates
+
+
+def _choose_artifacts(candidates: list[PlanningArtifacts]) -> PlanningArtifacts:
+    print()
+    print("Detected multiple PRD / issue-pack pairs:")
+    for index, candidate in enumerate(candidates, start=1):
+        print(f"  {index}. {candidate.prd_path.name} -> {candidate.issues_index}")
+    choice = ask_choice(
+        "Select artifact pair",
+        {str(i) for i in range(1, len(candidates) + 1)},
+        default="1",
+    )
+    return candidates[int(choice) - 1]
+
+
+def _manual_artifacts() -> PlanningArtifacts:
+    print()
+    print("Enter the artifact paths manually.")
+    prd_path = ask_existing_file("PRD path")
+    issues_index = ask_existing_file("Issue README path")
+    return PlanningArtifacts(prd_path=prd_path, issues_index=issues_index)
+
+
+def _status_summary(repo_root: Path, selection: "catalog_module.Selection") -> str:
+    lines = [
+        f"Repository: {repo_root}",
+        f"Planning skills: {', '.join(selection.planning_skills)}",
+    ]
+    if selection.has_role_overrides():
+        lines.append("Role overrides: customized via /options")
+    else:
+        lines.append("Role agents/skills: embedded defaults")
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,9 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox", default="workspace-write", help="Codex sandbox mode. Default: workspace-write.")
     parser.add_argument(
         "--approval-policy",
-        default="on-request",
+        default="never",
         choices=["never", "on-request", "untrusted", "on-failure"],
-        help="Codex approval policy for the planning session. Default: on-request.",
+        help="Codex approval policy for planning turns. Default: never.",
     )
     return parser
 
@@ -192,6 +249,185 @@ def save_last_target_repo(repo_root: Path) -> None:
         print(f"Could not save target project default: {exc}", file=sys.stderr)
 
 
+@dataclass
+class HandoffParams:
+    start_issue: str | None
+    run_all: bool
+    use_worktree: bool
+    worktree_path: Path
+    branch_name: str
+
+
+def run_options_menu(bundle_root: Path, selection: "catalog_module.Selection", state_path: Path) -> None:
+    found = catalog_module.discover(bundle_root)
+    while True:
+        print()
+        print("Options")
+        print(f"  1. Planning skills (current: {', '.join(selection.planning_skills)})")
+        print("  2. Default agents & skills per role (coder / reviewer / qa)")
+        print("  3. Add skill or agent from GitHub")
+        print("  4. Back")
+        choice = ask_choice("Select", {"1", "2", "3", "4"}, default="4")
+        if choice == "4":
+            catalog_module.save_selection(state_path, selection)
+            return
+        if choice == "1":
+            edit_planning_skills(found, selection)
+        elif choice == "2":
+            edit_role_defaults(found, selection)
+        elif choice == "3":
+            url = ask_required("GitHub URL (optionally #subpath)")
+            result = install_from_github(
+                url,
+                bundle_root,
+                confirm=lambda message: ask_yes_no(f"{message}\nProceed?", default=False),
+            )
+            print(result.message)
+            found = catalog_module.discover(bundle_root)
+
+
+def edit_planning_skills(found: "catalog_module.Catalog", selection: "catalog_module.Selection") -> None:
+    print()
+    print("Available skills (Enter keeps the current selection):")
+    for index, entry in enumerate(found.skills, start=1):
+        marker = "*" if entry.name in selection.planning_skills else " "
+        print(f"  [{marker}] {index}. {entry.name}")
+    raw = input("Comma-separated numbers for planning skills []: ").strip()
+    if not raw:
+        return
+    chosen: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit() and 1 <= int(part) <= len(found.skills):
+            chosen.append(found.skills[int(part) - 1].name)
+    if chosen:
+        selection.planning_skills = chosen
+
+
+def edit_role_defaults(found: "catalog_module.Catalog", selection: "catalog_module.Selection") -> None:
+    role = ask_choice("Role to edit (coder/reviewer/qa)", {"coder", "reviewer", "qa"}, default="coder")
+    print()
+    print("Available skills (Enter keeps the embedded preset):")
+    for index, entry in enumerate(found.skills, start=1):
+        print(f"  {index}. {entry.name}")
+    raw = input(f"Comma-separated skill numbers for {role} []: ").strip()
+    if raw:
+        paths: list[str] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if part.isdigit() and 1 <= int(part) <= len(found.skills):
+                paths.append(f"skills/codex/{found.skills[int(part) - 1].name}/SKILL.md")
+        if paths:
+            selection.role_skills[role] = paths
+    print("Available agents (Enter keeps the embedded preset):")
+    for index, entry in enumerate(found.agents, start=1):
+        print(f"  {index}. {entry.name}")
+    raw = input(f"Comma-separated agent numbers for {role} []: ").strip()
+    if raw:
+        agent_paths: list[str] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if part.isdigit() and 1 <= int(part) <= len(found.agents):
+                agent_paths.append(f"agents/codex/{found.agents[int(part) - 1].name}.md")
+        if agent_paths:
+            selection.role_agents[role] = agent_paths
+
+
+def build_devloop_args(
+    params: HandoffParams,
+    artifacts: PlanningArtifacts,
+    preset_path: Path | None,
+) -> list[str]:
+    args = [
+        "--prd",
+        str(artifacts.prd_path),
+        "--issues",
+        str(artifacts.issues_index),
+        "--self-improvement-wiki",
+    ]
+    if preset_path is not None:
+        args.extend(["--preset", str(preset_path)])
+    if params.start_issue:
+        args.extend(["--start-issue", params.start_issue])
+    if params.run_all:
+        args.append("--all")
+    if params.use_worktree:
+        args.extend(
+            [
+                "--create-worktree",
+                "--worktree-path",
+                str(params.worktree_path),
+                "--branch-name",
+                params.branch_name,
+            ]
+        )
+    else:
+        args.append("--no-worktree")
+    return args
+
+
+def run_handoff(
+    bundle_root: Path,
+    repo_root: Path,
+    artifacts: PlanningArtifacts,
+    selection: "catalog_module.Selection",
+    state_path: Path,
+) -> int:
+    slug = artifact_slug(artifacts)
+    params = HandoffParams(
+        start_issue=None,
+        run_all=True,
+        use_worktree=True,
+        worktree_path=default_worktree_path(repo_root, slug),
+        branch_name=f"devloop/{slug}",
+    )
+
+    while True:
+        print()
+        print(statusui.render_banner(Stage.DEVELOPMENT))
+        print(f"PRD:            {artifacts.prd_path}")
+        print(f"Issue index:    {artifacts.issues_index}")
+        print(f"Issues to run:  {'all pending' if params.run_all and not params.start_issue else params.start_issue or 'all pending'}")
+        print(f"Worktree:       {params.worktree_path if params.use_worktree else 'disabled (work in checkout)'}")
+        if params.use_worktree:
+            print(f"Branch:         {params.branch_name}")
+        print("Wiki:           always on (read + updated)")
+        raw = input("Press Enter to start development, /options to adjust, /quit to stop: ").strip().lower()
+        if raw == "":
+            break
+        if raw == "/quit":
+            return 0
+        if raw == "/options":
+            adjust_handoff_params(params)
+            continue
+        print("Unrecognized input. Press Enter, or type /options or /quit.")
+
+    preset_path = catalog_module.write_session_preset(
+        bundle_root,
+        selection,
+        artifacts.prd_path.parent / "devloop.session.preset.json",
+    )
+    args = build_devloop_args(params, artifacts, preset_path)
+
+    from .cli import main as devloop_main
+
+    print()
+    print("Starting Dev Loop development.")
+    return devloop_main(args)
+
+
+def adjust_handoff_params(params: HandoffParams) -> None:
+    start_issue = normalize_start_issue(input('Start issue, or "all" for every pending issue [all]: '))
+    params.start_issue = start_issue
+    params.run_all = start_issue is None or ask_yes_no(
+        "Run all pending issues from the selected start issue?", default=True
+    )
+    params.use_worktree = ask_yes_no("Use a dedicated implementation worktree?", default=True)
+    if params.use_worktree:
+        params.worktree_path = ask_path("Implementation worktree path", default=params.worktree_path)
+        params.branch_name = ask_required("Implementation branch name", default=params.branch_name)
+
+
 def plan_state_path() -> Path:
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
@@ -231,48 +467,25 @@ def apply_branch_strategy(repo_root: Path) -> Path:
     return worktree_path.resolve()
 
 
-def run_codex_planning_session(
+def build_planning_prompt(
     *,
-    codex: str,
     repo_root: Path,
     bundle_root: Path,
-    sandbox: str,
-    approval_policy: str,
     goal: str,
-) -> int:
-    prompt = build_planning_prompt(repo_root=repo_root, bundle_root=bundle_root, goal=goal)
-    command = [
-        *codex_command_prefix(codex),
-        "-C",
-        str(repo_root),
-        "--add-dir",
-        str(bundle_root),
-        "-s",
-        sandbox,
-        "-a",
-        approval_policy,
-        prompt,
-    ]
-
-    print()
-    print("Starting Codex planning session.")
-    print("Type the change request inside Codex; Codex input supports arrow navigation and Alt+V image paste when your installed CLI supports it.")
-    print("After Codex reports the PRD and issue README paths, type /quit or press Ctrl+C to return here and continue to development.")
-    print(format_command([*command[:-1], "<planning prompt>"]))
-    return subprocess.run(command, cwd=repo_root, check=False).returncode
-
-
-def build_planning_prompt(*, repo_root: Path, bundle_root: Path, goal: str) -> str:
+    skill_paths: list[Path],
+    wiki_index: Path,
+) -> str:
+    skills_block = "\n".join(f"- {path}" for path in skill_paths)
     return f"""You are running the Dev Loop interactive planning intake for this repository.
 
 Repository root: {repo_root}
 Dev Loop bundle root: {bundle_root}
 
 Use these bundled Codex skill instructions:
-- {bundle_root / "skills" / "codex" / "grill-with-docs" / "SKILL.md"}
-- {bundle_root / "skills" / "codex" / "domain-modeling" / "SKILL.md"}
-- {bundle_root / "skills" / "codex" / "to-prd" / "SKILL.md"}
-- {bundle_root / "skills" / "codex" / "to-issues" / "SKILL.md"}
+{skills_block}
+
+Read the Dev Loop self-improvement wiki index and apply relevant lessons to this planning session:
+- {wiki_index}
 
 Required workflow:
 1. Use $grill-with-docs first. Interview the user until the requested change is sharp enough to build.
@@ -282,8 +495,14 @@ Required workflow:
 5. Keep PRD-specific execution information inside {repo_root / "prd" / "<prd-name>"} unless a repository-wide glossary or ADR update is genuinely required.
 6. The issue README must contain real Markdown links to numbered issue files.
 7. Do not start implementation and do not run Dev Loop yourself from inside Codex.
-8. Do not print a Dev Loop command or a long handoff message. When the artifacts are ready, ask the user to exit this Codex planning session so the wrapper can ask development parameters. If the user says to continue, go to development, or similar, explain that this Codex subprocess must be closed first; tell them to type `/quit` or press Ctrl+C to return to the Dev Loop wrapper.
-9. Before that final question, report only the exact PRD path and issue README path.
+8. The Dev Loop wrapper watches the repository and continues automatically once the PRD and issue README exist. Never ask the user to exit or close anything. When the artifacts are ready, report only the exact PRD path and issue README path.
+
+Issue self-containment rules (critical):
+- Each issue is later executed by a fresh Codex session with no memory of this conversation, so the full context window is preserved for development.
+- Every issue file must be self-contained: state the goal, acceptance criteria, verification steps, relevant file paths, and the PRD path plus the specific PRD sections that apply.
+- Never write "as discussed" or refer back to this chat.
+- Keep each issue a thin vertical slice sized for one clean context window; split any issue whose required context grows too large.
+- Save screenshots that matter for implementation into the PRD folder and link them by relative path from the issues that need them.
 
 {initial_goal_block(goal)}
 """
@@ -295,8 +514,8 @@ def initial_goal_block(goal: str) -> str:
 
     return (
         "No initial user goal was supplied on the command line.\n"
-        "Start by asking the user to describe the feature or fix inside Codex. "
-        "They may attach screenshots or photos with Alt+V if their Codex CLI supports it."
+        "Start by asking the user to describe the feature or fix. "
+        "They may attach screenshots; attached images arrive with their messages."
     )
 
 
@@ -514,44 +733,6 @@ def artifact_mtime(artifacts: PlanningArtifacts) -> float:
     return max(artifacts.prd_path.stat().st_mtime, artifacts.issues_index.stat().st_mtime)
 
 
-def build_devloop_command(bundle_root: Path, repo_root: Path, artifacts: PlanningArtifacts) -> list[str]:
-    command = devloop_command_prefix(bundle_root)
-    command.extend(["--prd", str(artifacts.prd_path), "--issues", str(artifacts.issues_index)])
-
-    print()
-    print("Development parameters")
-
-    start_issue = normalize_start_issue(input('Start issue, or "all" for every pending issue [all]: '))
-    if start_issue is None:
-        command.append("--all")
-    else:
-        command.extend(["--start-issue", start_issue])
-
-        if ask_yes_no("Run all pending issues from the selected start issue?", default=True):
-            command.append("--all")
-
-    if ask_yes_no("Use a dedicated implementation worktree?", default=True):
-        slug = artifact_slug(artifacts)
-        worktree_path = ask_path(
-            "Implementation worktree path",
-            default=default_worktree_path(repo_root, slug),
-        )
-        branch_name = ask_required(
-            "Implementation branch name",
-            default=f"devloop/{slug}",
-        )
-        command.extend(["--create-worktree", "--worktree-path", str(worktree_path), "--branch-name", branch_name])
-    else:
-        command.append("--no-worktree")
-
-    if ask_yes_no("Use the Dev Loop self-improvement wiki during and after development?", default=True):
-        command.append("--self-improvement-wiki")
-    else:
-        command.append("--no-self-improvement-wiki")
-
-    return command
-
-
 def normalize_start_issue(raw_start_issue: str) -> str | None:
     start_issue = raw_start_issue.strip()
     if not start_issue or start_issue.lower() in {"all", "*"}:
@@ -568,35 +749,6 @@ def artifact_slug(artifacts: PlanningArtifacts) -> str:
     if artifacts.issues_index.parent.name == "issues":
         return artifacts.issues_index.parent.parent.name
     return artifacts.prd_path.stem
-
-
-def devloop_command_prefix(bundle_root: Path) -> list[str]:
-    if os.name == "nt":
-        return [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(bundle_root / "bin" / "devloop.ps1"),
-        ]
-    return [str(bundle_root / "bin" / "devloop.sh")]
-
-
-def codex_command_prefix(codex: str) -> list[str]:
-    resolved = shutil.which(codex) or codex
-    if os.name != "nt":
-        return [resolved]
-
-    suffix = Path(resolved).suffix.lower()
-    if suffix == ".ps1":
-        return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolved]
-    if suffix in {".cmd", ".bat"}:
-        powershell_shim = Path(resolved).with_suffix(".ps1")
-        if powershell_shim.is_file():
-            return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(powershell_shim)]
-        return [os.environ.get("ComSpec", "cmd.exe"), "/c", resolved]
-    return [resolved]
 
 
 def git_repo_root(path: Path) -> Path:
