@@ -73,8 +73,9 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
        turn N: codex exec resume <id> [-i img…] <user message>
        after each turn: rescan prd/ via find_artifacts
   3. Artifacts detected → banner flips to DEVELOPMENT
-       one-screen summary (issues, worktree path, branch, wiki: always on)
-       Enter = start; /options = adjust
+       one-screen summary (issues, worktree path, branch, wiki: always on,
+       preset: embedded defaults or session role overrides)
+       Enter = start; /options = adjust; /reset-roles = clear role overrides
   4. Dev runner invoked in-process (devloop.cli.main), per issue:
        coder   → banner DEVELOPMENT · issue n/m · pass k
        reviewer→ banner REVIEW
@@ -132,13 +133,17 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
 |---|---|
 | **Alt+V** | Primary paste shortcut (matches Claude Code / Codex CLI): capture clipboard image; show `[image N attached]`; attach to next turn via `-i` |
 | `/paste` | Fallback for terminals where Alt+V cannot be captured (non-TTY, raw mode unavailable); same behavior |
-| `/options` | Menu: default agents (per-role agent/skill from catalog), planning skills, add from GitHub, dev-parameter defaults (worktree/branch/start-issue) |
+| `/options` | Menu: default agents (per-role agent/skill from catalog), planning skills, add from GitHub. Dev-parameter defaults (worktree/branch/start-issue) live on the handoff summary screen, not this chat menu. |
 | `/status` | Reprint banner + artifact paths + selection summary |
 | `/done` | Force artifact detection; fallback to manual path entry (`ask_existing_file`) |
 | `/help` | List commands |
 | `/quit` | Abort the run (never required to advance) |
 
 Image file paths appearing in a chat message are auto-detected and attached.
+
+The handoff summary screen shows preset status (`embedded defaults` or `session
+role overrides`) and offers `/reset-roles` to clear any per-role agent/skill
+overrides before development starts.
 
 ### Clean-context development sessions (invariant)
 
