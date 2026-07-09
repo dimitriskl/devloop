@@ -21,7 +21,11 @@ the analysis (grill-with-docs) stage. Consequences:
 
 1. One continuous terminal session from analysis through qa — no forced exits.
 2. Always-visible stage pipeline: `analysis → development → review → qa`.
-3. Codex-CLI-like interaction: chat turns, screenshot paste, slash commands.
+3. Codex-CLI-like interaction: chat turns, **Alt+V** screenshot paste (as in
+   Claude Code / Codex CLI), slash commands.
+3a. Development context discipline: every coder/reviewer/qa session starts
+   clean (no planning-chat carryover); issues are self-contained and sized
+   for the context window.
 4. Agent/skill selection via `/options`, backed by drop-in files in
    `agents/codex/` and `skills/codex/`, with embedded defaults when the user
    selects nothing.
@@ -95,6 +99,7 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
 | Module | Responsibility | Key interface |
 |---|---|---|
 | `chat_loop.py` | REPL: prompt, turn dispatch, session-id capture (header parse, `resume --last` fallback), slash-command routing, artifact rescan per turn | `run_planning_chat(repo_root, bundle_root, goal, selection) -> PlanningArtifacts \| None` |
+| `lineeditor.py` | Raw-mode line reader with **Alt+V** image-paste hook (as in Claude Code / Codex CLI), backspace, left/right/home/end, up/down history. POSIX: `termios`/`tty`, Alt+V = `ESC v`. Windows: VT input mode via `ctypes` (`ENABLE_VIRTUAL_TERMINAL_INPUT`), same `ESC v` sequence. Non-TTY or raw-mode failure → plain `input()` fallback with `/paste` | `read_line(prompt, on_paste_image) -> str` |
 | `statusui.py` | `Stage` enum, pipeline banner rendering, stage-prefixed prompts; shared by chat loop and `cli.py` | `render_banner(stage, context)`, `stage_prompt(stage)` |
 | `clipboard.py` | Clipboard-image capture → temp PNG. Windows: PowerShell `Get-Clipboard -Format Image`; Linux: `wl-paste` then `xclip`; macOS: `pngpaste` then AppleScript | `capture_clipboard_image(dest_dir) -> Path \| None` |
 | `catalog.py` | Discover agents (`agents/codex/*.md`) and skills (`skills/codex/*/SKILL.md`); mark embedded defaults; hold current selection | `discover(bundle_root) -> Catalog`; `Selection` dataclass |
@@ -125,7 +130,8 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
 
 | Command | Action |
 |---|---|
-| `/paste` | Capture clipboard image; show `[image N attached]`; attach to next turn via `-i` |
+| **Alt+V** | Primary paste shortcut (matches Claude Code / Codex CLI): capture clipboard image; show `[image N attached]`; attach to next turn via `-i` |
+| `/paste` | Fallback for terminals where Alt+V cannot be captured (non-TTY, raw mode unavailable); same behavior |
 | `/options` | Menu: default agents (per-role agent/skill from catalog), planning skills, add from GitHub, dev-parameter defaults (worktree/branch/start-issue) |
 | `/status` | Reprint banner + artifact paths + selection summary |
 | `/done` | Force artifact detection; fallback to manual path entry (`ask_existing_file`) |
@@ -133,6 +139,30 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
 | `/quit` | Abort the run (never required to advance) |
 
 Image file paths appearing in a chat message are auto-detected and attached.
+
+### Clean-context development sessions (invariant)
+
+The planning chat's `resume` chain exists **only** during ANALYSIS and ends at
+the handoff. Every development invocation (coder, reviewer, qa — per issue,
+per pass) starts a **clean `codex exec` session with no inherited context**,
+exactly as `codex_runner.py` does today (plain `exec`, never `resume`). The
+full context window of each development session is reserved for the issue at
+hand.
+
+Consequence: the issue pack must carry everything a clean session needs. The
+planning prompt instructs Codex (reinforcing the `to-issues` skill) that each
+issue file must be **self-contained**:
+
+- Goal, acceptance criteria, and verification steps stated in the issue
+  itself — never "as discussed above" or references to the planning chat.
+- Concrete pointers: relevant file paths, the PRD path, and the specific PRD
+  sections that apply — summarized in the issue, not duplicated wholesale.
+- Sized to respect the context window: one thin vertical slice per issue; if
+  the required context outgrows a comfortable single read, the issue must be
+  split rather than compressed.
+- Screenshots and images referenced during planning that matter for
+  implementation are saved into the PRD folder and linked by path from the
+  relevant issue, so clean sessions can load them.
 
 ### Selection persistence
 
@@ -148,6 +178,9 @@ so they become sticky defaults across runs. Enter always accepts defaults.
   fails, start a fresh session with a one-line continuation note.
 - Clipboard empty / no image tool available: friendly one-liner naming the
   missing tool; no attachment.
+- Raw keyboard mode unavailable (piped stdin, unsupported console): line
+  editor silently degrades to plain `input()` and prints a one-time hint that
+  `/paste` replaces Alt+V in this terminal.
 - Artifacts never detected: `/done` → manual path entry.
 - GitHub install failure (bad URL, git missing, no SKILL.md/agent .md found):
   clear message; temp dir discarded; target directories untouched
@@ -162,6 +195,8 @@ Stdlib `unittest` in a new `tests/` folder (no new dependencies):
 - `catalog`: fixture dirs; defaults marking; tolerance of missing dirs.
 - Session-id parsing: sample outputs incl. absence → fallback path.
 - Artifact detection: temp `prd/` layouts (regression coverage for existing logic).
+- `lineeditor`: synthetic key-sequence tests (`ESC v` → paste hook fires;
+  arrows/backspace/history editing; raw-mode-unavailable → `input()` fallback).
 - `statusui`: banner snapshots per stage; `NO_COLOR`/non-TTY mode.
 - `clipboard` / `github_install`: injected command runner; assert per-OS argv.
 - Manual smoke matrix: Windows PowerShell + Windows Terminal, Ubuntu bash,
