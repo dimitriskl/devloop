@@ -1,5 +1,17 @@
 # Dev Loop
 
+```text
++------------------------------------------------------------+
+|  ____  _______     __  _     ___   ___  ____              |
+| |  _ \| ____\ \   / / | |   / _ \ / _ \|  _ \             |
+| | | | |  _|  \ \ / /  | |  | | | | | | | |_) |            |
+| | |_| | |___  \ V /   | |__| |_| | |_| |  __/             |
+| |____/|_____|  \_/    |_____\___/ \___/|_|                |
+|                                                            |
+|    [ ANALYSIS ] => [ BUILD ] => [ REVIEW ] => [ QA ]      |
++------------------------------------------------------------+
+```
+
 Portable Codex development-loop runner for local PRD and issue packs.
 
 The bundle is designed to be copied to a machine that does not already have a
@@ -25,6 +37,7 @@ when `prd/<change>/<change>.md` and `prd/<change>/issues/README.md` already exis
 Read this first:
 
 - `docs/new-pc-setup.md`
+- `docs/how-to-use.md`
 
 Main prerequisites:
 
@@ -172,6 +185,7 @@ in this repository.
 
 All detailed documentation is under `docs/`:
 
+- `docs/how-to-use.md`
 - `docs/new-pc-setup.md`
 - `docs/install-windows.md`
 - `docs/install-ubuntu.md`
