@@ -131,7 +131,7 @@ to stop without starting development.
 Development, review, and QA then run in the same terminal, in-process —
 devloop calls its own implementation runner directly rather than spawning a
 new process. Expect a DEVELOPMENT/REVIEW/QA banner before every role prompt,
-with a context suffix such as `issue 0004 (2/6) · pass 1`, and the
+with a context suffix such as `issue 0004 (2/6) / pass 1`, and the
 self-improvement wiki update running automatically at the end of the run.
 
 The generated PRD is expected under `prd/<prd-stem>/`. The issue pack is

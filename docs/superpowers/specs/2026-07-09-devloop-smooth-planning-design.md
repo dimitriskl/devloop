@@ -77,7 +77,7 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
        preset: embedded defaults or session role overrides)
        Enter = start; /options = adjust; /reset-roles = clear role overrides
   4. Dev runner invoked in-process (devloop.cli.main), per issue:
-       coder   → banner DEVELOPMENT · issue n/m · pass k
+       coder   → banner DEVELOPMENT · issue n/m / pass k
        reviewer→ banner REVIEW
        qa      → banner QA
      wiki read by all roles; post-run wiki update always runs
@@ -121,7 +121,7 @@ devloop-plan (ps1/sh → python -m devloop.interactive_runner)
   - Invokes `devloop.cli.main()` in-process instead of spawning
     `devloop.ps1`/`devloop.sh`.
 - `cli.py` — role transitions render stage banners via `statusui`
-  (DEVELOPMENT/REVIEW/QA with `issue n/m · pass k`). No behavioral change.
+  (DEVELOPMENT/REVIEW/QA with `issue n/m / pass k`). No behavioral change.
 - `bin/devloop-plan.ps1` / `bin/devloop-plan.sh` — remain thin forwarders;
   any new flags/help text mirrored in both.
 - Docs — README, `docs/interactive-runner.md`, `docs/skills-and-agents.md`
