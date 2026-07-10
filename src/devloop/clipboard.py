@@ -12,9 +12,12 @@ Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[bytes]"]
 _WINDOWS_SCRIPT = (
     "$ErrorActionPreference = 'Stop'; "
     "Add-Type -AssemblyName System.Windows.Forms; "
-    "$img = Get-Clipboard -Format Image; "
+    "Add-Type -AssemblyName System.Drawing; "
+    "if (-not [System.Windows.Forms.Clipboard]::ContainsImage()) {{ exit 1 }}; "
+    "$img = [System.Windows.Forms.Clipboard]::GetImage(); "
     "if ($null -eq $img) {{ exit 1 }}; "
     "$img.Save('{dest}', [System.Drawing.Imaging.ImageFormat]::Png); "
+    "$img.Dispose(); "
     "exit 0"
 )
 
@@ -43,7 +46,7 @@ def capture_clipboard_image(
 
 def _capture_windows(dest: Path, runner: Runner) -> Path | None:
     script = _WINDOWS_SCRIPT.format(dest=str(dest).replace("'", "''"))
-    command = ["powershell.exe", "-NoProfile", "-Command", script]
+    command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
     try:
         result = runner(command)
     except FileNotFoundError:

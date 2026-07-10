@@ -14,12 +14,18 @@ from typing import Sequence
 from . import catalog as catalog_module
 from . import statusui
 from .chat_loop import ChatCallbacks, ChatConfig, run_planning_chat
+from .gitrefs import sanitize_branch_name
 from .github_install import install_from_github
+from .lineeditor import LineEditor
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage
 from .templates import BundleContext
+from .worktree import build_worktree_add_command, resolve_existing_worktree
 
 PLAN_STATE_FILE = "devloop-plan.json"
+TARGET_REPO_STATE_KEY = "target_repo"
+LAST_WORKTREE_PARENT_STATE_KEY = "last_worktree_parent"
+_PROMPT_EDITOR: LineEditor | None = None
 
 # A PRD/issue pair counts as "fresh" if its newest file mtime is within this many
 # seconds of the moment planning started. Shared by find_artifacts (resolution
@@ -40,12 +46,15 @@ def main(argv: list[str] | None = None) -> int:
         return _run_planning(parser, args)
     except KeyboardInterrupt:
         # Top-level backstop: covers the chat loop, the /options menus, and the
-        # handoff input() prompts so a mid-run Ctrl+C exits cleanly.
+        # handoff prompts so a mid-run Ctrl+C exits cleanly.
         print("\nAborted.")
         return 130
 
 
 def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if args.native_editor:
+        os.environ["DEVLOOP_EDITOR"] = "native"
+
     bundle = BundleContext.from_file(Path(__file__).resolve())
     state_path = plan_state_path()
     selection = catalog_module.load_selection(state_path)
@@ -69,6 +78,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     repo_root = apply_branch_strategy(repo_root)
 
     goal = args.goal.strip() if args.goal else ""
+    collect_initial_message = not goal
     started_at = time.time()
     # Snapshot pre-existing PRD/issue pairs before the chat begins. `git worktree
     # add` (branch strategy 3) materializes old pairs with fresh checkout mtimes,
@@ -105,6 +115,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         config=config,
         initial_prompt=initial_prompt,
         callbacks=callbacks,
+        collect_initial_message=collect_initial_message,
     )
     if artifacts is None:
         print("Planning aborted.")
@@ -125,6 +136,13 @@ def _first_or_none(candidates: list[PlanningArtifacts]) -> "PlanningArtifacts | 
     if len(candidates) == 1:
         return candidates[0]
     return candidates
+
+
+def read_prompt(prompt: str) -> str:
+    global _PROMPT_EDITOR
+    if _PROMPT_EDITOR is None:
+        _PROMPT_EDITOR = LineEditor(on_paste_image=lambda: None, fallback_hint=None)
+    return _PROMPT_EDITOR.read_line(prompt)
 
 
 def _choose_artifacts(candidates: list[PlanningArtifacts]) -> PlanningArtifacts:
@@ -170,8 +188,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo", help="Target project checkout. Defaults to an interactive prompt.")
     parser.add_argument("--prd", help="Existing PRD file or PRD folder to resume directly. Skips planning and starts from the development prompts.")
-    parser.add_argument("--goal", help="Initial feature or fix description. If omitted, Codex asks for it interactively.")
+    parser.add_argument("--goal", help="Initial feature or fix description. If omitted, Dev Loop asks before Codex starts.")
     parser.add_argument("--codex", default="codex", help="Codex executable path or command name. Default: codex.")
+    parser.add_argument(
+        "--native-editor",
+        action="store_true",
+        help="Use terminal-native line input instead of Dev Loop raw key handling. Use /paste for screenshots.",
+    )
     parser.add_argument("--sandbox", default="workspace-write", help="Codex sandbox mode. Default: workspace-write.")
     parser.add_argument(
         "--approval-policy",
@@ -190,7 +213,7 @@ def choose_target_repo(repo_arg: str | None) -> Path:
             if default is None:
                 raw = ask_required("Target project root")
             else:
-                raw = input(f"Target project root [{default}]: ").strip()
+                raw = read_prompt(f"Target project root [{default}]: ").strip()
         candidate = (Path(raw).expanduser() if raw else default).resolve()
         created = ensure_target_directory(candidate)
         if not candidate.is_dir():
@@ -240,13 +263,7 @@ def ensure_target_directory(path: Path) -> bool:
 
 
 def load_last_target_repo() -> Path | None:
-    try:
-        state_path = plan_state_path()
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    raw = data.get("target_repo")
+    raw = load_plan_state().get(TARGET_REPO_STATE_KEY)
     if not isinstance(raw, str) or not raw.strip():
         return None
 
@@ -257,15 +274,37 @@ def load_last_target_repo() -> Path | None:
 
 
 def save_last_target_repo(repo_root: Path) -> None:
+    save_plan_state_value(TARGET_REPO_STATE_KEY, str(repo_root), "target project default")
+
+
+def load_last_worktree_parent() -> Path | None:
+    raw = load_plan_state().get(LAST_WORKTREE_PARENT_STATE_KEY)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def save_last_worktree_parent(parent: Path) -> None:
+    save_plan_state_value(LAST_WORKTREE_PARENT_STATE_KEY, str(parent.resolve()), "worktree parent default")
+
+
+def load_plan_state() -> dict[str, object]:
+    try:
+        data = json.loads(plan_state_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_plan_state_value(key: str, value: object, description: str) -> None:
     state_path = plan_state_path()
+    data = load_plan_state()
+    data[key] = value
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(
-            json.dumps({"target_repo": str(repo_root)}, indent=2),
-            encoding="utf-8",
-        )
+        state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except OSError as exc:
-        print(f"Could not save target project default: {exc}", file=sys.stderr)
+        print(f"Could not save {description}: {exc}", file=sys.stderr)
 
 
 @dataclass
@@ -311,7 +350,7 @@ def edit_planning_skills(found: "catalog_module.Catalog", selection: "catalog_mo
     for index, entry in enumerate(found.skills, start=1):
         marker = "*" if entry.name in selection.planning_skills else " "
         print(f"  [{marker}] {index}. {entry.name}")
-    raw = input("Comma-separated numbers for planning skills []: ").strip()
+    raw = read_prompt("Comma-separated numbers for planning skills []: ").strip()
     if not raw:
         return
     chosen: list[str] = []
@@ -329,7 +368,7 @@ def edit_role_defaults(found: "catalog_module.Catalog", selection: "catalog_modu
     print("Available skills (Enter keeps the embedded preset):")
     for index, entry in enumerate(found.skills, start=1):
         print(f"  {index}. {entry.name}")
-    raw = input(f"Comma-separated skill numbers for {role} []: ").strip()
+    raw = read_prompt(f"Comma-separated skill numbers for {role} []: ").strip()
     if raw:
         paths: list[str] = []
         for part in raw.split(","):
@@ -341,7 +380,7 @@ def edit_role_defaults(found: "catalog_module.Catalog", selection: "catalog_modu
     print("Available agents (Enter keeps the embedded preset):")
     for index, entry in enumerate(found.agents, start=1):
         print(f"  {index}. {entry.name}")
-    raw = input(f"Comma-separated agent numbers for {role} []: ").strip()
+    raw = read_prompt(f"Comma-separated agent numbers for {role} []: ").strip()
     if raw:
         agent_paths: list[str] = []
         for part in raw.split(","):
@@ -397,8 +436,8 @@ def run_handoff(
         start_issue=None,
         run_all=True,
         use_worktree=True,
-        worktree_path=default_worktree_path(repo_root, slug),
-        branch_name=f"devloop/{slug}",
+        worktree_path=default_worktree_path(repo_root, slug, parent=load_last_worktree_parent()),
+        branch_name=sanitize_branch_name(f"devloop/{slug}"),
     )
 
     while True:
@@ -415,7 +454,7 @@ def run_handoff(
             print("Preset:         session role overrides (via /options)")
         else:
             print("Preset:         embedded defaults")
-        raw = input(
+        raw = read_prompt(
             "Press Enter to start development, /options to adjust, "
             "/reset-roles to clear role overrides, /quit to stop: "
         ).strip().lower()
@@ -449,15 +488,19 @@ def run_handoff(
 
 
 def adjust_handoff_params(params: HandoffParams) -> None:
-    start_issue = normalize_start_issue(input('Start issue, or "all" for every pending issue [all]: '))
+    start_issue = normalize_start_issue(read_prompt('Start issue, or "all" for every pending issue [all]: '))
     params.start_issue = start_issue
     params.run_all = start_issue is None or ask_yes_no(
         "Run all pending issues from the selected start issue?", default=True
     )
     params.use_worktree = ask_yes_no("Use a dedicated implementation worktree?", default=True)
     if params.use_worktree:
-        params.worktree_path = ask_path("Implementation worktree path", default=params.worktree_path)
-        params.branch_name = ask_required("Implementation branch name", default=params.branch_name)
+        params.worktree_path = ask_worktree_location(
+            "Implementation worktree",
+            default=params.worktree_path,
+            remember_parent=True,
+        )
+        params.branch_name = ask_branch_name("Implementation branch name", default=params.branch_name)
 
 
 def plan_state_path() -> Path:
@@ -489,14 +532,33 @@ def apply_branch_strategy(repo_root: Path) -> Path:
         return repo_root
 
     if choice == "2":
-        branch_name = ask_required("New branch name")
+        branch_name = ask_branch_name("New branch name")
         run_git(["checkout", "-b", branch_name], cwd=repo_root)
         return repo_root
 
-    worktree_path = ask_path("New worktree path")
-    branch_name = ask_required("New worktree branch name")
-    run_git(["worktree", "add", "-b", branch_name, str(worktree_path)], cwd=repo_root)
-    return worktree_path.resolve()
+    worktree_path = ask_worktree_location(
+        "New worktree",
+        default_parent=load_last_worktree_parent(),
+        remember_parent=True,
+    )
+    branch_name = ask_branch_name("New worktree branch name")
+    return create_or_reuse_worktree(repo_root, worktree_path, branch_name)
+
+
+def create_or_reuse_worktree(repo_root: Path, worktree_path: Path, branch_name: str) -> Path:
+    worktree_path = worktree_path.resolve()
+    try:
+        existing_worktree = resolve_existing_worktree(repo_root, worktree_path, branch_name)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    if existing_worktree is not None:
+        return existing_worktree.resolve()
+
+    command = build_worktree_add_command(repo_root, worktree_path, branch_name)
+    run_git(command[1:], cwd=repo_root)
+    return worktree_path
 
 
 def build_planning_prompt(
@@ -546,8 +608,8 @@ def initial_goal_block(goal: str) -> str:
 
     return (
         "No initial user goal was supplied on the command line.\n"
-        "Start by asking the user to describe the feature or fix. "
-        "They may attach screenshots; attached images arrive with their messages."
+        "Dev Loop appends the user's typed change request before starting this Codex turn. "
+        "Attached images arrive with that first message."
     )
 
 
@@ -792,9 +854,9 @@ def normalize_start_issue(raw_start_issue: str) -> str | None:
     return start_issue
 
 
-def default_worktree_path(repo_root: Path, slug: str) -> Path:
+def default_worktree_path(repo_root: Path, slug: str, *, parent: Path | None = None) -> Path:
     safe_slug = slug[:60].strip("-") or "devloop-work"
-    return repo_root.parent / f"{repo_root.name}-{safe_slug}-dev"
+    return (parent or repo_root.parent) / f"{repo_root.name}-{safe_slug}-dev"
 
 
 def artifact_slug(artifacts: PlanningArtifacts) -> str:
@@ -839,7 +901,7 @@ def run_text(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProces
 
 def ask_choice(prompt: str, allowed: set[str], *, default: str) -> str:
     while True:
-        raw = input(f"{prompt} [{default}]: ").strip() or default
+        raw = read_prompt(f"{prompt} [{default}]: ").strip() or default
         if raw in allowed:
             return raw
         print(f"Expected one of: {', '.join(sorted(allowed))}", file=sys.stderr)
@@ -848,7 +910,7 @@ def ask_choice(prompt: str, allowed: set[str], *, default: str) -> str:
 def ask_yes_no(prompt: str, *, default: bool) -> bool:
     suffix = "Y/n" if default else "y/N"
     while True:
-        raw = input(f"{prompt} [{suffix}]: ").strip().lower()
+        raw = read_prompt(f"{prompt} [{suffix}]: ").strip().lower()
         if not raw:
             return default
         if raw in {"y", "yes"}:
@@ -861,7 +923,7 @@ def ask_yes_no(prompt: str, *, default: bool) -> bool:
 def ask_required(prompt: str, *, default: str | None = None) -> str:
     while True:
         suffix = f" [{default}]" if default else ""
-        value = input(f"{prompt}{suffix}: ").strip()
+        value = read_prompt(f"{prompt}{suffix}: ").strip()
         if value:
             return value
         if default:
@@ -869,10 +931,39 @@ def ask_required(prompt: str, *, default: str | None = None) -> str:
         print("Value is required.", file=sys.stderr)
 
 
+def ask_branch_name(prompt: str, *, default: str | None = None) -> str:
+    raw = ask_required(prompt, default=default)
+    branch_name = sanitize_branch_name(raw)
+    if branch_name != raw:
+        print(f"Using branch name: {branch_name}")
+    return branch_name
+
+
 def ask_path(prompt: str, *, default: Path | None = None) -> Path:
     while True:
         value = ask_required(prompt, default=str(default) if default else None)
         return Path(value).expanduser().resolve()
+
+
+def ask_worktree_location(
+    prompt: str,
+    *,
+    default: Path | None = None,
+    default_parent: Path | None = None,
+    remember_parent: bool = False,
+) -> Path:
+    parent_default = default_parent or (default.parent if default is not None else None)
+    default_name = default.name if default is not None else None
+    while True:
+        parent = ask_path(f"{prompt} parent path", default=parent_default)
+        name = ask_required(f"{prompt} folder name", default=default_name)
+        name_path = Path(name)
+        if name_path.is_absolute() or len(name_path.parts) != 1:
+            print("Enter only the worktree folder name, not a full path.", file=sys.stderr)
+            continue
+        if remember_parent:
+            save_last_worktree_parent(parent)
+        return (parent / name).expanduser().resolve()
 
 
 def ask_existing_file(prompt: str) -> Path:

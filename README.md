@@ -123,9 +123,9 @@ session follows this sequence:
 Press Enter on that summary screen to start development immediately with
 sensible defaults (all pending issues, a dedicated worktree, the
 self-improvement wiki always on), or type `/options` to change the start
-issue, worktree, or branch first. When a run finishes successfully, the
-runner asks whether to merge the implementation branch or worktree into
-another branch.
+issue, worktree parent path, worktree folder name, or branch first. When a run
+finishes successfully, the runner asks whether to merge the implementation
+branch or worktree into another branch.
 
 The final handoff command is equivalent to:
 

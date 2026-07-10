@@ -12,14 +12,13 @@ $ErrorActionPreference = 'Stop'
 function Show-DevLoopLogo {
     param(
         [Parameter(Mandatory = $true)]
-        [string] $BundleRoot
+        [string] $BundleRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Python
     )
 
-    $logoPath = Join-Path $BundleRoot 'docs\devloop-logo.txt'
-    if (Test-Path -LiteralPath $logoPath) {
-        Get-Content -LiteralPath $logoPath | ForEach-Object { Write-Host $_ }
-        Write-Host ''
-    }
+    & $Python -m devloop.logo $BundleRoot
 }
 
 function Get-DevLoopPython {
@@ -46,7 +45,6 @@ function Get-DevLoopPython {
 }
 
 $bundleRoot = Split-Path -Parent $PSScriptRoot
-Show-DevLoopLogo -BundleRoot $bundleRoot
 
 $pythonPath = Join-Path $bundleRoot 'src'
 $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
@@ -57,6 +55,7 @@ else {
 }
 
 $python = Get-DevLoopPython
+Show-DevLoopLogo -BundleRoot $bundleRoot -Python $python
 
 if ($Help) {
     & $python -m devloop.interactive_runner --help

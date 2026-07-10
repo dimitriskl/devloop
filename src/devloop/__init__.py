@@ -1,6 +1,7 @@
 """Portable Codex development-loop runner."""
 
-__all__ = ["__version__"]
+from .version import VERSION
 
-__version__ = "0.1.0"
+__all__ = ["VERSION", "__version__"]
 
+__version__ = VERSION

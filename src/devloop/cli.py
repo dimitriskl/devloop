@@ -9,6 +9,7 @@ from typing import Any
 
 from .codex_runner import CodexRunner, RoleResult
 from .issue_pack import Issue, find_repo_root, parse_issue_index, select_issues
+from .lineeditor import LineEditor
 from .self_improvement_wiki import (
     DEFAULT_SELF_IMPROVEMENT_WIKI_PATH,
     ensure_self_improvement_wiki,
@@ -21,6 +22,8 @@ from .templates import BundleContext, load_preset
 from .worktree import resolve_worktree
 from . import statusui
 from .statusui import Stage
+
+_PROMPT_EDITOR: LineEditor | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -680,7 +683,7 @@ def git_status_porcelain(repo_root: Path) -> str:
 def ask_yes_no(prompt: str, *, default: bool) -> bool:
     suffix = "Y/n" if default else "y/N"
     while True:
-        raw = input(f"{prompt} [{suffix}]: ").strip().lower()
+        raw = read_prompt(f"{prompt} [{suffix}]: ").strip().lower()
         if not raw:
             return default
         if raw in {"y", "yes"}:
@@ -693,12 +696,19 @@ def ask_yes_no(prompt: str, *, default: bool) -> bool:
 def ask_required(prompt: str, *, default: str | None = None) -> str:
     while True:
         suffix = f" [{default}]" if default else ""
-        value = input(f"{prompt}{suffix}: ").strip()
+        value = read_prompt(f"{prompt}{suffix}: ").strip()
         if value:
             return value
         if default:
             return default
         print("Value is required.", file=sys.stderr)
+
+
+def read_prompt(prompt: str) -> str:
+    global _PROMPT_EDITOR
+    if _PROMPT_EDITOR is None:
+        _PROMPT_EDITOR = LineEditor(on_paste_image=lambda: None, fallback_hint=None)
+    return _PROMPT_EDITOR.read_line(prompt)
 
 
 def print_json(data: object) -> None:

@@ -77,7 +77,7 @@ that mode.
 
 Clipboard capture depends on tools already present on most machines:
 
-- Windows: the built-in PowerShell clipboard cmdlets — nothing extra to
+- Windows: the built-in PowerShell and .NET clipboard APIs — nothing extra to
   install.
 - Linux: `wl-paste` (Wayland) or `xclip` (X11).
 - macOS: `pngpaste` (`brew install pngpaste`).
@@ -125,8 +125,13 @@ use one), the branch name, and a line confirming the self-improvement wiki is
 always on (read before development, and updated after). Press Enter to start
 development immediately with those defaults. Type `/options` to change the
 start issue, whether to run every pending issue, whether to use a dedicated
-worktree, the worktree path, or the branch name before starting. Type `/quit`
-to stop without starting development.
+worktree, the worktree parent path and folder name, or the branch name before
+starting. Type `/quit` to stop without starting development.
+Friendly branch names are normalized before Git runs, so `Reset Queue` becomes
+`Reset-Queue`.
+Entered worktree parent paths are remembered and offered as the next default.
+If a selected worktree path already exists as a Git checkout, Dev Loop continues
+from that checkout instead of trying to create it again.
 
 Development, review, and QA then run in the same terminal, in-process —
 devloop calls its own implementation runner directly rather than spawning a

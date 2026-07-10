@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from devloop import chat_loop
 from devloop.chat_loop import ChatCallbacks, ChatConfig, ChatSession
@@ -19,6 +22,16 @@ class ParseSessionIdTests(unittest.TestCase):
     def test_ignores_uuid_on_unrelated_line(self) -> None:
         output = "request id 0198c0de-1111-2222-3333-444455556666\n"
         self.assertIsNone(chat_loop.parse_session_id(output))
+
+    def test_finds_thread_id_from_json_event(self) -> None:
+        output = (
+            '{"type":"thread.started",'
+            '"thread_id":"0198c0de-1111-2222-3333-444455556666"}\n'
+        )
+        self.assertEqual(
+            chat_loop.parse_session_id(output),
+            "0198c0de-1111-2222-3333-444455556666",
+        )
 
     def test_none_when_absent(self) -> None:
         self.assertIsNone(chat_loop.parse_session_id("no ids here"))
@@ -50,6 +63,7 @@ class BuildTurnCommandTests(unittest.TestCase):
         session = self.make_session()
         command = session.build_turn_command("", first_prompt="PLAN PROMPT")
         self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertIn("--json", command)
         self.assertNotIn("resume", command)
         self.assertEqual(command[-1], "PLAN PROMPT")
         self.assertIn("--add-dir", command)
@@ -60,12 +74,14 @@ class BuildTurnCommandTests(unittest.TestCase):
         session.session_id = "0198c0de-1111-2222-3333-444455556666"
         command = session.build_turn_command("next message")
         self.assertEqual(command[:4], ["codex", "exec", "resume", session.session_id])
+        self.assertIn("--json", command)
         self.assertEqual(command[-1], "next message")
 
     def test_resume_without_id_falls_back_to_last(self) -> None:
         session = self.make_session()
         command = session.build_turn_command("next message")
         self.assertEqual(command[:4], ["codex", "exec", "resume", "--last"])
+        self.assertIn("--json", command)
 
     def test_pending_images_added_as_image_flags(self) -> None:
         session = self.make_session()
@@ -104,6 +120,19 @@ class BuildTurnCommandTests(unittest.TestCase):
 
 
 class RunStreamingTests(unittest.TestCase):
+    class FakeProcess:
+        stdout = ["ok\n"]
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
     def test_missing_executable_returns_127_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             returncode, output = chat_loop.run_streaming(
@@ -111,6 +140,61 @@ class RunStreamingTests(unittest.TestCase):
             )
         self.assertEqual(returncode, 127)
         self.assertIn("not found", output)
+
+    def test_resolves_executable_before_starting_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(
+                 chat_loop,
+                 "resolve_codex_executable",
+                 return_value="C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd",
+             ), \
+             mock.patch.object(
+                 chat_loop.subprocess,
+                 "Popen",
+                 return_value=self.FakeProcess(),
+             ) as popen:
+            returncode, output = chat_loop.run_streaming(["codex", "--version"], Path(raw))
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(output, "ok\n")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd")
+        self.assertEqual(command[1], "--version")
+
+    def test_json_mode_suppresses_codex_prompt_echo(self) -> None:
+        process = self.FakeProcess()
+        process.stdout = [
+            "Reading additional input from stdin...\n",
+            '{"type":"thread.started",'
+            '"thread_id":"0198c0de-1111-2222-3333-444455556666"}\n',
+            (
+                '{"type":"item.completed","item":{"type":"message",'
+                '"role":"assistant","content":[{"type":"output_text",'
+                '"text":"Starting grill-with-docs now."}]}}\n'
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(
+                 chat_loop,
+                 "resolve_codex_executable",
+                 return_value="C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd",
+             ), \
+             mock.patch.object(
+                 chat_loop.subprocess,
+                 "Popen",
+                 return_value=process,
+             ), \
+             redirect_stdout(StringIO()) as stdout:
+            returncode, output = chat_loop.run_streaming(
+                ["codex", "exec", "--json", "PROMPT TEXT"], Path(raw)
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertIn('"type":"thread.started"', output)
+        rendered = stdout.getvalue()
+        self.assertIn("Starting grill-with-docs now.", rendered)
+        self.assertNotIn("Reading additional input from stdin", rendered)
+        self.assertNotIn("PROMPT TEXT", rendered)
 
 
 class FakeEditor:
@@ -153,6 +237,86 @@ class RunPlanningChatTests(unittest.TestCase):
         self.assertEqual(result, "ARTIFACTS")
         self.assertEqual(len(turns), 1)
         self.assertEqual(turns[0][-1], "PLAN")
+
+    def test_prints_submit_confirmation_before_codex_turn(self) -> None:
+        printed = StringIO()
+        turn_started = {"value": False}
+
+        def turn_runner(command, cwd):
+            turn_started["value"] = True
+            self.assertIn("Submitted to Codex", printed.getvalue())
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "ARTIFACTS" if turn_started["value"] else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw, redirect_stdout(printed):
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor([]),
+            )
+        self.assertEqual(result, "ARTIFACTS")
+
+    def test_collects_initial_message_before_first_codex_turn(self) -> None:
+        turns: list[list[str]] = []
+        artifacts_box = {"ready": False}
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            artifacts_box["ready"] = True
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "ARTIFACTS" if artifacts_box["ready"] else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                collect_initial_message=True,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["build a login page"]),
+            )
+        self.assertEqual(result, "ARTIFACTS")
+        self.assertEqual(len(turns), 1)
+        self.assertNotIn("resume", turns[0])
+        self.assertIn("PLAN", turns[0][-1])
+        self.assertIn("Initial user goal:\nbuild a login page", turns[0][-1])
+
+    def test_collect_initial_message_can_quit_before_codex_turn(self) -> None:
+        turns: list[list[str]] = []
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=self.make_config(Path(raw)),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                collect_initial_message=True,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["/quit", "y"]),
+            )
+        self.assertIsNone(result)
+        self.assertEqual(turns, [])
 
     def test_user_message_sent_as_resume_turn(self) -> None:
         turns: list[list[str]] = []

@@ -4,14 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-show_devloop_logo() {
-  local logo_path="$BUNDLE_ROOT/docs/devloop-logo.txt"
-  if [[ -f "$logo_path" ]]; then
-    cat "$logo_path"
-    printf '\n'
-  fi
-}
-
 find_python() {
   for candidate in python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
@@ -26,9 +18,8 @@ find_python() {
   return 1
 }
 
-show_devloop_logo
-
 PYTHON_BIN="$(find_python)"
 export PYTHONPATH="$BUNDLE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+"$PYTHON_BIN" -m devloop.logo "$BUNDLE_ROOT" || true
 
 exec "$PYTHON_BIN" -m devloop.interactive_runner "$@"

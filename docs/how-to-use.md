@@ -211,8 +211,17 @@ Self-improvement wiki:
 ## 8. Worktree Behavior
 
 Interactive development defaults to a dedicated implementation worktree. Dev
-Loop asks for the worktree path and branch name when needed. If the same path is
-already registered on the requested branch, rerunning the command reuses it.
+Loop asks for the worktree parent path, worktree folder name, and branch name
+when needed. If the same final worktree path is already registered on the
+requested branch, rerunning the command reuses it. Dev Loop also reuses an
+existing Git checkout even when its current branch differs from the newly typed
+branch prompt, and if a previous partial attempt already created the branch, it
+runs `git worktree add` with the existing branch instead of trying to create it
+again.
+Branch names are normalized before Git runs, so a friendly name like
+`Reset Queue` becomes `Reset-Queue`.
+When you enter a worktree parent path, Dev Loop remembers it and suggests it as
+the default parent next time.
 
 Dev Loop does not push. After a successful run, it asks whether to merge the
 implementation branch or worktree into another branch. It skips automatic merge

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,7 +37,27 @@ def resolve_codex_executable(codex: str) -> str:
     PATH), return the original value so the downstream error still names what
     the user asked for.
     """
-    return shutil.which(codex) or codex
+    resolved = shutil.which(codex)
+    if resolved:
+        return resolved
+
+    candidate = Path(codex).expanduser()
+    if candidate.is_file():
+        return str(candidate.resolve())
+
+    if sys.platform.startswith("win") and candidate.name == codex:
+        appdata = os.environ.get("APPDATA")
+        npm_dirs = []
+        if appdata:
+            npm_dirs.append(Path(appdata) / "npm")
+        npm_dirs.append(Path.home() / "AppData" / "Roaming" / "npm")
+        for npm_dir in npm_dirs:
+            for suffix in (".cmd", ".exe", ""):
+                npm_candidate = npm_dir / f"{codex}{suffix}"
+                if npm_candidate.is_file():
+                    return str(npm_candidate.resolve())
+
+    return codex
 
 
 def uses_legacy_approval_flag(codex: str) -> bool:

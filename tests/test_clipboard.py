@@ -41,7 +41,7 @@ class WindowsCaptureTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.suffix, ".png")
 
-    def test_windows_command_uses_powershell_get_clipboard(self) -> None:
+    def test_windows_command_uses_sta_and_winforms_image_clipboard(self) -> None:
         fake = FakeRunner({"powershell.exe": (1, b"")})
         with tempfile.TemporaryDirectory() as raw:
             result = clipboard.capture_clipboard_image(
@@ -49,9 +49,12 @@ class WindowsCaptureTests(unittest.TestCase):
             )
         self.assertIsNone(result)
         self.assertEqual(Path(fake.calls[0][0]).name.lower(), "powershell.exe")
+        self.assertIn("-STA", fake.calls[0])
         joined = " ".join(fake.calls[0])
-        self.assertIn("Get-Clipboard", joined)
-        self.assertIn("-Format Image", joined)
+        self.assertIn("System.Drawing", joined)
+        self.assertIn("System.Windows.Forms.Clipboard", joined)
+        self.assertIn("ContainsImage", joined)
+        self.assertIn("GetImage", joined)
 
 
 class LinuxCaptureTests(unittest.TestCase):

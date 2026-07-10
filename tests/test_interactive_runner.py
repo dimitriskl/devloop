@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from devloop import interactive_runner
 from devloop.interactive_runner import HandoffParams, PlanningArtifacts
@@ -109,6 +113,147 @@ class BuildDevloopArgsTests(unittest.TestCase):
             args = interactive_runner.build_devloop_args(params, artifacts, preset)
         self.assertIn("--preset", args)
         self.assertIn(str(preset), args)
+
+
+class WorktreePromptTests(unittest.TestCase):
+    def test_worktree_location_asks_parent_path_then_folder_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw)
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=[str(parent), "feature-dev"],
+            ):
+                result = interactive_runner.ask_worktree_location("Implementation worktree")
+
+        self.assertEqual(result, (parent / "feature-dev").resolve())
+
+    def test_worktree_location_keeps_default_parent_and_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            default = Path(raw) / "feature-dev"
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["", ""],
+            ):
+                result = interactive_runner.ask_worktree_location(
+                    "Implementation worktree",
+                    default=default,
+                )
+
+        self.assertEqual(result, default.resolve())
+
+    def test_worktree_location_can_default_parent_without_default_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw)
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["", "feature-dev"],
+            ):
+                result = interactive_runner.ask_worktree_location(
+                    "New worktree",
+                    default_parent=parent,
+                )
+
+        self.assertEqual(result, (parent / "feature-dev").resolve())
+
+    def test_worktree_location_remembers_parent_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            parent = root / "worktrees"
+            with mock.patch.object(interactive_runner, "plan_state_path", return_value=state_path), \
+                 mock.patch.object(
+                     interactive_runner,
+                     "read_prompt",
+                     side_effect=[str(parent), "feature-dev"],
+                 ):
+                result = interactive_runner.ask_worktree_location(
+                    "New worktree",
+                    remember_parent=True,
+                )
+                restored = interactive_runner.load_last_worktree_parent()
+
+        self.assertEqual(result, (parent / "feature-dev").resolve())
+        self.assertEqual(restored, parent.resolve())
+
+    def test_branch_name_accepts_human_text_and_sanitizes_for_git(self) -> None:
+        with mock.patch.object(
+            interactive_runner,
+            "read_prompt",
+            return_value="Reset Queue",
+        ):
+            with redirect_stdout(StringIO()) as output:
+                result = interactive_runner.ask_branch_name("New worktree branch name")
+
+        self.assertEqual(result, "Reset-Queue")
+        self.assertIn("Using branch name: Reset-Queue", output.getvalue())
+
+    def test_create_or_reuse_worktree_reuses_existing_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "feature-dev"
+            with mock.patch.object(
+                interactive_runner,
+                "resolve_existing_worktree",
+                return_value=target.resolve(),
+            ), mock.patch.object(interactive_runner, "run_git") as run_git:
+                result = interactive_runner.create_or_reuse_worktree(root, target, "Reset-Queue")
+
+        self.assertEqual(result, target.resolve())
+        run_git.assert_not_called()
+
+    def test_create_or_reuse_worktree_uses_existing_branch_command(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "feature-dev"
+            command = ["git", "worktree", "add", str(target), "Reset-Queue"]
+            with mock.patch.object(interactive_runner, "resolve_existing_worktree", return_value=None), \
+                 mock.patch.object(
+                     interactive_runner,
+                     "build_worktree_add_command",
+                     return_value=command,
+                 ), \
+                 mock.patch.object(interactive_runner, "run_git") as run_git:
+                result = interactive_runner.create_or_reuse_worktree(root, target, "Reset-Queue")
+
+        self.assertEqual(result, target.resolve())
+        run_git.assert_called_once_with(command[1:], cwd=root)
+
+
+class PlanStateTests(unittest.TestCase):
+    def test_save_last_target_repo_preserves_selection_and_worktree_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            repo = root / "repo"
+            repo.mkdir()
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "selection": {"planning_skills": ["grill-with-docs"]},
+                        "last_worktree_parent": str(root / "worktrees"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(interactive_runner, "plan_state_path", return_value=state_path):
+                interactive_runner.save_last_target_repo(repo)
+
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["target_repo"], str(repo))
+        self.assertEqual(data["selection"], {"planning_skills": ["grill-with-docs"]})
+        self.assertEqual(data["last_worktree_parent"], str(root / "worktrees"))
+
+    def test_default_worktree_path_uses_remembered_parent_when_supplied(self) -> None:
+        root = Path("E:/LocalCode/eConnectorV2")
+        parent = Path("E:/Worktrees")
+        self.assertEqual(
+            interactive_runner.default_worktree_path(root, "reset-queue", parent=parent),
+            parent / "eConnectorV2-reset-queue-dev",
+        )
 
 
 class FindNewArtifactsTests(unittest.TestCase):
