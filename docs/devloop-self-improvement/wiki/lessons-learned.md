@@ -4,6 +4,70 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Entries
 
+## Preflight External Acceptance Prerequisites
+
+- Applies to: Dev Loop startup, authenticated backends, cross-platform and release workflows
+- Lesson: Detect mandatory gates that require credentials, network access, another operating system, writable user storage, recording, or publication authority before starting a long issue pack.
+- Evidence: Issues 0002 through 0007 repeatedly passed deterministic gates but could not run authenticated App Server scenarios because Codex was not logged in; Issues 0001 and 0008 also required unavailable Linux or clean release environments, and all eight issues finished blocked.
+- Action: Preflight every non-repository prerequisite, show which acceptance gates are unavailable, and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
+- Last seen: 2026-07-13
+
+## Retry External Blockers Only After State Changes
+
+- Applies to: blocked retry rounds, coder scheduling and long-running issue packs
+- Lesson: A clean Codex attempt cannot fix a proven external prerequisite, so unchanged authentication, connectivity, platform, permission, or publication blockers should not consume another retry round.
+- Evidence: All eight issues entered three clean-retry rounds; Issues 0002 through 0007 repeatedly reported passing local gates with no code changes while the same missing Codex authentication or Responses API connectivity blocker remained.
+- Action: Fingerprint external blockers and the relevant environment state, skip equivalent retries until that state changes, and leave one concise operator action on the loop board.
+- Last seen: 2026-07-13
+
+## Keep Completion Markers Behind Acceptance Gates
+
+- Applies to: coder role, issue markdown and completed-issue selection
+- Lesson: Do not add a parser-recognized completion marker from implementation evidence alone when reviewer, QA, or required integration gates have not passed.
+- Evidence: Issue 0005 was marked `Completed: [x]` after focused verification, but its first review found five high-severity scheduler, isolation, retry, and workflow-transition defects and required removing the marker.
+- Action: Let the runner write completion only after every required gate passes; if a coder encounters an existing implementation, verify it without changing issue selection state prematurely.
+- Last seen: 2026-07-13
+
+## Review Foundational Mechanisms Before Building On Them
+
+- Applies to: reviewer scheduling, foundational launcher, persistence, process and concurrency slices
+- Lesson: When an early issue establishes shared lifecycle or safety mechanisms, review its invariants deeply before later issues build on it; focused fixes can expose another layer of the same mechanism.
+- Evidence: Issue 0001 failed three reviews that successively found six, nine, and five blocking defects across single-flight execution, shutdown, process trees, storage containment, leases, recovery state, and responsive layout.
+- Action: Add mechanism-level stress and adversarial checks for cancellation, teardown, concurrency, containment, and cross-platform behavior at the first foundational slice, then rerun the full suite before advancing dependent issues.
+- Last seen: 2026-07-13
+
+## Isolate Tests From User Git Configuration
+
+- Applies to: coder, reviewer, QA, temporary Git repositories and sandboxed runs
+- Lesson: Tests that create or inspect repositories must not depend on readable user-level Git excludes or configuration.
+- Evidence: Issue 0005 initially produced 24 broad-suite failures solely because the sandbox denied the user Git ignore file; isolated Git/XDG settings passed, and Issue 0008 later made temporary repositories hermetic by disabling inherited global excludes.
+- Action: Give subprocesses process-local Git and XDG configuration, disable inherited global excludes for temporary repositories, and keep caches and tool homes inside approved writable paths.
+- Last seen: 2026-07-13
+
+## Preflight Prompt-Required Context Artifacts Once
+
+- Applies to: Dev Loop runner, prompt assembly and coder/reviewer/QA startup
+- Lesson: Resolve prompt-required context paths before role execution so every role does not repeat the same search for an absent artifact.
+- Evidence: Issue 0003 reviewer and QA each reported that required `CONTEXT-MAP.md` was absent from both the target repository and bundle even though the available acceptance gates passed.
+- Action: Preflight declared context paths once, tell roles when an optional fallback is intentional, and fail before execution only when a missing artifact is indispensable.
+- Last seen: 2026-07-11
+
+## Default Multi-Outcome Results To Unknown, Not Success
+
+- Applies to: coder, reviewer, QA, command-result contracts and store implementations
+- Lesson: A result contract with success, conflict, and missing outcomes must not default to success; an omitted assignment in a future implementation should fail closed.
+- Evidence: Issue 0003 passed because the production reopen store explicitly assigned every outcome, but reviewer and QA independently flagged its legacy `Reopened` defaults as a future fail-open risk.
+- Action: Prefer an explicit `Unknown` default or require the outcome at construction, map every outcome at each boundary, and test an implementation that omits the assignment.
+- Last seen: 2026-07-11
+
+## Keep Atomic SQL Transitions Pool-Safe
+
+- Applies to: coder, reviewer, QA, SQL-backed state transitions and pooled database connections
+- Lesson: Atomic state classification must not leave a session-level isolation change behind for the next borrower of a pooled connection.
+- Evidence: Issue 0003 passed after its store classified persisted state atomically without leaking `SERIALIZABLE` into pooled connections and added generated-command locking and isolation-safety tests; all roles retained the missing live multi-session SQL test as a residual risk.
+- Action: Prefer transaction-scoped locking, restore any session isolation change on every exit, and treat generated-command tests as contract evidence until live contention, cancellation, and pooled reuse are exercised.
+- Last seen: 2026-07-11
+
 ## Start Gates From A Clean Tracked Diff
 
 - Applies to: coder, reviewer, QA, dirty worktrees and verification gates
@@ -40,9 +104,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: coder, reviewer, QA, generated documentation and DOCX artifacts
 - Lesson: When LibreOffice or another visual renderer is unavailable, validate generated DOCX files structurally and by required content, and report visual render QA as a residual risk.
-- Evidence: Issue 0006 passed after the generator reproduced a temp DOCX and OpenXML package, XML, required-text, table, and paragraph checks passed, while soffice was not installed.
+- Evidence: Issue 0006 passed with reproducible OpenXML package and content checks while soffice was unavailable; Issue 0003 later passed package, XML, required-text, and stale-text checks while LibreOffice and Poppler were unavailable.
 - Action: For DOCX slices, keep the generator reproducible, inspect the package entries and document text, compare required acceptance content, and explicitly call out skipped visual rendering.
-- Last seen: 2026-07-04
+- Last seen: 2026-07-11
 
 ## Gate Sensitive Diagnostics At Every Read Surface
 
@@ -176,9 +240,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: coder, reviewer, QA, dependency restore on restricted Windows runs
 - Lesson: If default NuGet or vendor feeds are unreachable, restore once from the local package cache and then run scoped gates with `--no-restore`.
-- Evidence: Issue 0001 restore required `--ignore-failed-sources --source C:\Users\Dimitris\.nuget\packages`, and later installer tests/builds used no-restore gates.
+- Evidence: Issue 0001 restored from the local NuGet package cache after feeds failed; Issue 0003 later confirmed that already-restored focused tests and builds could complete with `--no-restore` while the unreachable vulnerability feed emitted NU1900 warnings.
 - Action: Preserve the restore command in verification evidence and avoid repeated network-dependent restores inside later passes.
-- Last seen: 2026-06-30
+- Last seen: 2026-07-11
 
 ## Preserve Issue Markdown Before Recording Alternate Evidence
 

@@ -30,6 +30,15 @@ Check the loop state files next to the issue README:
 Recent versions print selected issues, role status, and blocked summaries to
 the terminal. If a run still looks silent, open `README.loop.md` first.
 
+## A restarted run begins again at coder pass 1
+
+Update Dev Loop and rerun the same `--prd` and `--issues` command. Current
+builds preserve `README.loop.state.json` and resume an in-progress issue at the
+next unfinished role and pass. If an older build already overwrote the state
+history, the runner recovers normal coder/reviewer/QA results from `.loop.logs`
+when possible. Completed issue files remain skipped, including when an existing
+implementation worktree is reused.
+
 ## The runner crashes with FileNotFoundError under `.loop.logs`
 
 A coder pass may delete `.loop.logs` after a reviewer asks to remove devloop

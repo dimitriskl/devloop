@@ -16,7 +16,7 @@ from .self_improvement_wiki import (
     resolve_self_improvement_wiki_path,
     write_self_improvement_context,
 )
-from .state import LoopStateWriter, mark_issue_completed
+from .state import IssueResumeCursor, LoopStateWriter, ResumeRole, mark_issue_completed
 from .subprocess_utils import run_captured_text
 from .templates import BundleContext, load_preset
 from .worktree import resolve_worktree
@@ -93,11 +93,10 @@ def main(argv: list[str] | None = None) -> int:
             source_repo=source_repo,
             target_repo=repo_root,
         )
-    mapped_source_issues = [map_issue_to_worktree(issue, source_repo, repo_root) for issue in source_issues]
-    issues = select_issues(
-        mapped_source_issues,
-        run_all=args.all,
-        start_issue=args.start_issue,
+    issues = map_selected_issues_to_worktree(
+        selected_source_issues,
+        source_repo,
+        repo_root,
     )
 
     if not issues:
@@ -261,10 +260,15 @@ def run_issue(
     *,
     progress: str = "",
 ) -> RoleResult:
+    resume_cursor = IssueResumeCursor()
     fix_list = list(initial_fix_list or [])
-    last_coder: RoleResult | None = None
-    last_review: RoleResult | None = None
-    last_qa: RoleResult | None = None
+    if attempt_label is None and initial_fix_list is None:
+        resume_cursor = state_writer.resume_issue(issue)
+        fix_list = list(resume_cursor.fix_list)
+    start_pass = resume_cursor.pass_number
+    last_coder = resume_cursor.coder_result
+    last_review = resume_cursor.reviewer_result
+    last_qa = resume_cursor.qa_result
 
     state_writer.record_issue_start(issue, attempt_label=attempt_label, retry_round=retry_round)
     title = f"{issue.title} ({attempt_label})" if attempt_label else issue.title
@@ -276,59 +280,77 @@ def run_issue(
         print(f"[{issue.number}] Dry run prompts rendered.")
         return RoleResult(status="PASS", summary="Dry run prompts rendered.")
 
-    for pass_number in range(1, max_passes + 1):
-        context = f"{progress or f'issue {issue.number}'} / pass {pass_number}"
-        print(statusui.render_banner(Stage.DEVELOPMENT, context))
-        print(f"[{issue.number}] Pass {pass_number}: coder")
-        last_coder = runner.run_role(
-            role="coder",
-            issue=issue,
-            pass_number=pass_number,
-            fix_list=fix_list,
-            attempt_label=attempt_label,
-        )
-        state_writer.record_role_result(
-            issue,
-            "coder",
-            pass_number,
-            last_coder,
-            attempt_label=attempt_label,
-            retry_round=retry_round,
-        )
-        report_role_result(issue.number, "coder", last_coder)
+    if resume_cursor.next_role == ResumeRole.COMPLETE:
+        if last_coder is None or last_review is None or last_qa is None:
+            raise RuntimeError(f"Issue {issue.number} cannot resume completion without all gate results.")
+        mark_issue_completed(issue.path, last_coder, last_review, last_qa)
+        state_writer.record_issue_completed(issue, last_coder, last_review, last_qa)
+        print(f"[{issue.number}] Completed from the persisted QA result.")
+        return RoleResult(status="PASS", summary=f"Issue {issue.number} completed.")
 
-        if last_coder.status != "PASS":
-            state_writer.record_issue_blocked(
+    for pass_number in range(start_pass, max_passes + 1):
+        context = f"{progress or f'issue {issue.number}'} / pass {pass_number}"
+        next_role = resume_cursor.next_role if pass_number == start_pass else ResumeRole.CODER
+
+        if next_role == ResumeRole.CODER:
+            print(statusui.render_banner(Stage.DEVELOPMENT, context))
+            print(f"[{issue.number}] Pass {pass_number}: coder")
+            last_coder = runner.run_role(
+                role="coder",
+                issue=issue,
+                pass_number=pass_number,
+                fix_list=fix_list,
+                attempt_label=attempt_label,
+            )
+            state_writer.record_role_result(
                 issue,
                 "coder",
+                pass_number,
                 last_coder,
                 attempt_label=attempt_label,
                 retry_round=retry_round,
             )
-            return last_coder
+            report_role_result(issue.number, "coder", last_coder)
 
-        print(statusui.render_banner(Stage.REVIEW, context))
-        print(f"[{issue.number}] Pass {pass_number}: reviewer")
-        last_review = runner.run_role(
-            role="reviewer",
-            issue=issue,
-            pass_number=pass_number,
-            coder_result=last_coder,
-            attempt_label=attempt_label,
-        )
-        state_writer.record_role_result(
-            issue,
-            "reviewer",
-            pass_number,
-            last_review,
-            attempt_label=attempt_label,
-            retry_round=retry_round,
-        )
-        report_role_result(issue.number, "reviewer", last_review)
+            if last_coder.status != "PASS":
+                state_writer.record_issue_blocked(
+                    issue,
+                    "coder",
+                    last_coder,
+                    attempt_label=attempt_label,
+                    retry_round=retry_round,
+                )
+                return last_coder
 
-        if last_review.status != "PASS":
-            fix_list = last_review.fix_list or last_review.findings
-            continue
+        if last_coder is None:
+            raise RuntimeError(f"Issue {issue.number} cannot resume review without a coder result.")
+
+        if next_role in {ResumeRole.CODER, ResumeRole.REVIEWER}:
+            print(statusui.render_banner(Stage.REVIEW, context))
+            print(f"[{issue.number}] Pass {pass_number}: reviewer")
+            last_review = runner.run_role(
+                role="reviewer",
+                issue=issue,
+                pass_number=pass_number,
+                coder_result=last_coder,
+                attempt_label=attempt_label,
+            )
+            state_writer.record_role_result(
+                issue,
+                "reviewer",
+                pass_number,
+                last_review,
+                attempt_label=attempt_label,
+                retry_round=retry_round,
+            )
+            report_role_result(issue.number, "reviewer", last_review)
+
+            if last_review.status != "PASS":
+                fix_list = last_review.fix_list or last_review.findings
+                continue
+
+        if last_review is None:
+            raise RuntimeError(f"Issue {issue.number} cannot resume QA without a reviewer result.")
 
         print(statusui.render_banner(Stage.QA, context))
         print(f"[{issue.number}] Pass {pass_number}: qa")
@@ -584,6 +606,18 @@ def map_issue_to_worktree(issue: Issue, source_repo: Path, target_repo: Path) ->
         path=mapped_path,
         completed=Issue.is_completed_file(mapped_path),
     )
+
+
+def map_selected_issues_to_worktree(
+    selected_source_issues: list[Issue],
+    source_repo: Path,
+    target_repo: Path,
+) -> list[Issue]:
+    mapped = [
+        map_issue_to_worktree(issue, source_repo, target_repo)
+        for issue in selected_source_issues
+    ]
+    return [issue for issue in mapped if not issue.completed]
 
 
 def offer_merge_followup(

@@ -143,8 +143,12 @@ The runner finds `issues\README.md`, prints the PRD status, and shows the
 DEVELOPMENT summary screen (Enter to start, `/options` to adjust). Dev Loop
 writes `devloop.status.json` and `devloop.status.md` in the PRD folder, while
 keeping the older `issues\README.loop.state.json` and `issues\README.loop.md`
-files for compatibility. Reruns with `all` continue only blocked or unfinished
-issues.
+files for compatibility. Reruns with `all` skip completed issue files. If a run
+was interrupted, Dev Loop resumes the unfinished issue at its next coder,
+reviewer, or QA gate and preserves the current pass and review/QA fix list. When
+an existing implementation worktree is reused, its issue mapping can narrow the
+source selection but cannot reintroduce issues already completed in the source
+PRD package.
 
 ## How Skills Are Used
 

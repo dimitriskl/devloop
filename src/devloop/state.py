@@ -1,13 +1,44 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from .codex_runner import RoleResult
 from .issue_pack import Issue
+
+
+class ResumeRole(str, Enum):
+    CODER = "coder"
+    REVIEWER = "reviewer"
+    QA = "qa"
+    COMPLETE = "complete"
+
+
+RESUMABLE_ROLE_ORDER = {
+    ResumeRole.CODER.value: 0,
+    ResumeRole.REVIEWER.value: 1,
+    ResumeRole.QA.value: 2,
+}
+NORMAL_ROLE_LOG_PATTERN = re.compile(
+    r"^(?P<issue>\d+)-(?P<role>coder|reviewer|qa)-pass(?P<pass>\d+)\.last-message\.json$"
+)
+
+
+@dataclass(frozen=True)
+class IssueResumeCursor:
+    pass_number: int = 1
+    next_role: ResumeRole = ResumeRole.CODER
+    fix_list: tuple[str, ...] = ()
+    coder_result: RoleResult | None = None
+    reviewer_result: RoleResult | None = None
+    qa_result: RoleResult | None = None
 
 
 class LoopStateWriter:
@@ -17,12 +48,7 @@ class LoopStateWriter:
         self.board_path = issues_index.with_name(f"{issues_index.stem}.loop.md")
         self.prd_state_path: Path | None = None
         self.prd_board_path: Path | None = None
-        self.state: dict[str, Any] = {
-            "started_at": now(),
-            "issues_index": str(issues_index),
-            "events": [],
-            "issues": {},
-        }
+        self.state = load_existing_state(self.state_path, issues_index)
 
     def record_run_start(self, repo_root: Path, prd_path: Path, issues: list[str], dry_run: bool) -> None:
         self.prd_state_path = prd_path.parent / "devloop.status.json"
@@ -186,6 +212,72 @@ class LoopStateWriter:
     def issue_state(self, issue: Issue) -> dict[str, Any]:
         return self.state.setdefault("issues", {}).setdefault(issue.number, {})
 
+    def resume_issue(self, issue: Issue) -> IssueResumeCursor:
+        issue_state = self.issue_state(issue)
+        if not str(issue_state.get("status", "")).startswith("In Progress"):
+            return IssueResumeCursor()
+
+        passes = issue_state.get("passes")
+        if not isinstance(passes, list):
+            passes = []
+
+        normal_passes = [
+            entry
+            for entry in passes
+            if isinstance(entry, dict) and not entry.get("attempt")
+        ]
+        if not normal_passes:
+            normal_passes = recover_role_passes(self.issues_index.parent / ".loop.logs", issue)
+            if not normal_passes:
+                return IssueResumeCursor()
+            issue_state["passes"] = [*passes, *normal_passes]
+
+        latest = normal_passes[-1]
+        pass_number = latest.get("pass")
+        result_data = latest.get("result")
+        if not isinstance(pass_number, int) or not isinstance(result_data, dict):
+            return IssueResumeCursor()
+
+        role = latest.get("role")
+        result = role_result_from_state(result_data)
+        if role == ResumeRole.CODER.value and result.status == "PASS":
+            return IssueResumeCursor(
+                pass_number=pass_number,
+                next_role=ResumeRole.REVIEWER,
+                coder_result=result,
+            )
+
+        if role == ResumeRole.REVIEWER.value and result.status == "PASS":
+            coder_result = find_role_result(normal_passes, ResumeRole.CODER, pass_number)
+            if coder_result is not None:
+                return IssueResumeCursor(
+                    pass_number=pass_number,
+                    next_role=ResumeRole.QA,
+                    coder_result=coder_result,
+                    reviewer_result=result,
+                )
+
+        if role == ResumeRole.QA.value and result.status == "PASS":
+            coder_result = find_role_result(normal_passes, ResumeRole.CODER, pass_number)
+            reviewer_result = find_role_result(normal_passes, ResumeRole.REVIEWER, pass_number)
+            if coder_result is not None and reviewer_result is not None:
+                return IssueResumeCursor(
+                    pass_number=pass_number,
+                    next_role=ResumeRole.COMPLETE,
+                    coder_result=coder_result,
+                    reviewer_result=reviewer_result,
+                    qa_result=result,
+                )
+
+        if role in {ResumeRole.REVIEWER.value, ResumeRole.QA.value} and result.status != "PASS":
+            return IssueResumeCursor(
+                pass_number=pass_number + 1,
+                next_role=ResumeRole.CODER,
+                fix_list=tuple(result.fix_list or result.findings),
+            )
+
+        return IssueResumeCursor()
+
     def add_event(self, event_type: str, data: dict[str, Any]) -> None:
         self.state.setdefault("events", []).append(
             {
@@ -208,7 +300,43 @@ class LoopStateWriter:
 
 def write_text_creating_parent(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary_path = Path(handle.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def load_existing_state(state_path: Path, issues_index: Path) -> dict[str, Any]:
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = None
+        if isinstance(state, dict):
+            state.setdefault("events", [])
+            state.setdefault("issues", {})
+            return state
+
+    return {
+        "started_at": now(),
+        "issues_index": str(issues_index),
+        "events": [],
+        "issues": {},
+    }
 
 
 def result_summary(result: RoleResult) -> dict[str, Any]:
@@ -221,6 +349,72 @@ def result_summary(result: RoleResult) -> dict[str, Any]:
         "fix_list": result.fix_list,
         "residual_risks": result.residual_risks,
     }
+
+
+def role_result_from_state(data: dict[str, Any]) -> RoleResult:
+    return RoleResult(
+        status=str(data.get("status", "BLOCKED")),
+        summary=str(data.get("summary", "")),
+        changed_files=state_string_list(data.get("changed_files")),
+        verification_commands=state_string_list(data.get("verification_commands")),
+        findings=state_string_list(data.get("findings")),
+        fix_list=state_string_list(data.get("fix_list")),
+        residual_risks=state_string_list(data.get("residual_risks")),
+    )
+
+
+def state_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def find_role_result(
+    passes: list[dict[str, Any]],
+    role: ResumeRole,
+    pass_number: int,
+) -> RoleResult | None:
+    for entry in reversed(passes):
+        if entry.get("role") != role.value or entry.get("pass") != pass_number:
+            continue
+        result = entry.get("result")
+        if isinstance(result, dict):
+            return role_result_from_state(result)
+    return None
+
+
+def recover_role_passes(log_root: Path, issue: Issue) -> list[dict[str, Any]]:
+    if not log_root.is_dir():
+        return []
+
+    recovered: list[dict[str, Any]] = []
+    for path in log_root.glob(f"{issue.number}-*-pass*.last-message.json"):
+        match = NORMAL_ROLE_LOG_PATTERN.fullmatch(path.name)
+        if not match or match.group("issue") != issue.number:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        recovered.append(
+            {
+                "role": match.group("role"),
+                "pass": int(match.group("pass")),
+                "result": result_summary(role_result_from_state(data)),
+                "timestamp": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                "recovered_from": str(path),
+            }
+        )
+
+    recovered.sort(
+        key=lambda entry: (
+            entry["pass"],
+            RESUMABLE_ROLE_ORDER[entry["role"]],
+        )
+    )
+    return recovered
 
 
 def render_board(state: dict[str, Any]) -> str:
@@ -315,7 +509,7 @@ def mark_issue_completed(
     if "## Implementation Notes" not in text:
         text = text.rstrip() + "\n" + "\n".join(notes)
 
-    issue_path.write_text(text, encoding="utf-8")
+    write_text_creating_parent(issue_path, text)
 
 
 def mark_acceptance_criteria(text: str) -> str:

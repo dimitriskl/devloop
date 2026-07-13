@@ -15,6 +15,10 @@ appsettings.local.json
 .env.*
 docs/devloop-self-improvement/.compiler-runs/
 
+# Local design artifacts
+/docs/adr/
+/docs/prd/
+
 # IDE / OS
 .vs/
 .idea/

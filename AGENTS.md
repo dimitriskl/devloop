@@ -43,7 +43,11 @@ Copies bundled skills and agents globally.
 
 ## Coding Style & Naming Conventions
 
-Python targets 3.10+ and stdlib-only modules. Follow the existing style: 4-space indentation, `from __future__ import annotations`, typed signatures, `Path` for filesystem paths, and small dataclasses for structured results. Keep filenames lowercase with underscores. C# MCP code uses nullable reference types and implicit usings.
+Python targets 3.10+. Core workflow, domain, state-machine, and execution-backend modules use the standard library and must not depend on presentation-framework types. The terminal presentation layer uses a pinned Textual version and its required transitive dependencies. Follow the existing style: 4-space indentation, `from __future__ import annotations`, typed signatures, `Path` for filesystem paths, and small dataclasses for structured results. Keep filenames lowercase with underscores. C# MCP code uses nullable reference types and implicit usings.
+
+Apply the [Clean Code summary](https://gist.github.com/wojteklu/73c6914cc446146b8b533c0988cf8d29) throughout the repository: keep functions and components small and single-purpose, use descriptive names, keep configurable data at high levels, prefer dependency injection and polymorphism, avoid flag arguments and hidden side effects, and keep tests readable, independent, and repeatable.
+
+Use enums for closed domain sets such as outcomes, lifecycle states, and built-in roles. Do not compare or persist domain states through scattered hard-coded strings. Give repeated protocol, schema, command, and UI literals named constants; keep a constant beside its owning contract, and place it in a shared constants module only when it is genuinely used across components. Parse external strings into typed values at system boundaries and fail clearly on unsupported values.
 
 ## Testing Guidelines
 
