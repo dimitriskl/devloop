@@ -1,0 +1,5 @@
+exclude src/devloop/*.py
+include src/devloop/__init__.py
+include src/devloop/entrypoint.py
+include src/devloop/version.py
+include README.codexcli.md

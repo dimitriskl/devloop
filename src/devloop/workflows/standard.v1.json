@@ -1,0 +1,206 @@
+{
+  "schema": "devloop.workflow-definition/v1",
+  "id": "standard-development",
+  "version": "1.0.0",
+  "retry_policy": {
+    "max_rework_cycles_per_issue": 2,
+    "max_transient_backend_retries": 1
+  },
+  "steps": [
+    {
+      "id": "analysis",
+      "component": "analysis",
+      "inputs": [
+        {
+          "port": "feature_request",
+          "contract": "devloop.feature-request/v1",
+          "source": "launcher.feature_request"
+        }
+      ],
+      "outputs": [
+        {
+          "port": "prd_package",
+          "contract": "devloop.prd-package/v1",
+          "source": "analysis.accepted_package"
+        }
+      ],
+      "transitions": {
+        "SUCCEEDED": "workspace-preparation",
+        "CHANGES_REQUESTED": "analysis",
+        "BLOCKED": null,
+        "FAILED": null,
+        "CANCELLED": null
+      }
+    },
+    {
+      "id": "workspace-preparation",
+      "component": "workspace-preparation",
+      "inputs": [
+        {
+          "port": "repository",
+          "contract": "devloop.repository-ref/v1",
+          "source": "run.repository"
+        },
+        {
+          "port": "prd_package",
+          "contract": "devloop.prd-package/v1",
+          "source": "analysis.accepted_package"
+        },
+        {
+          "port": "issue_set",
+          "contract": "devloop.issue-set/v1",
+          "source": "analysis.accepted_package.issue_set"
+        }
+      ],
+      "outputs": [
+        {
+          "port": "workspace",
+          "contract": "devloop.workspace-ref/v1",
+          "source": "workspace.selected"
+        }
+      ],
+      "transitions": {
+        "SUCCEEDED": "development",
+        "CHANGES_REQUESTED": "workspace-preparation",
+        "BLOCKED": null,
+        "FAILED": null,
+        "CANCELLED": null
+      }
+    },
+    {
+      "id": "development",
+      "component": "development",
+      "inputs": [
+        {
+          "port": "context_manifest",
+          "contract": "devloop.context-manifest/v1",
+          "source": "development.context_manifest"
+        }
+      ],
+      "outputs": [
+        {
+          "port": "implementation_result",
+          "contract": "devloop.implementation-result/v1",
+          "source": "development.implementation_result"
+        }
+      ],
+      "transitions": {
+        "SUCCEEDED": "code-review",
+        "CHANGES_REQUESTED": "development",
+        "BLOCKED": null,
+        "FAILED": null,
+        "CANCELLED": null
+      }
+    },
+    {
+      "id": "code-review",
+      "component": "code-review",
+      "inputs": [
+        {
+          "port": "issue",
+          "contract": "devloop.issue/v1",
+          "source": "development.issue"
+        },
+        {
+          "port": "workspace",
+          "contract": "devloop.workspace-ref/v1",
+          "source": "workspace.selected"
+        },
+        {
+          "port": "implementation",
+          "contract": "devloop.implementation-result/v1",
+          "source": "development.implementation_result"
+        }
+      ],
+      "outputs": [
+        {
+          "port": "review",
+          "contract": "devloop.review-result/v1",
+          "source": "code-review.review_result"
+        },
+        {
+          "port": "rework_request",
+          "contract": "devloop.rework-request/v1",
+          "source": "code-review.rework_request"
+        }
+      ],
+      "transitions": {
+        "SUCCEEDED": "qa",
+        "CHANGES_REQUESTED": "development",
+        "BLOCKED": null,
+        "FAILED": null,
+        "CANCELLED": null
+      }
+    },
+    {
+      "id": "qa",
+      "component": "qa",
+      "inputs": [
+        {
+          "port": "issue",
+          "contract": "devloop.issue/v1",
+          "source": "development.issue"
+        },
+        {
+          "port": "workspace",
+          "contract": "devloop.workspace-ref/v1",
+          "source": "workspace.selected"
+        },
+        {
+          "port": "implementation",
+          "contract": "devloop.implementation-result/v1",
+          "source": "development.implementation_result"
+        },
+        {
+          "port": "review",
+          "contract": "devloop.review-result/v1",
+          "source": "code-review.review_result"
+        }
+      ],
+      "outputs": [
+        {
+          "port": "qa_result",
+          "contract": "devloop.qa-result/v1",
+          "source": "qa.qa_result"
+        },
+        {
+          "port": "rework_request",
+          "contract": "devloop.rework-request/v1",
+          "source": "qa.rework_request"
+        }
+      ],
+      "transitions": {
+        "SUCCEEDED": "development",
+        "CHANGES_REQUESTED": "development",
+        "BLOCKED": null,
+        "FAILED": null,
+        "CANCELLED": null
+      }
+    },
+    {
+      "id": "workspace-finalization",
+      "component": "workspace-finalization",
+      "inputs": [
+        {
+          "port": "aggregated_results",
+          "contract": "devloop.aggregated-results/v1",
+          "source": "scheduler.completed_results"
+        }
+      ],
+      "outputs": [
+        {
+          "port": "handoff_summary",
+          "contract": "devloop.handoff-summary/v1",
+          "source": "workspace-finalization.handoff_summary"
+        }
+      ],
+      "transitions": {
+        "SUCCEEDED": null,
+        "CHANGES_REQUESTED": "workspace-finalization",
+        "BLOCKED": null,
+        "FAILED": null,
+        "CANCELLED": null
+      }
+    }
+  ]
+}

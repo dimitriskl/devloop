@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devloop-codexcli"
+dynamic = ["version"]
+description = "A local Codex App Server workflow runner."
+readme = "README.codexcli.md"
+requires-python = ">=3.10"
+dependencies = [
+    "textual>=8.2.8,<8.3",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.140,<7",
+    "mypy>=1.18.2,<2",
+    "pytest>=8.4.2,<9",
+    "pytest-asyncio>=1.2.0,<2",
+    "ruff>=0.14.1,<1",
+]
+
+[project.scripts]
+codexcli = "devloop.entrypoint:main"
+
+[project.entry-points."devloop.step_components"]
+analysis = "devloop.components.analysis:analysis_component"
+workspace-preparation = "devloop.components.workspace:workspace_component"
+development = "devloop.components.development:development_component"
+code-review = "devloop.components.review:review_component"
+qa = "devloop.components.qa:qa_component"
+workspace-finalization = "devloop.components.finalization:finalization_component"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["devloop*"]
+
+[tool.setuptools.package-data]
+"devloop.workflows" = ["*.json"]
+
+[tool.setuptools.dynamic]
+version = { attr = "devloop.version.VERSION" }
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider --basetemp=.tmp-pytest"
+testpaths = ["tests"]
+xfail_strict = true
+markers = [
+    "integration: requires the installed real Codex App Server",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src"]
+include = [
+    "pyproject.toml",
+    "src/devloop/__init__.py",
+    "src/devloop/entrypoint.py",
+    "src/devloop/version.py",
+    "src/devloop/analysis/**/*.py",
+    "src/devloop/application/**/*.py",
+    "src/devloop/components/**/*.py",
+    "src/devloop/domain/**/*.py",
+    "src/devloop/execution/**/*.py",
+    "src/devloop/infrastructure/**/*.py",
+    "src/devloop/persistence/**/*.py",
+    "src/devloop/planning/**/*.py",
+    "src/devloop/ui/**/*.py",
+    "src/devloop/workflow/**/*.py",
+    "src/devloop/workflows/**/*.py",
+    "tests/codexcli/**/*.py",
+]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+incremental = false
+files = [
+    "src/devloop/entrypoint.py",
+    "src/devloop/application",
+    "src/devloop/analysis",
+    "src/devloop/components",
+    "src/devloop/domain",
+    "src/devloop/execution",
+    "src/devloop/infrastructure",
+    "src/devloop/persistence",
+    "src/devloop/planning",
+    "src/devloop/ui",
+    "src/devloop/workflow",
+]

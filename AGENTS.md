@@ -60,3 +60,18 @@ Recent commits use short, direct subjects such as `updates scripts`. Keep subjec
 ## Security & Configuration Tips
 
 Do not commit secrets or machine-specific config. `.gitignore` excludes `.env*`, `appsettings.local.json`, virtual environments, Python caches, and .NET build output. Keep SQL diagnostics read-only and base examples on `appsettings.local.example.json`.
+
+## Managed Shell Safety
+
+Do not launch commands through an approval-backed or escalated managed shell in
+this repository. On Windows, that execution boundary can take over the user's
+visible PowerShell session and leave it at a raw prompt when the managed turn is
+interrupted. Keep agent-run commands inside the workspace sandbox.
+
+Do not agent-launch long-running authenticated, installation, release, or real
+Codex integration gates. When a required gate needs user-profile credentials or
+access outside the sandbox, provide exactly one physical, paste-ready command
+for the operator to run in a separate terminal. The command must write a
+non-secret result log inside the workspace so the agent can inspect it using
+sandboxed read-only commands. Do not use `Start-Process`, detached children, or
+hidden background processes as a workaround.

@@ -3,17 +3,30 @@
 mcp/**/bin/
 
 # Python
+/build/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.uv-cache*/
+.tmp-*/
+.loop.logs/
+README.loop.md
+README.loop.state.json
+/.devloop/runs/
+/.release-demo/
 
 # Local secrets and machine-specific config
 appsettings.local.json
 .env
 .env.*
 docs/devloop-self-improvement/.compiler-runs/
+/docs/adr/
+/docs/prd/
 
 # IDE / OS
 .vs/
