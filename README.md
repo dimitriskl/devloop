@@ -14,6 +14,22 @@
 
 Portable Codex development-loop runner for local PRD and issue packs.
 
+## CodexCLI v0.1.0
+
+The installable hackathon workflow is available as `codexcli`:
+
+```text
+uv tool install .
+codexcli doctor --repo /path/to/repository
+codexcli run --repo /path/to/repository
+```
+
+`pipx install .` is also supported. Codex CLI installation and authentication
+are prerequisites; the real Codex App Server is the only executable backend.
+See `docs/codexcli-quickstart.md` for the five-minute path and
+`docs/release-checklist-v0.1.0.md` for Windows/Linux release gates and known
+limitations.
+
 The bundle is designed to be copied to a machine that does not already have a
 target project checkout. It contains the runner, prompts, output schemas, copied
 Codex skills, Codex agent references, MCP setup templates, and setup
