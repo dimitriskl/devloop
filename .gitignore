@@ -9,6 +9,11 @@ __pycache__/
 .venv/
 venv/
 
+# Local build/test scratch dirs and logs
+.tmp-*
+!.tmp-app-server-schema/
+!.tmp-app-server-schema/**
+
 # Local secrets and machine-specific config
 appsettings.local.json
 .env
