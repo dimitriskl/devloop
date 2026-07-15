@@ -196,6 +196,92 @@ class RunStreamingTests(unittest.TestCase):
         self.assertNotIn("Reading additional input from stdin", rendered)
         self.assertNotIn("PROMPT TEXT", rendered)
 
+    def test_json_mode_renders_current_agent_message_text(self) -> None:
+        process = self.FakeProcess()
+        process.stdout = [
+            (
+                '{"type":"item.completed","item":{"id":"item_3",'
+                '"type":"agent_message","text":"Planning response."}}\n'
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(
+                 chat_loop,
+                 "resolve_codex_executable",
+                 return_value="C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd",
+             ), \
+             mock.patch.object(
+                 chat_loop.subprocess,
+                 "Popen",
+                 return_value=process,
+             ), \
+             redirect_stdout(StringIO()) as stdout:
+            returncode, _ = chat_loop.run_streaming(
+                ["codex", "exec", "--json", "PROMPT TEXT"], Path(raw)
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(stdout.getvalue(), "Planning response.\n")
+
+    def test_waiting_indicator_runs_between_visible_output(self) -> None:
+        process = self.FakeProcess()
+        process.stdout = [
+            (
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"Planning response."}}\n'
+            ),
+        ]
+        indicator = mock.Mock()
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(
+                 chat_loop,
+                 "resolve_codex_executable",
+                 return_value="C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd",
+             ), \
+             mock.patch.object(
+                 chat_loop.subprocess,
+                 "Popen",
+                 return_value=process,
+             ), \
+             mock.patch.object(
+                 chat_loop,
+                 "WaitingIndicator",
+                 return_value=indicator,
+                 create=True,
+             ), \
+             redirect_stdout(StringIO()):
+            chat_loop.run_streaming(
+                ["codex", "exec", "--json", "PROMPT TEXT"], Path(raw)
+            )
+
+        self.assertEqual(
+            indicator.method_calls,
+            [mock.call.start(), mock.call.stop(), mock.call.start(), mock.call.stop()],
+        )
+
+    def test_waiting_indicator_animates_multiple_frames(self) -> None:
+        class InteractiveOutput(StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        class StopAfterTwoFrames:
+            def __init__(self) -> None:
+                self.wait_count = 0
+
+            def wait(self, timeout: float) -> bool:
+                self.wait_count += 1
+                return self.wait_count >= 2
+
+        output = InteractiveOutput()
+        indicator = chat_loop.WaitingIndicator(output)
+        indicator._stop_requested = StopAfterTwoFrames()
+
+        indicator._animate()
+
+        rendered = output.getvalue()
+        self.assertIn("Codex is working |", rendered)
+        self.assertIn("Codex is working /", rendered)
+
 
 class FakeEditor:
     def __init__(self, lines: list[str]) -> None:

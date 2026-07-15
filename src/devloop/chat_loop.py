@@ -6,9 +6,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TextIO
 
 from . import statusui
 from .clipboard import capture_clipboard_image
@@ -51,6 +52,58 @@ CODEX_NOISE_PREFIXES = (
     "session id:",
 )
 CODEX_NOISE_LINES = {"--------", "user"}
+WAITING_FRAMES = ("|", "/", "-", "\\")
+WAITING_MESSAGE = "Codex is working"
+WAITING_FRAME_SECONDS = 0.12
+
+
+class WaitingIndicator:
+    def __init__(
+        self,
+        stream: TextIO | None = None,
+        frame_seconds: float = WAITING_FRAME_SECONDS,
+    ) -> None:
+        self._stream = sys.stdout if stream is None else stream
+        self._frame_seconds = frame_seconds
+        isatty = getattr(self._stream, "isatty", None)
+        self._enabled = bool(callable(isatty) and isatty())
+        self._stop_requested = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not self._enabled or self._thread is not None:
+            return
+        self._stop_requested.clear()
+        self._thread = threading.Thread(target=self._animate, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop_requested.set()
+        self._thread.join()
+        self._thread = None
+        self._clear()
+
+    def _animate(self) -> None:
+        frame_index = 0
+        while True:
+            frame = WAITING_FRAMES[frame_index % len(WAITING_FRAMES)]
+            try:
+                self._stream.write(f"\r{WAITING_MESSAGE} {frame}")
+                self._stream.flush()
+            except (OSError, ValueError):
+                return
+            if self._stop_requested.wait(self._frame_seconds):
+                return
+            frame_index += 1
+
+    def _clear(self) -> None:
+        try:
+            self._stream.write(f"\r{' ' * (len(WAITING_MESSAGE) + 2)}\r")
+            self._stream.flush()
+        except (OSError, ValueError):
+            pass
 
 
 @dataclass
@@ -188,13 +241,17 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
         return 127, message
     captured: list[str] = []
     assert process.stdout is not None
+    waiting_indicator = WaitingIndicator()
+    waiting_indicator.start()
     try:
         for line in process.stdout:
             captured.append(line)
             rendered = _render_codex_stream_line(line) if json_mode else line
             if rendered:
+                waiting_indicator.stop()
                 sys.stdout.write(rendered)
                 sys.stdout.flush()
+                waiting_indicator.start()
         process.wait()
     except KeyboardInterrupt:
         # Do not let the child linger: terminate it, drain any buffered output,
@@ -211,6 +268,8 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
         except Exception:
             process.kill()
         return 130, "".join(captured)
+    finally:
+        waiting_indicator.stop()
     return process.returncode, "".join(captured)
 
 
@@ -248,8 +307,10 @@ def _render_codex_json_event(payload: dict[str, Any]) -> str | None:
             return _line(message if message.startswith("ERROR:") else f"ERROR: {message}")
 
     if event_type in {"assistant_message", "agent_message"}:
-        message = _extract_text_payload(payload.get("message")) or _extract_text_payload(
-            payload.get("content")
+        message = (
+            _extract_text_payload(payload.get("message"))
+            or _extract_text_payload(payload.get("content"))
+            or _extract_text_payload(payload.get("text"))
         )
         if message:
             return _line(message)
@@ -275,8 +336,10 @@ def _render_codex_json_item(item: dict[str, Any]) -> str | None:
             return _line(message)
 
     if item_type in {"assistant_message", "agent_message"}:
-        message = _extract_text_payload(item.get("message")) or _extract_text_payload(
-            item.get("content")
+        message = (
+            _extract_text_payload(item.get("message"))
+            or _extract_text_payload(item.get("content"))
+            or _extract_text_payload(item.get("text"))
         )
         if message:
             return _line(message)
