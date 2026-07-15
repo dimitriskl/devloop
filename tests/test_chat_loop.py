@@ -51,6 +51,72 @@ class DetectImagePathsTests(unittest.TestCase):
         self.assertEqual(chat_loop.detect_image_paths("read docs/readme.md now"), [])
 
 
+class ResumeCommandTests(unittest.TestCase):
+    def test_resume_at_first_prompt_does_not_start_codex(self) -> None:
+        turns: list[list[str]] = []
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            return 0, "unexpected"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+            resume_artifacts=lambda: "RESUMED-ARTIFACTS",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=ChatConfig(
+                    codex="codex",
+                    repo_root=Path(raw),
+                    bundle_root=Path(raw),
+                ),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                collect_initial_message=True,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["/resume"]),
+            )
+
+        self.assertEqual(result, "RESUMED-ARTIFACTS")
+        self.assertEqual(turns, [])
+
+    def test_resume_returns_selected_artifacts_without_sending_command_to_codex(self) -> None:
+        turns: list[list[str]] = []
+
+        def turn_runner(command, cwd):
+            turns.append(list(command))
+            return 0, "session id: 0198c0de-1111-2222-3333-444455556666\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+            resume_artifacts=lambda: "RESUMED-ARTIFACTS",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=ChatConfig(
+                    codex="codex",
+                    repo_root=Path(raw),
+                    bundle_root=Path(raw),
+                ),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["/resume"]),
+            )
+
+        self.assertEqual(result, "RESUMED-ARTIFACTS")
+        self.assertEqual(len(turns), 1)
+
+    def test_help_lists_resume(self) -> None:
+        self.assertIn("/resume", chat_loop.HELP_TEXT)
+
+
 class BuildTurnCommandTests(unittest.TestCase):
     def make_session(self) -> ChatSession:
         config = ChatConfig(

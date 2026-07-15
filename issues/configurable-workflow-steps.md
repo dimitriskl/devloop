@@ -2,6 +2,24 @@ Label: ready-for-agent
 
 # Configurable Workflow Steps
 
+## Target Product
+
+Product: devloop-plan + devloop
+
+This PRD targets the portable **`devloop-plan + devloop`** application started
+through `bin/devloop-plan.sh` / `bin/devloop-plan.ps1` and
+`bin/devloop.sh` / `bin/devloop.ps1`.
+
+The primary implementation modules are `interactive_runner.py`, `chat_loop.py`,
+`cli.py`, `codex_runner.py`, `issue_pack.py`, `state.py`, `statusui.py`,
+`lineeditor.py`, `catalog.py`, and `worktree.py`, plus new portable-runner
+modules beside them when a deep module is needed.
+
+The separately installed `codexcli` Textual application is not the target.
+Changes under `src/devloop/application/`, `components/`, `domain/`,
+`execution/`, `persistence/`, `ui/`, or `workflow/` do not satisfy this PRD.
+See `docs/product-boundaries.md`.
+
 ## Problem Statement
 
 Dev Loop presents Analysis, Development, Code Review, and QA as fixed phases even though its architecture is intended to support installed Workflow Step Components and declarative Workflow Definitions. The `/options` experience currently configures capabilities by component type, execution profiles can silently change reasoning effort, workflow persistence and scheduling assume one instance of each built-in phase, and the dashboards cannot distinguish two steps backed by the same component.
@@ -14,7 +32,7 @@ Provide a transactional Workflow Editor through `/options`. Treat each Workflow 
 
 The User Workflow Default remains freely editable and applies to new Workflow Runs. Each new run captures an immutable resolved Workflow Definition and per-step configuration so pause, resume, recovery, evidence, and auditing remain deterministic. Runtime state, attempt history, Issue progress, and dashboard projections become generic and Step Instance ID keyed rather than hardcoded around Development, Review, and QA.
 
-The same dynamic Workflow Progress Dashboard serves the Textual application, the bounded Hybrid Console Dashboard, Bash and PowerShell entry points, and redirected output. Every distinct step—including multiple instances of the same component type—has its own status, pass, timer, result, and activity presentation.
+The same dynamic Workflow Progress Dashboard serves the portable planning intake, the bounded implementation console, Bash and PowerShell entry points, and redirected output. Every distinct step—including multiple instances of the same component type—has its own status, pass, timer, result, and activity presentation.
 
 ## User Stories
 
@@ -91,7 +109,7 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 71. As a Dev Loop user, I want Step Guidance stored per instance, so that Security Review and Final Review can receive different instructions.
 72. As a Dev Loop user, I want component contracts and execution policy to outrank Step Guidance, so that prose cannot weaken permissions or output requirements.
 73. As a Dev Loop user, I want Step Guidance checked and redacted before persistence, so that secrets are not written into workflow configuration.
-74. As a Dev Loop user, I want guidance included in every attempt Context Manifest, so that execution is reproducible and inspectable.
+74. As a Dev Loop user, I want guidance included in every portable-runner attempt prompt and saved attempt context, so that execution is reproducible and inspectable.
 75. As a Dev Loop user, I want guidance preserved but marked `NEEDS_REVIEW` after a Type change, so that my text is neither lost nor reused silently.
 76. As a Dev Loop user, I want Apply blocked until stale guidance is kept, edited, or cleared, so that type changes remain deliberate.
 77. As a Dev Loop user, I want Type changes to preserve GUID, display name, and position, so that the logical step remains identifiable.
@@ -102,7 +120,7 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 82. As a Dev Loop user, I want `/options` during a run to separate Current Run from Future Runs, so that the scope of my changes is obvious.
 83. As a Dev Loop user, I want Current Run settings inspectable but read-only, so that I can see exactly what the run is using.
 84. As a Dev Loop user, I want a clear message that edits affect new runs only, so that I do not expect a running thread to change.
-85. As a Dev Loop user, I want each run to store its resolved workflow and canonical hash, so that later resume and diagnosis use exact configuration.
+85. As a Dev Loop user, I want each `*.loop.state.json` run state to store its resolved workflow and canonical hash, so that later resume and diagnosis use exact configuration.
 86. As a Dev Loop user, I want no workflow revision archive, so that local configuration remains simple while run snapshots preserve evidence.
 87. As a Dev Loop user, I want Issue Status to use the generic `IN_PROGRESS` enum member, so that lifecycle does not encode a fixed component type.
 88. As a Dev Loop user, I want the current Step Instance ID stored separately from Issue Status, so that repeated and custom steps are represented exactly.
@@ -120,9 +138,9 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 100. As a Dev Loop user, I want long workflows to scroll while keeping the active step visible, so that progress remains understandable on small terminals.
 101. As a Dev Loop user, I want PASS green, FAIL and BLOCKED red, WORKING yellow, and WAITING neutral, so that status is quickly recognizable.
 102. As a Dev Loop user, I want text labels to carry all status meaning, so that color is optional and accessible.
-103. As a Dev Loop user, I want the same progress projection in Textual, Bash, PowerShell, and redirected output, so that behavior does not depend on the launcher.
+103. As a Dev Loop user, I want the same progress projection in the planning intake, implementation console, Bash, PowerShell, and redirected output, so that behavior does not depend on the wrapper.
 104. As a Dev Loop user, I want redirected output to remain append-only and readable, so that logs preserve durable progress without cursor control sequences.
-105. As a Dev Loop user, I want the Composer, slash commands, search, paste, and capability installer preserved, so that workflow configuration does not remove existing abilities.
+105. As a Dev Loop user, I want the line editor, slash commands, search, paste, and capability installer preserved, so that workflow configuration does not remove existing abilities.
 106. As a Dev Loop user, I want narrow and wide layouts that do not overlap or wrap critical state, so that the console remains usable across terminal sizes.
 107. As a maintainer, I want validation errors tied to Step Instance IDs and display names, so that failures remain actionable after reordering.
 108. As a maintainer, I want closed lifecycle and outcome sets represented by enums, so that domain state is never scattered as magic strings.
@@ -131,11 +149,11 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 
 ## Implementation Decisions
 
-- Introduce Workflow Definition schema `devloop.workflow-definition/v2`. This is an intentional hard cutover; no v1 workflow loader, migration, compatibility mode, or legacy workflow tests are required.
+- Introduce portable Workflow Definition schema `devloop.portable-workflow/v2`. This is an intentional hard cutover for the portable runner; no v1 workflow loader, migration, or compatibility mode is required.
 - Model an installed Workflow Step Component as the reusable type and a Workflow Step as a distinct configured instance of that type.
 - Give every Workflow Step a canonical lowercase hyphenated UUIDv4 Step Instance ID generated once at creation. Preserve it through rename, movement, Type change, export, default replacement, and Run Snapshotting.
 - Add a unique non-empty Step Display Name distinct from the Step Component ID and Step Instance ID.
-- Populate the Workflow Step Type picker from the installed Component Registry. Do not introduce a closed Analysis/Development/Review/QA type enum.
+- Populate the Workflow Step Type picker from a portable Workflow Step Component Catalog built from the installed role/skill catalog and portable step adapters. Do not import or reuse the CodexCLI Component Registry, and do not introduce a closed Analysis/Development/Review/QA type enum.
 - Keep Step Scope component-owned and read-only in `/options`.
 - Do not hardcode any component type as mandatory. Validate graph reachability, required ports, supported outcomes, scope compatibility, one start, and at least one successful terminal path.
 - Represent the normal ordered flow as the Primary Path obtained from `SUCCEEDED` transitions. Expose one-based editable Primary Path Position, Move Up, and Move Down as equivalent transactional operations.
@@ -145,32 +163,32 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 - Keep Port Binding editing in an Advanced section and block Apply for missing, incompatible, or ambiguous required inputs.
 - Make step deletion non-cascading. Repair only the unambiguous Primary Path success link, remove invalid producer bindings, retain downstream nodes and branches, and require explicit repair before Apply.
 - Make Duplicate insert immediately after the source with a new UUIDv4 and unique name. Copy component Type, Codex settings, Execution Budget, capabilities, input bindings, and non-success transitions; copy Step Guidance as `NEEDS_REVIEW`; do not silently redirect consumers to duplicate outputs.
-- Replace the current capability-only modal with a transactional Workflow Editor. Preserve search, required-capability locking, GitHub capability installation, Reset, Apply, Cancel, Composer, and existing slash-command behavior.
+- Replace the current portable `/options` capability menu with a transactional terminal Workflow Editor. Preserve search, required-capability locking, GitHub capability installation, Reset, Apply, Cancel, the line editor, and existing slash-command behavior.
 - Use a two-pane layout on wide terminals and a stacked layout on narrow terminals. The left side owns workflow navigation/actions; the selected-step pane owns General, Codex, Execution Budget, Capabilities, Step Guidance, Inputs, Outcomes, and Advanced sections.
 - Store each Step Capability Profile on the Workflow Step instance. Component Required and Default Capabilities seed a new instance; required entries remain locked and replaceable entries remain user-editable.
-- Add optional bounded multiline Step Guidance to agent-backed steps. Persist it after shared secret handling, include it in every Context Manifest, and give component instructions, Step Contract, Step Execution Policy, output schema, required capabilities, and safety boundaries precedence.
+- Add optional bounded multiline Step Guidance to agent-backed steps. Persist it after shared secret handling, include it in every generated role prompt and saved attempt context, and give component instructions, Step Contract, Step Execution Policy, output schema, required capabilities, and safety boundaries precedence.
 - Preserve user-authored Step Guidance across a Type change but mark it `NEEDS_REVIEW`; block Apply until the user chooses Keep, Edit, or Clear.
 - On Type change, preserve UUIDv4, display name, and position while resetting Type-dependent capabilities, Codex settings, Execution Budget, ports, bindings, and supported outcomes to new component defaults.
 - Replace component-keyed user capability defaults with one mutable User Workflow Default containing the complete per-step configuration. Apply writes it atomically; Cancel does not write; Reset restores the built-in default.
-- Do not add an immutable workflow-revision archive. Every Workflow Run instead stores its immutable resolved Workflow Definition and canonical hash.
+- Do not add an immutable workflow-revision archive. Every portable development run instead stores its immutable resolved Workflow Definition and canonical hash in the issue pack's `*.loop.state.json`.
 - During an active run, `/options` shows a read-only Current Run view and an editable Future Runs view with an explicit scope message. It cannot mutate unstarted steps in the current Run Snapshot.
 - Extend component execution defaults to provide optional Codex Execution Settings and an independent Execution Budget. Remove FULL/LIGHTWEIGHT intelligence profiles and issue-size-based model or effort switching.
 - For agent-backed steps, Codex Execution Settings contain model, reasoning effort, and explicit Fast preference. Every attempt uses the values frozen in the Run Snapshot.
 - For local deterministic components, omit Codex settings and display a local-execution explanation rather than disabled meaningless fields.
-- Load the live account-aware model picker from the Codex App Server model catalog, following pagination. Use model IDs, display names, default effort, supported efforts, service tiers, hidden status, and availability information from that protocol.
+- Load the live account-aware model picker through a small portable Codex Model Catalog adapter beside `codex_runner.py`. The adapter may query the installed Codex backend, but it must not depend on CodexCLI RunStore, Workflow Runs, Textual UI, or CodexCLI application/domain modules.
 - Cache the most recently loaded model catalog for display only. A fresh preflight must authorize every selected model/effort/Fast combination before a run starts.
 - Do not expose unrestricted free-text model input in the normal editor.
-- Map Fast On to the catalog-advertised `fast` service tier. Map Fast Off to an explicit backend override or clear that prevents a user-global Fast default from changing the snapshotted step setting. Verify this mapping at the App Server protocol boundary.
-- Pass selected model, reasoning effort, and service tier when starting each Codex thread. Do not rely on a previously active Codex CLI session setting.
+- Map Fast On and Off to explicit arguments/configuration supported by the installed `codex exec` command so a user-global Fast default cannot change the snapshotted step setting. Verify this mapping at the portable command-construction seam.
+- Pass selected model, reasoning effort, and Fast setting in every fresh or resumed portable `codex exec` role command. Do not rely on a previously active Codex CLI session setting.
 - Use the following built-in defaults when available in the live catalog: Analysis `gpt-5.6-sol`/`xhigh`; Development `gpt-5.6-luna`/`high`; Code Review `gpt-5.6-sol`/`xhigh`; QA `gpt-5.6-terra`/`high`; Fast Off for all.
 - Block preflight rather than silently falling back when any configured model, effort, or service tier is unavailable. Name the affected Step Display Name and field and provide a route back to `/options`.
 - Retain Execution Budget timeouts and checkpoint deadlines independently from model intelligence.
 - Keep `IssueStatus` as a closed enum and replace phase-specific members with generic `IN_PROGRESS`; store the exact active Step Instance ID separately.
-- Replace fixed analysis, development, review, QA, and finalization cursors with generic Step Runtime States keyed by Step Instance ID and, for issue-scoped steps, Issue ID.
+- Replace fixed coder/reviewer/QA cursor fields in `state.py` with generic Step Runtime States keyed by Step Instance ID and, for issue-scoped steps, Issue number. Analysis handoff state remains owned by `interactive_runner.py` but uses the same resolved workflow identity when development starts.
 - Store current status, pass, backend thread and turn identity, checkpoint, and component-owned resumable state in each Step Runtime State.
 - Replace fixed implementation/review/QA attempt fields with immutable Step Attempt Records keyed by Step Instance ID and optional Issue ID. Record pass, thread/turn, outcome, typed output Artifacts by Output Port, timing, and blocked/failure/rework references.
 - Resolve ordinary bindings from the latest compatible `SUCCEEDED` Step Attempt Record. Resolve rework input from the exact `CHANGES_REQUESTED` record that triggered the transition. Exclude failed, blocked, or cancelled outputs unless the target contract explicitly permits them.
-- Dispatch execution, recovery, Step Views, scheduling, and transitions through the Component Registry and Step Instance ID instead of hardcoded phase constants or component-to-single-step lookup.
+- Dispatch portable role execution, recovery, dashboard rows, and transitions through the portable Workflow Step Component Catalog and Step Instance ID instead of hardcoded phase constants or component-to-single-step lookup.
 - Keep closed domain sets such as Issue Status, Step Run Status, Workflow Run Status, Step Outcome, guidance review state, and dashboard status as enums. Keep installed Component IDs, model IDs, service-tier IDs, and Step Instance GUIDs as validated boundary types appropriate to their open or externally advertised sets.
 - Build one GUID-keyed Step Progress projection shared by every presentation. Include display name, component information, status, pass, elapsed/accumulated duration, active settings, Issue context where applicable, and safe backend activity.
 - Render every issue-scoped Primary Path instance as a separate Current Issue row. Separate workflow-scoped progress, show branch-only steps when visited or expanded, retain completed durations, and accumulate rework time without losing pass information.
@@ -182,27 +200,29 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 
 ## Testing Decisions
 
-- Good tests assert externally observable behavior: what `/options` displays and saves, which workflow a new run snapshots, which App Server request is emitted, which transition is selected, which artifact reaches a downstream input, what resume restores, and what the user sees on the dashboard. Tests should not assert private widget layout structure, helper call order, or incidental serialization implementation.
-- Use the Textual Pilot as the highest user-facing seam. Exercise opening `/options`, adding/duplicating/moving/deleting/retargeting steps, selecting Type/model/effort/Fast, editing capabilities and guidance, resolving validation, Apply/Cancel/Reset, narrow/wide layouts, and read-only Current Run versus editable Future Runs.
-- Exercise the Workflow Editor through its application service and persistent user configuration using temporary directories. Verify atomic Apply, no write on Cancel, built-in Reset, GUID stability, unique names, deterministic positions, deletion impact, Duplicate semantics, stale-guidance acknowledgement, and full round-trip equality.
+- Good tests assert externally observable portable-runner behavior: what `/options` displays and saves, which workflow a new run snapshots, which `codex exec` command is built, which transition is selected, which role result reaches a downstream input, what rerun resume restores, and what the user sees on the dashboard. Tests should not assert helper call order or incidental serialization implementation.
+- Use the public `interactive_runner`, fake editor, command builder, issue loop, and `statusui` projection seams as the highest user-facing automated tests. Exercise opening `/options`, adding/duplicating/moving/deleting/retargeting steps, selecting Type/model/effort/Fast, editing capabilities and guidance, resolving validation, Apply/Cancel/Reset, narrow/wide layouts, and read-only Current Run versus editable Future Runs.
+- Exercise the Workflow Editor through portable configuration functions and temporary directories. Verify atomic Apply, no write on Cancel, built-in Reset, GUID stability, unique names, deterministic positions, deletion impact, Duplicate semantics, stale-guidance acknowledgement, and full round-trip equality.
 - Extend Workflow Definition contract tests for schema v2, UUIDv4 identities, open Component IDs, Primary Path derivation, branch-local ordering, loops, supported outcomes, start/terminal reachability, scope compatibility, and typed Port Binding validation.
 - Add explicit rejection coverage for v1 workflows. Do not add migration fixtures or compatibility behavior.
-- Test Codex Model Catalog discovery at the JSON-RPC boundary, including pagination, hidden/unavailable models, supported reasoning efforts, default effort, service tiers, empty pages, malformed responses, connection failure, cached display, Retry Catalog, and fresh preflight.
-- Test thread-start requests at the App Server contract boundary. Assert exact model, reasoning-effort configuration, Fast service tier, Fast-off override/clear, selected capability roots, developer/component instructions, and bounded Step Guidance composition.
+- Test Codex Model Catalog discovery at its portable backend-adapter seam, including pagination when advertised, hidden/unavailable models, supported reasoning efforts, Fast availability, empty results, malformed responses, connection failure, cached display, Retry Catalog, and fresh preflight.
+- Test portable `codex exec` command construction. Assert exact model, reasoning-effort configuration, Fast-on/Fast-off override, selected capability paths, component instructions, and bounded Step Guidance composition.
 - Test that a user-global Codex model or Fast change cannot alter an explicitly configured Run Snapshot.
 - Replace execution-profile tests that expect automatic LIGHTWEIGHT selection with tests proving per-step model/effort/Fast authority and independent Execution Budget selection.
-- Extend Run Store round-trip and recovery tests for immutable resolved workflow snapshots, canonical hashes, generic Step Runtime States, Step Attempt Records, independent duplicate review threads, branch cursors, and latest-compatible artifact resolution.
-- Extend scheduler tests so Issue Status remains generic `IN_PROGRESS` while current Step Instance ID changes through arbitrary issue-scoped paths and rework loops.
-- Verify that two instances of the same component execute independently, receive distinct Context Manifests and threads, retain distinct outputs, and both appear in history and dashboard projections.
+- Extend `LoopStateWriter` round-trip and recovery tests for immutable resolved workflow snapshots, canonical hashes, generic Step Runtime States, Step Attempt Records, independent duplicate review sessions, branch cursors, and latest-compatible result resolution.
+- Extend portable issue-loop tests so Issue Status remains generic `IN_PROGRESS` while current Step Instance ID changes through arbitrary issue-scoped paths and rework loops.
+- Verify that two instances of the same component execute independently, receive distinct portable role prompts and Codex sessions, retain distinct outputs, and both appear in history and dashboard projections.
 - Verify ordinary binding selection chooses the latest successful output, rework chooses the triggering changes-requested record, and disallowed outcomes never flow downstream.
-- Test Step Guidance precedence and safety through observable prompts and Context Manifests: the guidance is present, bounded, redacted, and unable to change permission, schema, model, service tier, or transition settings.
-- Test the shared Step Progress projection once as a pure model, then render it through Textual and Hybrid Console adapters. Cover duplicate component instances, independent timers, accumulated retries, branch visibility, workflow versus Issue scope, Last Result, spinner/activity freshness, and completed-time freezing.
+- Test Step Guidance precedence and safety through observable role prompts and saved attempt context: the guidance is present, bounded, redacted, and unable to change permission, schema, model, Fast, or transition settings.
+- Test the shared Step Progress projection once as a pure model, then render it through the planning and bounded implementation console adapters. Cover duplicate component instances, independent timers, accumulated retries, branch visibility, workflow versus Issue scope, Last Result, spinner/activity freshness, and completed-time freezing.
 - Preserve console snapshot coverage for alignment, display width, Unicode, narrow terminals, `NO_COLOR`, redirected output, and absence of terminal cursor sequences outside a TTY.
 - Verify Bash and PowerShell launch the same shared Python workflow behavior through wrapper argument-forwarding tests rather than duplicating workflow assertions per shell.
-- Reuse the existing real-UI workflow pilot structure for an optional operator-run authenticated smoke gate, but do not agent-launch that long-running real Codex integration gate. Pure application and protocol tests remain the required automated evidence in this implementation environment.
-- Run the repository's full Python test suite, focused Textual tests, syntax compilation, `git diff --check`, and a local `--dry-run --no-worktree` issue-pack validation before declaring the feature complete.
+- Provide an optional operator-run authenticated smoke gate for the portable wrappers, but do not agent-launch that long-running real Codex integration gate. Standard-library unit/integration tests remain the required automated evidence in this implementation environment.
+- Run the repository's full Python test suite, focused planner/runner tests, syntax compilation, `git diff --check`, and a local `--dry-run --no-worktree` issue-pack validation before declaring the feature complete.
 
 ## Out of Scope
+
+- Changing or extending the separate CodexCLI Textual application, its `RunStore`, Workflow Runs, App Server execution threads, launcher, or modules under `src/devloop/application/`, `components/`, `domain/`, `execution/`, `persistence/`, `ui/`, and `workflow/`.
 
 - Migrating, reading, resuming, or preserving v1 Workflow Definitions or v1 workflow snapshots.
 - Mutating the workflow graph, execution settings, guidance, capabilities, or bindings of an already-started Workflow Run.
@@ -212,9 +232,9 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 - Unrestricted free-text model IDs in the normal `/options` editor.
 - A free-form graphical drag-and-drop canvas; the live graph is a preview of structured transition controls.
 - Parallel execution of independent Workflow Steps or multiple Codex agent attempts; the established one-at-a-time execution policy remains unchanged.
-- Installing new Workflow Step Components from inside the Type picker. The picker consumes the installed Component Registry.
+- Installing new Workflow Step Components from inside the Type picker. The picker consumes the portable installed component catalog.
 - Allowing Step Guidance to override component contracts, permissions, approval policy, output schemas, required capabilities, safety rules, or workflow structure.
-- Changing the existing Composer, slash-command syntax, capability GitHub installer, explicit approval flow, stop controls, retention policy, or remote-side-effect restrictions except where integration with the new editor is required.
+- Changing the existing portable line editor, slash-command syntax, capability GitHub installer, explicit approval flow, stop controls, or remote-side-effect restrictions except where integration with the new editor is required.
 - Agent-launched authenticated Codex integration, installation, release, or publishing gates.
 - Publishing this PRD to an external GitHub issue; the canonical artifact is local to the repository.
 
@@ -223,6 +243,6 @@ The same dynamic Workflow Progress Dashboard serves the Textual application, the
 - The accepted analysis deliberately treats Workflow Step Components as reusable classes and Workflow Steps as independently configured objects. Two Code Review objects therefore have different GUIDs, names, settings, capabilities, guidance, runtime state, attempt history, and dashboard rows.
 - The user is the only v1 Dev Loop user, so the hard schema cutover is intentional and preferred over compatibility complexity.
 - Official Codex terminology is used: model, reasoning effort, and service tier/Fast are separate controls.
-- Model and service-tier availability is account- and installation-dependent; the live App Server model catalog is authoritative.
+- Model, reasoning-effort, and Fast availability are account- and installation-dependent; the installed Codex backend queried by the portable catalog adapter is authoritative.
 - The same shared implementation serves Linux and PowerShell because both wrappers enter the Python application.
 - The repository's local ADR directory is intentionally ignored by Git, while the root glossary and this PRD are the durable tracked analysis artifacts.

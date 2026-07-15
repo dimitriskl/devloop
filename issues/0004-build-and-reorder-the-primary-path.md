@@ -6,9 +6,16 @@ Label: ready-for-agent
 
 [Configurable Workflow Steps PRD](./configurable-workflow-steps.md)
 
+## Target Product
+
+Product: devloop-plan + devloop
+
+Portable `devloop-plan + devloop`. Extend the portable terminal Workflow Editor
+and workflow model only. Do not use the CodexCLI Component Registry or UI.
+
 ## What to build
 
-Make the Workflow Editor capable of constructing the normal successful path. Populate the Type picker from installed Workflow Step Components, show the selected component's read-only scope, and create new instances from component defaults. Support Add, Insert, Move Up, Move Down, and direct one-based Position edits. Represent Primary Path order through `SUCCEEDED` transitions and renumber its display positions without gaps.
+Make the portable terminal Workflow Editor capable of constructing the normal successful path. Populate the Type picker from the portable installed role/skill and step-adapter catalog, show the selected component's read-only scope, and create new instances from portable defaults. Support Add, Insert, Move Up, Move Down, and direct one-based Position edits. Represent Primary Path order through `SUCCEEDED` transitions and renumber its display positions without gaps.
 
 Keep every existing Step Instance ID stable through moves and insertions. When a simple linear insertion creates exactly one compatible source for a required input, bind it automatically; otherwise leave the binding unresolved for deliberate selection. Demonstrate that an edited Primary Path can be applied and executed.
 
@@ -16,7 +23,7 @@ Covers parent PRD user stories 4-5, 8-10, and 19-27.
 
 ## Acceptance criteria
 
-- [ ] The Type picker lists installed built-in and custom Workflow Step Components without a core type enum edit.
+- [ ] The Type picker lists installed built-in and custom portable Workflow Step Components without a core type enum edit or CodexCLI registry dependency.
 - [ ] The selected component's Step Scope is visible and cannot be overridden by the workflow instance.
 - [ ] Add and Insert create a UUIDv4 instance with a unique name and component defaults.
 - [ ] Move Up, Move Down, and one-based Position edits update `SUCCEEDED` transitions consistently.

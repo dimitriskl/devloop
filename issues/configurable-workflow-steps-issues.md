@@ -4,7 +4,13 @@ Label: ready-for-agent
 
 ## Parent
 
-[Configurable Workflow Steps PRD](./configurable-workflow-steps.md)
+Parent PRD: `configurable-workflow-steps.md`
+
+## Target Product
+
+All issues target the portable `devloop-plan + devloop` wrappers and their
+Python runner modules. They do not target the separately installed `codexcli`
+Textual application. `docs/product-boundaries.md` is authoritative.
 
 ## Execution order
 

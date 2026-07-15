@@ -6,6 +6,13 @@ Label: ready-for-agent
 
 [Configurable Workflow Steps PRD](./configurable-workflow-steps.md)
 
+## Target Product
+
+Product: devloop-plan + devloop
+
+Portable `devloop-plan + devloop`. Implement transactional transformations in
+the portable workflow model and terminal editor. Do not modify CodexCLI.
+
 ## What to build
 
 Complete transactional Duplicate, Delete, and Type Change operations in the Workflow Editor. Duplication must create a new UUID and unique name, copy instance settings and inputs, avoid copying successful runtime evidence, mark copied guidance `NEEDS_REVIEW`, insert the duplicate safely on the Primary Path when applicable, and warn that unused outputs still need deliberate consumers.
@@ -26,6 +33,7 @@ Covers parent PRD user stories 6-7, 40-45, and 75-78.
 - [ ] Preserved guidance after Type Change is marked `NEEDS_REVIEW` and must be resolved before Apply.
 - [ ] Duplicate, Delete, and Type Change can each be undone without persistence side effects.
 - [ ] Apply is blocked for every invalid transformed graph, and a valid transformed workflow executes end to end in automated coverage.
+- [ ] Transformations round-trip through portable planner configuration and `*.loop.state.json`; no CodexCLI state is read or written.
 
 ## Blocked by
 

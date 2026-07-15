@@ -1,6 +1,33 @@
 # Dev Loop
 
-Dev Loop is an interactive software-delivery workflow that coordinates agent work from analysis through implementation and verification.
+This repository contains two separate Dev Loop applications. Product identity
+must be established before applying the vocabulary below.
+
+## Product Boundary
+
+**Portable Dev Loop**:
+The `devloop-plan.sh` / `.ps1` planning intake plus the `devloop.sh` / `.ps1`
+Markdown issue runner. It uses the portable line editor, console dashboard,
+Codex exec role sessions, and PRD-local `*.loop.state.json` state.
+_Avoid_: CodexCLI, Textual application, App Server Workflow Run
+
+**CodexCLI**:
+The separately installed `codexcli` Textual application built around Codex App
+Server, `.devloop/runs/`, component locks, and its own Workflow Run model. It is
+not the backend or next phase of Portable Dev Loop.
+_Avoid_: devloop-plan, portable wrapper, Markdown issue runner
+
+**Portable Resume Candidate**:
+An unfinished Portable Dev Loop PRD and linked issue pack listed at
+`devloop-plan` startup or by its `/resume` command. Selecting it opens the
+development handoff; the issue runner then restores its exact unfinished
+role/pass from PRD-local loop state.
+_Avoid_: CodexCLI Resume Candidate, App Server thread
+
+Terms involving the Application Shell, Run Launcher, Run Directory, Execution
+Thread, Recovery Attempt, Context Manifest, or `.devloop/runs/` below are
+CodexCLI terms unless explicitly qualified as portable. They must not be used to
+scope work requested for `devloop-plan + devloop`.
 
 ## Language
 

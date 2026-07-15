@@ -56,6 +56,12 @@ class BuildPlanningPromptTests(unittest.TestCase):
         self.assertIn("move directly to $to-prd and then $to-issues", prompt)
         self.assertIn("do not repeat the interview", prompt)
 
+    def test_names_the_active_product_and_excludes_codexcli_by_default(self) -> None:
+        prompt = self.make_prompt().lower()
+        self.assertIn("target product: devloop-plan + devloop", prompt)
+        self.assertIn("codexcli is a separate application", prompt)
+        self.assertIn("do not target codexcli", prompt)
+
 
 class BuildDevloopArgsTests(unittest.TestCase):
     def make_artifacts(self, root: Path) -> PlanningArtifacts:
@@ -369,6 +375,167 @@ class PlanStateTests(unittest.TestCase):
             interactive_runner.default_worktree_path(root, "reset-queue", parent=parent),
             parent / "eConnectorV2-reset-queue-dev",
         )
+
+
+class ResumePlanningTests(unittest.TestCase):
+    def make_prd_pair(
+        self,
+        root: Path,
+        name: str,
+        *,
+        completed: tuple[bool, ...],
+    ) -> PlanningArtifacts:
+        prd = root / "prd" / name / f"{name}.md"
+        prd.parent.mkdir(parents=True)
+        prd.write_text(f"# {name}\n", encoding="utf-8")
+        issues = prd.parent / "issues" / "README.md"
+        issues.parent.mkdir()
+        links: list[str] = []
+        for number, is_completed in enumerate(completed, start=1):
+            issue = issues.parent / f"{number:04d}-issue.md"
+            marker = "x" if is_completed else " "
+            issue.write_text(
+                f"# Issue {number:04d}\n\nCompleted: [{marker}]\n",
+                encoding="utf-8",
+            )
+            links.append(f"- [Issue {number:04d}](./{issue.name})")
+        issues.write_text("\n".join(links) + "\n", encoding="utf-8")
+        return PlanningArtifacts(prd.resolve(), issues.resolve())
+
+    def test_discovers_only_prd_packs_with_unfinished_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            unfinished = self.make_prd_pair(
+                root,
+                "unfinished",
+                completed=(True, False, False),
+            )
+            self.make_prd_pair(root, "finished", completed=(True, True))
+
+            candidates = interactive_runner.find_resume_candidates(root)
+
+        self.assertEqual([item.artifacts for item in candidates], [unfinished])
+        self.assertEqual(candidates[0].completed_issues, 1)
+        self.assertEqual(candidates[0].pending_issues, 2)
+        self.assertEqual(candidates[0].total_issues, 3)
+
+    def test_does_not_offer_an_explicit_codexcli_prd_to_portable_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_prd_pair(root, "codexcli-only", completed=(False,))
+            artifacts.prd_path.write_text(
+                "# CodexCLI work\n\n"
+                "## Target Product\n\n"
+                "The separately installed `codexcli` Textual application.\n",
+                encoding="utf-8",
+            )
+
+            candidates = interactive_runner.find_resume_candidates(root)
+
+        self.assertEqual(candidates, [])
+
+    def test_uses_loop_state_to_describe_the_active_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_prd_pair(root, "active", completed=(True, False))
+            state_path = artifacts.issues_index.with_name("README.loop.state.json")
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "issues": {
+                            "0001": {"status": "Completed"},
+                            "0002": {"status": "In Progress: reviewer"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            candidate = interactive_runner.find_resume_candidates(root)[0]
+
+        self.assertEqual(candidate.active_issue, "0002")
+        self.assertEqual(candidate.active_status, "In Progress: reviewer")
+
+    def test_discovers_a_flat_local_issue_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issues_root = root / "issues"
+            issues_root.mkdir()
+            prd = issues_root / "flat-feature.md"
+            index = issues_root / "flat-feature-issues.md"
+            issue = issues_root / "0001-flat-feature.md"
+            prd.write_text("# Flat feature\n", encoding="utf-8")
+            issue.write_text("# Issue\n\nCompleted: [ ]\n", encoding="utf-8")
+            index.write_text(f"[Issue 0001](./{issue.name})\n", encoding="utf-8")
+
+            candidates = interactive_runner.find_resume_candidates(root)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].artifacts.prd_path, prd.resolve())
+        self.assertEqual(candidates[0].artifacts.issues_index, index.resolve())
+        self.assertEqual(interactive_runner.artifact_slug(candidates[0].artifacts), "flat-feature")
+
+    def test_startup_resume_returns_the_selected_unfinished_prd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_prd_pair(root, "resume-me", completed=(False,))
+            with mock.patch.object(
+                interactive_runner,
+                "ask_choice",
+                side_effect=["2", "1"],
+            ):
+                selected = interactive_runner.choose_startup_artifacts(root)
+
+        self.assertEqual(selected, artifacts)
+
+    def test_startup_resume_skips_new_analysis_and_enters_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_prd_pair(root, "resume-me", completed=(False,))
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(root)])
+            bundle = mock.Mock(root=root)
+            state_path = root / "devloop-plan.json"
+            with mock.patch.object(
+                interactive_runner.BundleContext,
+                "from_file",
+                return_value=bundle,
+            ), mock.patch.object(
+                interactive_runner,
+                "plan_state_path",
+                return_value=state_path,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_target_repo",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_startup_artifacts",
+                return_value=artifacts,
+            ), mock.patch.object(
+                interactive_runner,
+                "current_branch",
+                return_value="main",
+            ), mock.patch.object(
+                interactive_runner,
+                "print_prd_status",
+            ), mock.patch.object(
+                interactive_runner,
+                "run_handoff",
+                return_value=23,
+            ) as run_handoff, mock.patch.object(
+                interactive_runner,
+                "apply_branch_strategy",
+            ) as apply_branch_strategy, mock.patch.object(
+                interactive_runner,
+                "run_planning_chat",
+            ) as run_planning_chat:
+                result = interactive_runner._run_planning(parser, args)
+
+        self.assertEqual(result, 23)
+        apply_branch_strategy.assert_not_called()
+        run_planning_chat.assert_not_called()
+        run_handoff.assert_called_once()
 
 
 class FindNewArtifactsTests(unittest.TestCase):

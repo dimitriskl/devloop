@@ -1,0 +1,52 @@
+{
+  "started_at": "2026-07-15T23:42:39",
+  "issues_index": "/home/dimitris/code/devloop/issues/configurable-workflow-steps-issues.md",
+  "events": [
+    {
+      "type": "run-start",
+      "timestamp": "2026-07-15T23:42:39",
+      "issues": [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0007",
+        "0008",
+        "0009",
+        "0010"
+      ],
+      "dry_run": false
+    },
+    {
+      "type": "issue-start",
+      "timestamp": "2026-07-15T23:42:39",
+      "issue": "0001"
+    }
+  ],
+  "issues": {
+    "0001": {
+      "title": "Run Two Review Instances Through a v2 Workflow",
+      "path": "/home/dimitris/code/devloop/issues/0001-run-two-review-instances-through-v2.md",
+      "status": "In Progress",
+      "last_started_at": "2026-07-15T23:42:39",
+      "started_at": "2026-07-15T23:42:39"
+    }
+  },
+  "repo_root": "/home/dimitris/code/devloop",
+  "prd_path": "/home/dimitris/code/devloop/issues/configurable-workflow-steps.md",
+  "selected_issues": [
+    "0001",
+    "0002",
+    "0003",
+    "0004",
+    "0005",
+    "0006",
+    "0007",
+    "0008",
+    "0009",
+    "0010"
+  ],
+  "dry_run": false
+}

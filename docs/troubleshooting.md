@@ -19,6 +19,15 @@ The `--issues` path must point to a Markdown README/index containing links to
 local issue Markdown files under the same issue folder. Links outside that
 folder, such as `../PRD.md`, are ignored and will not be selected as issues.
 
+## The runner says the PRD targets codexcli
+
+The repository contains two separate applications. `devloop.sh` and
+`devloop.ps1` intentionally refuse a PRD or linked issue whose `Target Product`
+explicitly names the separate `codexcli` application. Use the correct CodexCLI
+workflow, or correct the PRD and issue pack to target `devloop-plan + devloop`.
+Do not remove the target merely to bypass the check; confirm the owning modules
+in `docs/product-boundaries.md` first.
+
 ## The runner returns to the shell with no visible progress
 
 Check the loop state files next to the issue README:

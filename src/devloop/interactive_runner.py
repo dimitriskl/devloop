@@ -18,6 +18,7 @@ from .gitrefs import sanitize_branch_name
 from .github_install import install_from_github
 from .issue_pack import parse_issue_index, select_issues
 from .lineeditor import LineEditor
+from .product_scope import TargetProduct, detect_target_product
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage
 from .templates import BundleContext
@@ -42,6 +43,17 @@ ARTIFACT_FRESHNESS_SLACK_SECONDS = 5
 class PlanningArtifacts:
     prd_path: Path
     issues_index: Path
+
+
+@dataclass(frozen=True)
+class ResumeCandidate:
+    artifacts: PlanningArtifacts
+    completed_issues: int
+    pending_issues: int
+    total_issues: int
+    active_issue: str | None
+    active_status: str | None
+    updated_at: float
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +92,22 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         return run_handoff(bundle.root, repo_root, artifacts, selection, state_path)
 
     repo_root = choose_target_repo(args.repo)
+    if not args.goal:
+        resumed_artifacts = choose_startup_artifacts(repo_root)
+        if resumed_artifacts is not None:
+            print()
+            print(f"Target checkout: {repo_root}")
+            print(f"Current branch: {current_branch(repo_root) or 'unknown'}")
+            print(f"PRD: {resumed_artifacts.prd_path}")
+            print(f"Issue index: {resumed_artifacts.issues_index}")
+            print_prd_status(resumed_artifacts)
+            return run_handoff(
+                bundle.root,
+                repo_root,
+                resumed_artifacts,
+                selection,
+                state_path,
+            )
     repo_root = apply_branch_strategy(repo_root)
 
     goal = args.goal.strip() if args.goal else ""
@@ -114,6 +142,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         manual_artifacts=lambda: _manual_artifacts(),
         open_options=lambda: run_options_menu(bundle.root, selection, state_path),
         status_summary=lambda: _status_summary(repo_root, selection),
+        resume_artifacts=lambda: choose_resume_artifacts(repo_root),
     )
 
     artifacts = run_planning_chat(
@@ -169,6 +198,55 @@ def _manual_artifacts() -> PlanningArtifacts:
     prd_path = ask_existing_file("PRD path")
     issues_index = ask_existing_file("Issue README path")
     return PlanningArtifacts(prd_path=prd_path, issues_index=issues_index)
+
+
+def choose_startup_artifacts(repo_root: Path) -> PlanningArtifacts | None:
+    while True:
+        candidates = find_resume_candidates(repo_root)
+        print()
+        print("Dev Loop planning")
+        print("  1. Start a new change")
+        print(f"  2. Resume an unfinished PRD ({len(candidates)} found)")
+        choice = ask_choice("Select", {"1", "2"}, default="1")
+        if choice == "1":
+            return None
+        selected = choose_resume_artifacts(repo_root, candidates)
+        if selected is not None:
+            return selected
+
+
+def choose_resume_artifacts(
+    repo_root: Path,
+    candidates: list[ResumeCandidate] | None = None,
+) -> PlanningArtifacts | None:
+    available = find_resume_candidates(repo_root) if candidates is None else candidates
+    print()
+    if not available:
+        print("No unfinished PRD issue packs were found in this project.")
+        return None
+
+    print("Unfinished PRDs")
+    for index, candidate in enumerate(available, start=1):
+        print(f"  {index}. {format_resume_candidate(candidate)}")
+    print("  b. Back")
+    choices = {str(index) for index in range(1, len(available) + 1)} | {"b"}
+    choice = ask_choice("Select PRD to resume", choices, default="1")
+    if choice == "b":
+        return None
+    return available[int(choice) - 1].artifacts
+
+
+def format_resume_candidate(candidate: ResumeCandidate) -> str:
+    slug = artifact_slug(candidate.artifacts)
+    progress = (
+        f"{candidate.completed_issues}/{candidate.total_issues} completed · "
+        f"{candidate.pending_issues} remaining"
+    )
+    active = "not started"
+    if candidate.active_issue is not None:
+        active = f"issue {candidate.active_issue} · {candidate.active_status or 'unfinished'}"
+    updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(candidate.updated_at))
+    return f"{slug} · {progress} · {active} · updated {updated}"
 
 
 def _status_summary(repo_root: Path, selection: "catalog_module.Selection") -> str:
@@ -608,6 +686,16 @@ def build_planning_prompt(
 Repository root: {repo_root}
 Dev Loop bundle root: {bundle_root}
 
+Target product: devloop-plan + devloop
+- Plan and implement changes for the portable `devloop-plan.sh` / `devloop-plan.ps1`
+  planning intake and the `devloop.sh` / `devloop.ps1` issue runner.
+- codexcli is a separate application in this repository with a different Textual UI,
+  persistence model, and execution architecture. Do not target codexcli, its RunStore,
+  or its application/domain/UI modules unless the user explicitly names codexcli.
+- Every generated PRD and issue must include a `Target Product` section whose
+  first content line is exactly `Product: devloop-plan + devloop`, followed by
+  the relevant portable-runner modules.
+
 Use these bundled Codex skill instructions:
 {skills_block}
 
@@ -753,13 +841,7 @@ def format_issue_list(issues: list[str]) -> str:
 
 
 def find_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts]:
-    prd_dir = repo_root / "prd"
-    if not prd_dir.is_dir():
-        return []
-
-    candidates = find_prd_folder_artifacts(repo_root, prd_dir)
-    candidates.extend(find_legacy_artifacts(repo_root, prd_dir))
-
+    candidates = discover_artifacts(repo_root)
     recent: list[PlanningArtifacts] = []
     older: list[PlanningArtifacts] = []
     for candidate in sorted(candidates, key=artifact_mtime, reverse=True):
@@ -769,6 +851,82 @@ def find_artifacts(repo_root: Path, started_at: float) -> list[PlanningArtifacts
         else:
             older.append(candidate)
     return recent or older[:3]
+
+
+def discover_artifacts(repo_root: Path) -> list[PlanningArtifacts]:
+    prd_dir = repo_root / "prd"
+    candidates: list[PlanningArtifacts] = []
+    if prd_dir.is_dir():
+        candidates.extend(find_prd_folder_artifacts(repo_root, prd_dir))
+        candidates.extend(find_split_layout_artifacts(repo_root, prd_dir))
+    candidates.extend(find_flat_issue_artifacts(repo_root))
+
+    unique: dict[tuple[Path, Path], PlanningArtifacts] = {}
+    for candidate in candidates:
+        key = (candidate.prd_path.resolve(), candidate.issues_index.resolve())
+        unique[key] = PlanningArtifacts(*key)
+    return list(unique.values())
+
+
+def find_resume_candidates(repo_root: Path) -> list[ResumeCandidate]:
+    candidates: list[ResumeCandidate] = []
+    for artifacts in discover_artifacts(repo_root):
+        target = detect_target_product(artifacts.prd_path)
+        if target in {TargetProduct.CODEXCLI, TargetProduct.INVALID}:
+            continue
+        issues = parse_issue_index(artifacts.issues_index)
+        if not issues:
+            continue
+        pending = [issue for issue in issues if not issue.completed]
+        if not pending:
+            continue
+        active_issue, active_status = resume_activity(artifacts)
+        paths = [artifacts.prd_path, artifacts.issues_index]
+        paths.extend(issue.path for issue in issues)
+        state_path = find_status_state_path(artifacts)
+        if state_path is not None:
+            paths.append(state_path)
+        candidates.append(
+            ResumeCandidate(
+                artifacts=artifacts,
+                completed_issues=len(issues) - len(pending),
+                pending_issues=len(pending),
+                total_issues=len(issues),
+                active_issue=active_issue,
+                active_status=active_status,
+                updated_at=max(path.stat().st_mtime for path in paths),
+            )
+        )
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate.updated_at,
+            artifact_slug(candidate.artifacts).casefold(),
+        ),
+        reverse=True,
+    )
+
+
+def resume_activity(artifacts: PlanningArtifacts) -> tuple[str | None, str | None]:
+    state_path = find_status_state_path(artifacts)
+    if state_path is None:
+        return None, None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    issues = state.get("issues")
+    if not isinstance(issues, dict):
+        return None, None
+    priorities = ("In Progress", "Blocked")
+    for prefix in priorities:
+        for number, details in issues.items():
+            if not isinstance(details, dict):
+                continue
+            status = str(details.get("status", ""))
+            if status.startswith(prefix):
+                return str(number), status
+    return None, None
 
 
 def snapshot_artifacts(repo_root: Path) -> dict[Path, float]:
@@ -859,7 +1017,7 @@ def find_prd_file_in_folder(prd_folder: Path) -> Path | None:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
-def find_legacy_artifacts(repo_root: Path, prd_dir: Path) -> list[PlanningArtifacts]:
+def find_split_layout_artifacts(repo_root: Path, prd_dir: Path) -> list[PlanningArtifacts]:
     issues_dir = repo_root / "issues"
     if not issues_dir.is_dir():
         return []
@@ -875,6 +1033,25 @@ def find_legacy_artifacts(repo_root: Path, prd_dir: Path) -> list[PlanningArtifa
                     issues_index=issues_index.resolve(),
                 )
             )
+    return artifacts
+
+
+def find_flat_issue_artifacts(repo_root: Path) -> list[PlanningArtifacts]:
+    issues_dir = repo_root / "issues"
+    if not issues_dir.is_dir():
+        return []
+    artifacts: list[PlanningArtifacts] = []
+    for issues_index in issues_dir.glob("*-issues.md"):
+        prd_name = f"{issues_index.stem.removesuffix('-issues')}.md"
+        prd_path = issues_index.with_name(prd_name)
+        if not prd_path.is_file():
+            continue
+        artifacts.append(
+            PlanningArtifacts(
+                prd_path=prd_path.resolve(),
+                issues_index=issues_index.resolve(),
+            )
+        )
     return artifacts
 
 
@@ -895,7 +1072,10 @@ def default_worktree_path(repo_root: Path, slug: str, *, parent: Path | None = N
 
 
 def artifact_slug(artifacts: PlanningArtifacts) -> str:
-    if artifacts.issues_index.parent.name == "issues":
+    if (
+        artifacts.issues_index.name.casefold() == "readme.md"
+        and artifacts.issues_index.parent.name == "issues"
+    ):
         return artifacts.issues_index.parent.parent.name
     return artifacts.prd_path.stem
 

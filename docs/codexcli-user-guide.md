@@ -10,7 +10,12 @@ Installation, operation, commands, parameters, recovery, and troubleshooting
 | Last updated | 15 July 2026 |
 | Implementation baseline | `origin/main` at `3f56dbf` |
 
-> Scope: This guide covers the installable `codexcli` workflow application and the companion `codexcli-gate` verification-evidence command. The older `devloop` and `devloop-plan` wrapper scripts have different parameters and are outside this guide.
+> Scope: This guide covers only the separately installed `codexcli` Textual
+> application and the companion `codexcli-gate` evidence command. `codexcli` is
+> not the backend, next version, or resume mechanism of the portable
+> `devloop-plan` and `devloop` wrappers. Those wrappers have different commands,
+> source modules, and PRD-local state. See `product-boundaries.md` before making
+> cross-product changes.
 
 <!-- pagebreak -->
 
@@ -319,7 +324,7 @@ codexcli run --help
 
 The interactive `codexcli` command does not expose CLI flags for workflow selection, direct run-ID resume, arbitrary model or reasoning values, provider, sandbox, approval policy, worktree path, branch name, retry counts, language, retention, purge, or finalization. Use the contextual UI commands and choices described below. Configure the provider and authentication in Codex CLI, and use `/profile` for CodexCLI's supported component execution profiles.
 
-The legacy `devloop` and `devloop-plan` scripts expose a separate set of flags. Do not pass those flags to `codexcli`.
+The portable `devloop` and `devloop-plan` scripts expose a separate set of flags. Do not pass those flags to `codexcli`.
 
 ### 7.4 Verification evidence with `codexcli-gate`
 

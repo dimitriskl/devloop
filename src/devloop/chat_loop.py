@@ -29,12 +29,21 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 # Only these tokens are treated as slash commands. Anything else that starts
 # with "/" (unknown /foo tokens, absolute POSIX paths like /home/x.png) falls
 # through and is sent to Codex as a normal message.
-KNOWN_COMMANDS = {"/help", "/status", "/options", "/paste", "/done", "/quit"}
+KNOWN_COMMANDS = {
+    "/help",
+    "/status",
+    "/options",
+    "/resume",
+    "/paste",
+    "/done",
+    "/quit",
+}
 
 HELP_TEXT = """Commands:
   Alt+V    attach a screenshot from the clipboard (use /paste if unavailable)
   /paste   attach a screenshot from the clipboard
   /options open agent/skill and development options
+  /resume  choose an unfinished PRD and continue its development handoff
   /status  show the stage banner, artifacts, and selection summary
   /done    detect the PRD and issue pack now (or enter paths manually)
   /help    show this help
@@ -59,6 +68,10 @@ PLANNING_STAGE_STATUS = (
 PLANNING_SUBMISSION_STATUS = "Submitted to Codex; waiting for the planning response..."
 
 
+def _no_resume_artifacts() -> Any | None:
+    return None
+
+
 @dataclass
 class ChatConfig:
     codex: str
@@ -74,6 +87,7 @@ class ChatCallbacks:
     manual_artifacts: Callable[[], Any | None]
     open_options: Callable[[], None]
     status_summary: Callable[[], str]
+    resume_artifacts: Callable[[], Any | None] = _no_resume_artifacts
 
 
 @dataclass
@@ -370,7 +384,8 @@ def run_planning_chat(
 
         print(statusui.render_banner(Stage.ANALYSIS))
         print(
-            "Describe the change. Type /status for the current phase, "
+            "Describe the change. Type /resume for unfinished PRDs, "
+            "/status for the current phase, "
             "/help for commands; Alt+V pastes a screenshot."
         )
 
@@ -587,6 +602,12 @@ def _handle_command(
     if command == "/options":
         callbacks.open_options()
         return True, None, False
+    if command == "/resume":
+        artifacts = callbacks.resume_artifacts()
+        if artifacts is None:
+            print("No unfinished PRD selected; continuing the planning chat.")
+            return True, None, False
+        return True, artifacts, True
     if command == "/paste":
         token = paste_hook()
         if token:

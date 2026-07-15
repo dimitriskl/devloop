@@ -6,6 +6,9 @@ Use `devloop-plan` when you want the runner to start from an idea, drive an
 interactive Codex planning session, create `prd/<change>/` artifacts, and then
 offer to start the existing implementation loop.
 
+This is the portable Dev Loop wrapper workflow. It is separate from the
+installable `codexcli` Textual application; see `docs/product-boundaries.md`.
+
 Windows:
 
 ```powershell
@@ -17,6 +20,11 @@ Ubuntu/macOS:
 ```bash
 ./bin/devloop-plan.sh --repo /path/to/project
 ```
+
+Without `--goal` or `--prd`, startup offers a new planning session or a catalog
+of unfinished PRDs. During planning, `/resume` opens the same catalog. Selecting
+an entry goes to the development handoff and preserves the existing issue/pass
+resume behavior from its loop-state file.
 
 See `docs/interactive-runner.md` for the full flow.
 

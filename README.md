@@ -14,7 +14,22 @@
 
 Portable Codex development-loop runner for local PRD and issue packs.
 
-## CodexCLI v0.1.0
+## Two Separate Applications
+
+This repository contains two applications. They share some source packages but
+they do not share an interface, command registry, or run-state format.
+
+| Application | Start command | Interface and state | Resume |
+| --- | --- | --- | --- |
+| Portable Dev Loop | `devloop-plan.sh` / `.ps1`, then `devloop.sh` / `.ps1` | Line editor and bounded console dashboard; PRD-local `*.loop.state.json` | Startup **Resume an unfinished PRD**, planning `/resume`, or rerun the same `devloop` command |
+| CodexCLI | Installed `codexcli run` command | Separate Textual application; `.devloop/runs/` and Codex App Server threads | Its own `/resume` command |
+
+`devloop-plan` is not a launcher or compatibility wrapper for `codexcli`.
+Changes requested while running `devloop-plan` target the portable Dev Loop
+unless the user explicitly names CodexCLI. See
+`docs/product-boundaries.md` before changing workflow architecture.
+
+## Separate Optional Application: CodexCLI v0.1.0
 
 The installable hackathon workflow is available as `codexcli`:
 
@@ -37,7 +52,7 @@ documentation.
 
 ## What You Can Run
 
-Dev Loop has two entrypoints:
+The portable Dev Loop has two entrypoints:
 
 - `devloop` runs implementation from an existing PRD and local issue pack.
 - `devloop-plan` starts from an idea and runs one continuous session:
@@ -111,11 +126,14 @@ Ubuntu/macOS:
 ```
 
 The session shows a stage banner (`analysis -> development -> review -> qa`).
-Chat with Codex to sharpen the change; when the PRD and issue pack are
-written, press Enter on the summary screen to start development. Type
-`/options` at any prompt to pick agents/skills or install new ones from
-GitHub; type `/help` for all commands. The self-improvement wiki is always
-used: planning reads it, and every run updates it.
+At startup choose **Start a new change** or **Resume an unfinished PRD**. Resume
+lists only PRD/issue packs with unfinished issues and shows completion counts,
+the active issue when known, and last activity. The same catalog is available
+through `/resume` during planning. Chat with Codex to sharpen a new change; when
+the PRD and issue pack are written, press Enter on the summary screen to start
+development. Type `/options` at any prompt to pick agents/skills or install new
+ones from GitHub; type `/help` for all commands. The self-improvement wiki is
+always used: planning reads it, and every run updates it.
 
 `devloop-plan` asks for the target checkout. On the first run there is no target
 default; after a valid selection it saves that checkout and shows it as the

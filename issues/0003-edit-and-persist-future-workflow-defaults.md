@@ -6,9 +6,17 @@ Label: ready-for-agent
 
 [Configurable Workflow Steps PRD](./configurable-workflow-steps.md)
 
+## Target Product
+
+Product: devloop-plan + devloop
+
+Portable `devloop-plan + devloop`. Implement through `interactive_runner.py`,
+`chat_loop.py`, `lineeditor.py`, `catalog.py`, and portable configuration
+modules. Do not implement this in the CodexCLI Textual UI.
+
 ## What to build
 
-Turn `/options` into the entry point for a transactional Workflow Editor. Present the Primary Path and a focused selected-step inspector. Load the User Workflow Default when it exists and otherwise load the built-in workflow. Allow unique display-name edits while keeping machine GUIDs out of the normal view and available in an advanced view.
+Turn portable `devloop-plan` `/options` into the entry point for a transactional terminal Workflow Editor. Present the Primary Path and a focused selected-step inspector through the existing line editor. Load the User Workflow Default from portable planner configuration when it exists and otherwise load the built-in workflow. Allow unique display-name edits while keeping machine GUIDs out of the normal view and available in an advanced view.
 
 Maintain an isolated draft with Undo, Reset Step, Reset Workflow, atomic Apply, and whole-draft Cancel. During a run, show Current Run as inspectable but read-only and Future Runs as editable, with explicit copy that changes apply only to newly created runs. A new run must capture the resolved default and canonical hash; the active run must remain unchanged.
 
@@ -25,7 +33,8 @@ Covers parent PRD user stories 1-3, 11-20, and 79-86.
 - [ ] During an active run, Current Run is read-only and Future Runs remains editable with an explicit scope message.
 - [ ] Editing Future Runs does not mutate the active run snapshot, cursor, or hash.
 - [ ] A subsequent run captures the newly resolved workflow and canonical hash.
-- [ ] Textual Pilot coverage exercises Apply, Cancel, reset, undo, current/future scope, and narrow and wide layouts.
+- [ ] Fake-editor and public planner-flow coverage exercises Apply, Cancel, reset, undo, current/future scope, and narrow and wide terminal layouts.
+- [ ] Bash and PowerShell wrappers reach the same editor behavior without invoking CodexCLI.
 
 ## Blocked by
 

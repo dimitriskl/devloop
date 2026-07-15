@@ -20,6 +20,12 @@ into a repeatable Codex implementation loop. It has two entrypoints:
 - `devloop` runs implementation, senior review, and QA from an existing PRD and
   issue index.
 
+These wrappers are the **Portable Dev Loop** product documented here. The same
+repository also contains a separate installable Textual application named
+`codexcli`. It has different commands, persistence, UI, and workflow internals;
+it is not started or resumed by these wrappers. See `product-boundaries.md` for
+the authoritative module and command map.
+
 ## 1. Install And Verify
 
 Required tools:
@@ -93,6 +99,17 @@ If `--repo` is omitted, Dev Loop asks for the target checkout. It remembers the
 last valid target in the user config folder. If the selected folder does not
 exist, Dev Loop can create it and initialize Git after asking.
 
+When no `--goal` or `--prd` is supplied, startup offers:
+
+1. **Start a new change**.
+2. **Resume an unfinished PRD**.
+
+The resume list contains only issue packs with unfinished issues. Each entry
+shows completed and remaining counts, the active issue/status when a loop-state
+file exists, and last activity. Selecting one opens the normal development
+handoff; completed issues remain skipped and an interrupted active issue resumes
+at its next unfinished coder, reviewer, or QA gate.
+
 The planning session runs in the `analysis` stage. It uses the planning skills
 to clarify the request, write the PRD, and write the issue pack. Dev Loop watches
 the target checkout. When the PRD and issue index exist, it shows the
@@ -122,6 +139,7 @@ Inside `devloop-plan`, these commands are available:
 | Alt+V | Attach a clipboard screenshot in a real interactive terminal. |
 | `/paste` | Attach a clipboard screenshot when Alt+V is unavailable. |
 | `/options` | Change planning skills, role agents/skills, and development options. |
+| `/resume` | List unfinished PRDs and continue the selected development handoff. |
 | `/status` | Show the stage banner, artifacts, and current selection. |
 | `/done` | Detect PRD/issues now or enter artifact paths manually. |
 | `/help` | Print chat help. |

@@ -10,6 +10,7 @@ from typing import Any
 from .codex_runner import CodexRunner, RoleResult
 from .issue_pack import Issue, find_repo_root, parse_issue_index, select_issues
 from .lineeditor import LineEditor
+from .product_scope import require_portable_target
 from .self_improvement_wiki import (
     DEFAULT_SELF_IMPROVEMENT_WIKI_PATH,
     ensure_self_improvement_wiki,
@@ -43,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     if not prd_path.is_file():
         parser.error(f"PRD file not found: {prd_path}")
 
+    try:
+        validate_prd_target_product(prd_path)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if not issues_index.is_file():
         parser.error(f"Issue README/index file not found: {issues_index}")
 
@@ -52,6 +58,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not source_issues:
         parser.error(f"No local issue links were found in {issues_index}")
+
+    for issue in source_issues:
+        try:
+            validate_issue_target_product(issue.path)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     selected_source_issues = select_issues(
         source_issues,
@@ -233,6 +245,14 @@ def main(argv: list[str] | None = None) -> int:
         print("Dev loop finished with blocked or failed issues.", file=sys.stderr)
 
     return overall_status
+
+
+def validate_prd_target_product(prd_path: Path) -> None:
+    require_portable_target(prd_path, artifact_name="PRD")
+
+
+def validate_issue_target_product(issue_path: Path) -> None:
+    require_portable_target(issue_path, artifact_name="issue")
 
 
 def build_parser() -> argparse.ArgumentParser:

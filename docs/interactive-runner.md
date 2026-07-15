@@ -7,6 +7,11 @@ and issue pack, with the current stage always visible. No exit or Ctrl+C is
 ever needed between stages — devloop watches the target checkout and moves
 itself into development once the PRD and issue pack exist on disk.
 
+> Product boundary: this document covers the portable `devloop-plan` and
+> `devloop` wrappers. The separately installed `codexcli` Textual application
+> is not their backend and has different commands and state. See
+> `product-boundaries.md`.
+
 ## Windows PowerShell
 
 ```powershell
@@ -24,6 +29,19 @@ Continue an existing PRD without reopening planning:
 ```bash
 /path/to/devloop/bin/devloop-plan.sh --repo /path/to/project
 ```
+
+## Start Or Resume
+
+After the target checkout is selected, Dev Loop offers **Start a new change**
+or **Resume an unfinished PRD**. The resume catalog scans standard
+`prd/<name>/<name>.md` plus `prd/<name>/issues/README.md` packages and supported
+flat local issue packs. Fully completed packs are omitted. Entries include
+completion counts, the active issue and status when known, and last activity.
+
+Selecting a PRD skips branch selection and the analysis chat, prints its saved
+status, and opens the usual DEVELOPMENT handoff. Nothing starts until the user
+presses Enter there. The same catalog is available with `/resume` from an
+already-open planning chat.
 
 ## Stage Pipeline
 
@@ -89,6 +107,7 @@ Clipboard capture depends on tools already present on most machines:
 | Alt+V | attach a screenshot from the clipboard (use `/paste` if unavailable) |
 | `/paste` | attach a screenshot from the clipboard |
 | `/options` | open agent/skill and development options |
+| `/resume` | list unfinished PRDs and continue the selected handoff |
 | `/status` | show the stage banner, artifacts, and selection summary |
 | `/done` | detect the PRD and issue pack now (or enter paths manually) |
 | `/help` | show this help |
