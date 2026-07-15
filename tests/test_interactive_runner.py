@@ -103,6 +103,31 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertIn("--no-worktree", args)
         self.assertNotIn("--all", args)
 
+    def test_handoff_summary_reports_pending_issue_count(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_artifacts(root)
+            issue_1 = artifacts.issues_index.parent / "0001-first.md"
+            issue_2 = artifacts.issues_index.parent / "0002-second.md"
+            issue_1.write_text("# First\n\nCompleted: [ ]\n", encoding="utf-8")
+            issue_2.write_text("# Second\n\nCompleted: [x]\n", encoding="utf-8")
+            artifacts.issues_index.write_text(
+                "- [Issue 0001](./0001-first.md)\n"
+                "- [Issue 0002](./0002-second.md)\n",
+                encoding="utf-8",
+            )
+            params = HandoffParams(
+                start_issue=None,
+                run_all=True,
+                use_worktree=False,
+                worktree_path=root / "unused",
+                branch_name="unused",
+            )
+
+            summary = interactive_runner.handoff_issue_summary(params, artifacts)
+
+        self.assertEqual(summary, "1 pending")
+
     def test_session_preset_added_when_provided(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

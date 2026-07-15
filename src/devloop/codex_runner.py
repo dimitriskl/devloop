@@ -6,19 +6,38 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
+from .codex_events import (
+    CodexTurnOutcome,
+    codex_turn_outcome,
+    parse_codex_event,
+    render_safe_codex_activity,
+)
 from .issue_pack import Issue
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
-from .subprocess_utils import output_text, run_captured_text
+from .statusui import Stage, WaitingIndicator
+from .subprocess_utils import (
+    output_text,
+    reap_process_after_terminal_event,
+    run_captured_text,
+    terminate_process,
+)
 from .templates import BundleContext, Preset, render_template
 
 _LEGACY_APPROVAL_FLAG: bool | None = None
 CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
+STREAM_THREAD_JOIN_SECONDS = 1.0
+ROLE_STAGES = {
+    "coder": Stage.DEVELOPMENT,
+    "reviewer": Stage.REVIEW,
+    "qa": Stage.QA,
+}
 DEVLOOP_RUN_GOAL = (
     "All selected issues from the issue pack must be developed, reviewed, "
     "and tested so the finished product has as few bugs and deficiencies as practical."
@@ -104,6 +123,138 @@ def build_codex_exec_command(
     return command
 
 
+def stage_for_role(role: str) -> Stage:
+    try:
+        return ROLE_STAGES[role]
+    except KeyError as error:
+        raise ValueError(f"Unsupported Dev Loop role: {role}") from error
+
+
+def run_streaming_codex_command(
+    command: list[str],
+    *,
+    input_text: str,
+    cwd: Path,
+    stage: Stage,
+    activity_context: str = "",
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    indicator = WaitingIndicator(stage=stage, context=activity_context)
+    input_thread = threading.Thread(
+        target=_write_process_input,
+        args=(process.stdin, input_text),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_process_stream,
+        args=(process.stderr, stderr_parts, indicator),
+        daemon=True,
+    )
+    turn_outcome: CodexTurnOutcome | None = None
+
+    indicator.start()
+    input_thread.start()
+    stderr_thread.start()
+    try:
+        for line in process.stdout:
+            indicator.notify_activity()
+            stdout_parts.append(line)
+            event = parse_codex_event(line)
+            activity = render_safe_codex_activity(event)
+            if activity:
+                indicator.stop()
+                _print_codex_activity(stage, activity_context, activity)
+                indicator.start()
+            turn_outcome = codex_turn_outcome(event)
+            if turn_outcome is not None:
+                break
+
+        if turn_outcome is None:
+            returncode = process.wait()
+        else:
+            reap_process_after_terminal_event(process)
+            returncode = _terminal_returncode(turn_outcome, process.returncode)
+    except KeyboardInterrupt:
+        terminate_process(process)
+        raise
+    finally:
+        indicator.stop()
+        input_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
+        stderr_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
+
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout="".join(stdout_parts),
+        stderr="".join(stderr_parts),
+    )
+
+
+def _write_process_input(stream: TextIO, input_text: str) -> None:
+    try:
+        stream.write(input_text)
+        stream.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _drain_process_stream(
+    stream: TextIO,
+    captured: list[str],
+    indicator: WaitingIndicator,
+) -> None:
+    try:
+        for line in stream:
+            captured.append(line)
+            indicator.notify_activity()
+    except (OSError, ValueError):
+        pass
+
+
+def _print_codex_activity(stage: Stage, context: str, activity: str) -> None:
+    prefix = f"[{stage.value}]"
+    if context:
+        prefix = f"{prefix} {context}:"
+    print(f"{prefix} {activity}")
+
+
+def _terminal_returncode(
+    outcome: CodexTurnOutcome,
+    process_returncode: int | None,
+) -> int:
+    if outcome is CodexTurnOutcome.COMPLETED:
+        return 0
+    if isinstance(process_returncode, int) and process_returncode != 0:
+        return process_returncode
+    return 1
+
+
+def _role_activity_context(*, progress: str, pass_number: int) -> str:
+    pass_label = f"p{pass_number}"
+    return f"{progress} {pass_label}" if progress else pass_label
+
+
 @dataclass
 class RoleResult:
     status: str
@@ -184,6 +335,7 @@ class CodexRunner:
         coder_result: RoleResult | None = None,
         review_result: RoleResult | None = None,
         attempt_label: str | None = None,
+        progress: str = "",
     ) -> RoleResult:
         prompt = self.build_prompt(
             role=role,
@@ -221,6 +373,11 @@ class CodexRunner:
             prompt=prompt,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
+            stage=stage_for_role(role),
+            activity_context=_role_activity_context(
+                progress=progress,
+                pass_number=pass_number,
+            ),
         )
         self.write_log_text(stdout_path, result.stdout)
         self.write_log_text(stderr_path, result.stderr)
@@ -241,16 +398,20 @@ class CodexRunner:
         prompt: str,
         stdout_path: Path,
         stderr_path: Path,
+        stage: Stage = Stage.DEVELOPMENT,
+        activity_context: str = "",
     ) -> subprocess.CompletedProcess[str]:
         attempt = 1
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
 
         while True:
-            result = run_captured_text(
+            result = run_streaming_codex_command(
                 command,
                 input_text=prompt,
                 cwd=self.repo_root,
+                stage=stage,
+                activity_context=activity_context,
             )
             current_stdout = output_text(result.stdout)
             current_stderr = output_text(result.stderr)
@@ -324,6 +485,8 @@ class CodexRunner:
             prompt=prompt,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
+            stage=Stage.QA,
+            activity_context="self-improvement",
         )
         self.write_log_text(stdout_path, result.stdout)
         self.write_log_text(stderr_path, result.stderr)

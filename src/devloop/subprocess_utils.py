@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Sequence
 
 
+PROCESS_EXIT_GRACE_SECONDS = 1.0
+PROCESS_TERMINATE_GRACE_SECONDS = 5.0
+
+
 def run_captured_text(
     command: Sequence[str],
     *,
@@ -28,3 +32,30 @@ def run_captured_text(
 
 def output_text(value: str | None) -> str:
     return value or ""
+
+
+def reap_process_after_terminal_event(process: subprocess.Popen[str]) -> None:
+    try:
+        process.wait(timeout=PROCESS_EXIT_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    terminate_process(process)
+
+
+def terminate_process(process: subprocess.Popen[str]) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    process.kill()
+    try:
+        process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Never hold the workflow indefinitely because an OS process refuses
+        # to be reaped.
+        pass

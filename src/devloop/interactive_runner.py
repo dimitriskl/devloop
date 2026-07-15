@@ -16,6 +16,7 @@ from . import statusui
 from .chat_loop import ChatCallbacks, ChatConfig, run_planning_chat
 from .gitrefs import sanitize_branch_name
 from .github_install import install_from_github
+from .issue_pack import parse_issue_index, select_issues
 from .lineeditor import LineEditor
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage
@@ -428,6 +429,27 @@ def build_devloop_args(
     return args
 
 
+def handoff_issue_summary(
+    params: HandoffParams,
+    artifacts: PlanningArtifacts,
+) -> str:
+    issues = parse_issue_index(artifacts.issues_index)
+    try:
+        selected = select_issues(
+            issues,
+            run_all=params.run_all,
+            start_issue=params.start_issue,
+        )
+    except ValueError:
+        return f"invalid start issue ({params.start_issue})"
+    if not selected:
+        return "0 pending"
+    if params.run_all:
+        suffix = f" from {params.start_issue}" if params.start_issue else ""
+        return f"{len(selected)} pending{suffix}"
+    return f"1 selected ({selected[0].number})"
+
+
 def run_handoff(
     bundle_root: Path,
     repo_root: Path,
@@ -449,7 +471,7 @@ def run_handoff(
         print(statusui.render_banner(Stage.DEVELOPMENT))
         print(f"PRD:            {artifacts.prd_path}")
         print(f"Issue index:    {artifacts.issues_index}")
-        print(f"Issues to run:  {'all pending' if params.run_all and not params.start_issue else params.start_issue or 'all pending'}")
+        print(f"Issues to run:  {handoff_issue_summary(params, artifacts)}")
         print(f"Worktree:       {params.worktree_path if params.use_worktree else 'disabled (work in checkout)'}")
         if params.use_worktree:
             print(f"Branch:         {params.branch_name}")

@@ -74,5 +74,38 @@ class StagePromptTests(unittest.TestCase):
         self.assertEqual(statusui.stage_prompt(Stage.QA), "[qa] > ")
 
 
+class WaitingIndicatorTests(unittest.TestCase):
+    def test_shows_phase_issue_progress_and_activity(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = Clock()
+        indicator = statusui.WaitingIndicator(
+            clock=clock,
+            stage=Stage.REVIEW,
+            context="0001 1/26 +25 p1",
+        )
+
+        clock.value = 12.0
+        indicator.notify_activity()
+        clock.value = 15.0
+        line = indicator._status_line("/")
+
+        self.assertIn("[review]", line)
+        self.assertIn("0001 1/26 +25 p1", line)
+        self.assertIn("working [/] 00:00:15", line)
+        self.assertIn("evt 00:00:03 ago", line)
+        self.assertLessEqual(len(line), 79)
+
+        clock.value = 200.0
+        stalled = indicator._status_line("-")
+        self.assertIn("STALL?", stalled)
+        self.assertIn("Ctrl+C", stalled)
+        self.assertLessEqual(len(stalled), 79)
+
+
 if __name__ == "__main__":
     unittest.main()

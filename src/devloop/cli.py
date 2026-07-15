@@ -138,6 +138,11 @@ def main(argv: list[str] | None = None) -> int:
             state_writer=state_writer,
             max_passes=args.max_passes,
             progress=issue_progress_label(position, len(issues), issue.number),
+            activity_progress=issue_activity_label(
+                position,
+                len(issues),
+                issue.number,
+            ),
         )
 
         if issue_result.status in {"BLOCKED", "FAIL"}:
@@ -246,7 +251,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def issue_progress_label(position: int, total: int, issue_number: str) -> str:
-    return f"issue {issue_number} ({position}/{total})"
+    after_current = max(0, total - position)
+    return (
+        f"issue {issue_number} ({position}/{total}; "
+        f"{after_current} after current)"
+    )
+
+
+def issue_activity_label(position: int, total: int, issue_number: str) -> str:
+    after_current = max(0, total - position)
+    return f"{issue_number} {position}/{total} +{after_current}"
 
 
 def run_issue(
@@ -259,6 +273,7 @@ def run_issue(
     retry_round: int | None = None,
     *,
     progress: str = "",
+    activity_progress: str = "",
 ) -> RoleResult:
     resume_cursor = IssueResumeCursor()
     fix_list = list(initial_fix_list or [])
@@ -290,6 +305,7 @@ def run_issue(
 
     for pass_number in range(start_pass, max_passes + 1):
         context = f"{progress or f'issue {issue.number}'} / pass {pass_number}"
+        role_progress = activity_progress or f"issue {issue.number}"
         next_role = resume_cursor.next_role if pass_number == start_pass else ResumeRole.CODER
 
         if next_role == ResumeRole.CODER:
@@ -301,6 +317,7 @@ def run_issue(
                 pass_number=pass_number,
                 fix_list=fix_list,
                 attempt_label=attempt_label,
+                progress=role_progress,
             )
             state_writer.record_role_result(
                 issue,
@@ -334,6 +351,7 @@ def run_issue(
                 pass_number=pass_number,
                 coder_result=last_coder,
                 attempt_label=attempt_label,
+                progress=role_progress,
             )
             state_writer.record_role_result(
                 issue,
@@ -361,6 +379,7 @@ def run_issue(
             coder_result=last_coder,
             review_result=last_review,
             attempt_label=attempt_label,
+            progress=role_progress,
         )
         state_writer.record_role_result(
             issue,
@@ -428,7 +447,7 @@ def retry_blocked_issues(
         )
 
         next_remaining: list[Issue] = []
-        for issue in remaining:
+        for position, issue in enumerate(remaining, start=1):
             attempt_label = f"clean-retry-{retry_round}"
             retry_fix_list = build_clean_retry_fix_list(state_writer, issue, retry_round)
             issue_result = run_issue(
@@ -439,6 +458,14 @@ def retry_blocked_issues(
                 initial_fix_list=retry_fix_list,
                 attempt_label=attempt_label,
                 retry_round=retry_round,
+                progress=(
+                    f"retry {retry_round}/{max_rounds} · "
+                    f"{issue_progress_label(position, len(remaining), issue.number)}"
+                ),
+                activity_progress=(
+                    f"r{retry_round} "
+                    f"{issue_activity_label(position, len(remaining), issue.number)}"
+                ),
             )
             if issue_result.status in {"BLOCKED", "FAIL"}:
                 next_remaining.append(issue)
