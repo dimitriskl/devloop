@@ -19,4 +19,5 @@ def test_real_app_server_is_initialized_and_authenticated() -> None:
     checks = {check.check_id: check for check in report.checks}
 
     assert checks[DoctorCheckId.APP_SERVER].status is DoctorCheckStatus.PASS
+    assert checks[DoctorCheckId.BACKEND_COMPATIBILITY].status is DoctorCheckStatus.PASS
     assert checks[DoctorCheckId.AUTHENTICATION].status is DoctorCheckStatus.PASS

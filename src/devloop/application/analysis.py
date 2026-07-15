@@ -19,6 +19,7 @@ from devloop.application.capabilities import (
     standard_capability_catalog,
 )
 from devloop.application.config import ApplicationConfig
+from devloop.application.telemetry import ExecutionTelemetryRecorder
 from devloop.components.analysis import (
     ANALYSIS_COMPONENT_ID,
     AnalysisComponentRunner,
@@ -27,6 +28,7 @@ from devloop.components.analysis import (
 )
 from devloop.components.builtin import installed_component_registry
 from devloop.domain.development import PlanningPackageRef
+from devloop.domain.execution import ExecutionPhase, locked_execution_profile
 from devloop.domain.identifiers import (
     ExecutionThreadId,
     ExecutionTurnId,
@@ -95,6 +97,7 @@ class AnalysisWorkflowService:
             raise AnalysisWorkflowError("The registered analysis runner is incompatible.")
         self._manifest = manifest
         self._runner = runner
+        self._telemetry = ExecutionTelemetryRecorder(self._store)
         self._component_locks = tuple(
             ComponentLock(
                 item.component_id,
@@ -343,6 +346,28 @@ class AnalysisWorkflowService:
             outcome=None,
         )
         current = self._store.record(current, RunEventType.ANALYSIS_ATTEMPT_STARTED)
+        attempt_key = f"analysis:{snapshot.event_sequence + 1}"
+        current = self._telemetry.record(
+            current,
+            ANALYSIS_COMPONENT_ID.value,
+            attempt_key,
+            ExecutionPhase.CONTEXT_LOADED,
+        )
+
+        def phase(value: ExecutionPhase, *, applicable: bool = True) -> None:
+            nonlocal current
+            current = self._telemetry.record(
+                current,
+                ANALYSIS_COMPONENT_ID.value,
+                attempt_key,
+                value,
+                applicable=applicable,
+            )
+
+        def activity(delta: str) -> None:
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            if on_activity is not None:
+                on_activity(delta)
 
         def thread_bound(thread_id: ExecutionThreadId) -> None:
             nonlocal current
@@ -358,6 +383,7 @@ class AnalysisWorkflowService:
 
         def item_started(item_id: str) -> None:
             nonlocal current
+            phase(ExecutionPhase.FIRST_ACTIVITY)
             current = replace(
                 current,
                 operation=OperationState(item_id, OperationStatus.RUNNING),
@@ -384,7 +410,12 @@ class AnalysisWorkflowService:
                 on_turn_started=turn_started,
                 on_item_started=item_started,
                 on_item_completed=item_completed,
-                on_activity=on_activity,
+                on_activity=activity,
+                execution_profile=locked_execution_profile(
+                    current.execution_profiles,
+                    ANALYSIS_COMPONENT_ID.value,
+                    self._manifest.execution_profiles[0],
+                ),
             )
         except Exception as error:
             paused = replace(current, run_status=WorkflowRunStatus.PAUSED)
@@ -394,7 +425,18 @@ class AnalysisWorkflowService:
                 "The real Codex analysis turn did not complete. Resume this run to continue."
             ) from error
 
-        return self._complete_turn(current, output)
+        phase(ExecutionPhase.FIRST_ACTIVITY)
+        phase(ExecutionPhase.FIRST_FILE_CHANGE, applicable=False)
+        phase(ExecutionPhase.VERIFICATION_STARTED, applicable=False)
+        phase(ExecutionPhase.STRUCTURED_OUTPUT)
+        result = self._complete_turn(current, output)
+        completed = self._telemetry.record(
+            result.snapshot,
+            ANALYSIS_COMPONENT_ID.value,
+            attempt_key,
+            ExecutionPhase.COMPLETED,
+        )
+        return replace(result, snapshot=completed)
 
     def _complete_turn(
         self,
@@ -468,6 +510,17 @@ class AnalysisWorkflowService:
             event_sequence=0,
             updated_at=datetime.now(timezone.utc).isoformat(),
             capability_profiles=self._capability_profiles.resolved_profiles(),
+            execution_profiles=tuple(
+                profile
+                for manifest in self._registry.manifests
+                for profile in manifest.execution_profiles
+                if profile.profile_id.value == manifest.default_execution_profile
+            ),
+            approval_policies=tuple(
+                manifest.approval_policy
+                for manifest in self._registry.manifests
+                if manifest.approval_policy is not None
+            ),
         )
 
     def _validate_locks(self, snapshot: WorkflowRunSnapshot) -> None:

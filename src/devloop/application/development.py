@@ -6,8 +6,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from devloop.application.approvals import (
+    classify_backend_approval,
+    persist_approval_decision,
+)
 from devloop.application.config import ApplicationConfig
 from devloop.application.retry import run_with_transient_retries
+from devloop.application.telemetry import ExecutionTelemetryRecorder
+from devloop.application.workspace_preflight import (
+    LocalWorkspacePreflight,
+    WorkspacePreflight,
+    WorkspacePreflightError,
+)
 from devloop.components.builtin import installed_component_registry
 from devloop.components.development import (
     DEVELOPMENT_COMPONENT_ID,
@@ -16,6 +26,7 @@ from devloop.components.development import (
     DevelopmentComponentRunner,
     DevelopmentTurnInterrupted,
     DevelopmentTurnPaused,
+    DevelopmentTurnStalled,
 )
 from devloop.components.workspace import (
     WORKSPACE_COMPONENT_ID,
@@ -24,6 +35,7 @@ from devloop.components.workspace import (
     WorkspaceProposal,
 )
 from devloop.domain.capabilities import capabilities_for
+from devloop.domain.approval import locked_approval_policy
 from devloop.domain.development import (
     ArtifactRef,
     CapabilityProfile,
@@ -39,6 +51,7 @@ from devloop.domain.development import (
     validate_rework_resolutions,
 )
 from devloop.domain.doctor import redact_diagnostic
+from devloop.domain.execution import ExecutionPhase, locked_execution_profile
 from devloop.domain.identifiers import (
     AttemptId,
     CapabilityId,
@@ -157,7 +170,12 @@ class DevelopmentPrepared:
 
 
 class WorkspaceDevelopmentService:
-    def __init__(self, config: ApplicationConfig) -> None:
+    def __init__(
+        self,
+        config: ApplicationConfig,
+        *,
+        workspace_preflight: WorkspacePreflight | None = None,
+    ) -> None:
         self._config = config
         self._store = RunStore(config.paths.run_root)
         self._workflow = load_standard_workflow()
@@ -172,6 +190,9 @@ class WorkspaceDevelopmentService:
         validate_component_ports(self._workflow.step(DEVELOPMENT_STEP_ID), development_manifest)
         self._workspace_runner = workspace_runner
         self._development_runner = development_runner
+        self._development_manifest = development_manifest
+        self._telemetry = ExecutionTelemetryRecorder(self._store)
+        self._workspace_preflight = workspace_preflight or LocalWorkspacePreflight()
         self._pause_lock = threading.Lock()
         self._pause_requests: set[WorkflowRunId] = set()
         self._interrupt_requests: set[WorkflowRunId] = set()
@@ -261,6 +282,22 @@ class WorkspaceDevelopmentService:
             paused = self._store.record(paused, RunEventType.RUN_PAUSED)
             self._store.release_lease(paused)
             raise
+        try:
+            permission_profile = self._workspace_preflight.probe(
+                Path(workspace.path),
+                run_id,
+            )
+            workspace = replace(workspace, permission_profile=permission_profile)
+        except WorkspacePreflightError as error:
+            paused = replace(
+                snapshot,
+                workspace=workspace,
+                run_status=WorkflowRunStatus.PAUSED,
+                step_status=StepRunStatus.BLOCKED,
+            )
+            paused = self._store.record(paused, RunEventType.WORKSPACE_PREFLIGHT_FAILED)
+            self._store.release_lease(paused)
+            raise WorkspaceDevelopmentError(str(error)) from error
         self._validate_workspace(workspace)
         states = refresh_issue_states(package, initial_issue_states(package))
         issue = select_next_ready_issue(package, states)
@@ -568,6 +605,28 @@ class WorkspaceDevelopmentService:
             )
         context = self._store.load_json_artifact(snapshot.run_id, cursor.context_manifest)
         current = snapshot
+        attempt_key = f"{cursor.issue_id.value}:{cursor.attempt_id.value}"
+        current = self._telemetry.record(
+            current,
+            DEVELOPMENT_COMPONENT_ID.value,
+            attempt_key,
+            ExecutionPhase.CONTEXT_LOADED,
+        )
+
+        def phase(value: ExecutionPhase, *, applicable: bool = True) -> None:
+            nonlocal current
+            current = self._telemetry.record(
+                current,
+                DEVELOPMENT_COMPONENT_ID.value,
+                attempt_key,
+                value,
+                applicable=applicable,
+            )
+
+        def activity(delta: str) -> None:
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            if on_activity is not None:
+                on_activity(delta)
 
         def thread_bound(thread_id: ExecutionThreadId) -> None:
             nonlocal current
@@ -591,6 +650,7 @@ class WorkspaceDevelopmentService:
 
         def item_started(item_id: str) -> None:
             nonlocal current
+            phase(ExecutionPhase.FIRST_ACTIVITY)
             current = replace(
                 current,
                 operation=OperationState(item_id, OperationStatus.RUNNING),
@@ -611,6 +671,10 @@ class WorkspaceDevelopmentService:
             )
             current = self._store.record(current, RunEventType.OPERATION_COMPLETED)
 
+        def file_changed(_item_id: str) -> None:
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            phase(ExecutionPhase.FIRST_FILE_CHANGE)
+
         def retry_scheduled(attempt: int, delay: float) -> None:
             nonlocal current
             development = current.development
@@ -629,6 +693,37 @@ class WorkspaceDevelopmentService:
                     f"Retrying transient development backend failure "
                     f"({attempt}) after {delay:.2f}s."
                 )
+
+        def approval_handler(request: AppServerApprovalRequest) -> str | None:
+            nonlocal current
+            manifest_policy = self._development_manifest.approval_policy
+            if manifest_policy is None:
+                raise WorkspaceDevelopmentError("Development approval policy is missing.")
+            policy = locked_approval_policy(
+                current.approval_policies,
+                DEVELOPMENT_COMPONENT_ID.value,
+                manifest_policy,
+            )
+            classified_request, classification = classify_backend_approval(
+                request,
+                Path(workspace.path),
+                policy,
+            )
+            if on_approval is None:
+                return None
+            decision = on_approval(classified_request)
+            if decision is not None:
+                current = persist_approval_decision(
+                    self._store,
+                    current,
+                    component_id=DEVELOPMENT_COMPONENT_ID.value,
+                    issue_id=cursor.issue_id.value,
+                    attempt_id=cursor.attempt_id.value,
+                    request=classified_request,
+                    classification=classification,
+                    selected_decision=decision,
+                )
+            return decision
 
         def execute(recover: bool) -> DevelopmentAgentOutput:
             active = current.development
@@ -655,10 +750,16 @@ class WorkspaceDevelopmentService:
                 on_turn_started=turn_started,
                 on_item_started=item_started,
                 on_item_completed=item_completed,
-                on_activity=on_activity,
+                on_file_change=file_changed,
+                on_activity=activity,
                 pause_requested=lambda: self._pause_requested(snapshot.run_id),
                 interrupt_requested=lambda: self._interrupt_requested(snapshot.run_id),
-                on_approval=on_approval,
+                on_approval=approval_handler,
+                execution_profile=locked_execution_profile(
+                    current.execution_profiles,
+                    DEVELOPMENT_COMPONENT_ID.value,
+                    self._development_manifest.execution_profiles[0],
+                ),
             )
 
         try:
@@ -668,6 +769,37 @@ class WorkspaceDevelopmentService:
                 retries_used=cursor.transient_retries,
                 on_retry=retry_scheduled,
             )
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            phase(ExecutionPhase.FIRST_FILE_CHANGE, applicable=False)
+            phase(
+                ExecutionPhase.VERIFICATION_STARTED,
+                applicable=bool(output.commands),
+            )
+            phase(ExecutionPhase.STRUCTURED_OUTPUT)
+        except DevelopmentTurnStalled as error:
+            development = current.development
+            if development is None:
+                raise WorkspaceDevelopmentError("Development cursor disappeared.") from error
+            completed = tuple(
+                dict.fromkeys((*development.completed_item_ids, *error.completed_item_ids))
+            )
+            stalled = replace(
+                current,
+                run_status=WorkflowRunStatus.PAUSED,
+                step_status=StepRunStatus.RUNNING,
+                development=replace(
+                    development,
+                    thread_id=error.thread_id,
+                    turn_id=error.turn_id,
+                    completed_item_ids=completed,
+                ),
+                operation=OperationState(),
+                workspace_state_hash=capture_repository_state_hash(Path(workspace.path)),
+            )
+            stalled = self._store.record(stalled, RunEventType.EXECUTION_STALLED)
+            self._store.release_lease(stalled)
+            self._clear_stop_requests(snapshot.run_id)
+            raise DevelopmentPaused(stalled) from error
         except DevelopmentTurnPaused as error:
             development = current.development
             if development is None:
@@ -729,7 +861,14 @@ class WorkspaceDevelopmentService:
                 "The real development turn failed; reset the Issue before retrying."
             ) from error
         self._clear_stop_requests(snapshot.run_id)
-        return self._finalize_development(current, issue, workspace, output)
+        completed = self._finalize_development(current, issue, workspace, output)
+        completed_snapshot = self._telemetry.record(
+            completed.snapshot,
+            DEVELOPMENT_COMPONENT_ID.value,
+            attempt_key,
+            ExecutionPhase.COMPLETED,
+        )
+        return replace(completed, snapshot=completed_snapshot)
 
     def _finalize_development(
         self,
@@ -925,6 +1064,14 @@ class WorkspaceDevelopmentService:
             raise WorkspaceDevelopmentError(
                 "Workspace HEAD does not match the selected base commit."
             )
+        permission_profile = workspace.permission_profile
+        if permission_profile is not None and (
+            not permission_profile.ready
+            or Path(permission_profile.canonical_root) != path.resolve()
+        ):
+            raise WorkspaceDevelopmentError(
+                "Workspace session permission profile is invalid or no longer ready."
+            )
 
     def _validate_workspace_state(self, snapshot: WorkflowRunSnapshot) -> None:
         workspace = snapshot.workspace
@@ -982,6 +1129,10 @@ class WorkspaceDevelopmentService:
                 "path": workspace.path,
                 "branch": workspace.branch,
                 "base_commit": workspace.base_commit,
+                "requires_windows_acl_handoff": bool(
+                    workspace.permission_profile is not None
+                    and workspace.permission_profile.requires_windows_acl_handoff
+                ),
             },
             "rework_request": None
             if rework_request is None
@@ -1120,22 +1271,40 @@ class WorkspaceDevelopmentService:
                 "Development approval requires an active attempt."
             )
         request = error.request
+        workspace = snapshot.workspace
+        manifest_policy = self._development_manifest.approval_policy
+        if workspace is None or manifest_policy is None:
+            raise WorkspaceDevelopmentError("Development approval policy context is missing.")
+        policy = locked_approval_policy(
+            snapshot.approval_policies,
+            DEVELOPMENT_COMPONENT_ID.value,
+            manifest_policy,
+        )
+        classified_request, classification = classify_backend_approval(
+            request,
+            Path(workspace.path),
+            policy,
+        )
         payload = {
-            "schema": "devloop.approval-request/v1",
+            "schema": "devloop.approval-request/v2",
             "step_id": DEVELOPMENT_STEP_ID.value,
             "issue_id": cursor.issue_id.value,
             "attempt_id": cursor.attempt_id.value,
             "request_id": request.request_id,
             "kind": request.kind.value,
             "method": request.method,
-            "action": redact_diagnostic(request.action, limit=2000),
-            "target": None
-            if request.target is None
-            else redact_diagnostic(request.target, limit=2000),
+            "parsed_action": classified_request.action,
+            "command_family": classification.family.value,
+            "workspace_boundary": classification.boundary.value,
+            "classification": classification.classification.value,
+            "policy_version": policy.version,
+            "policy_hash": policy.policy_hash,
+            "policy_reason": classification.reason,
+            "command_hash": classification.command_hash,
             "reason": None
             if request.reason is None
             else redact_diagnostic(request.reason, limit=4000),
-            "supported_decisions": list(request.supported_decisions),
+            "supported_decisions": list(classified_request.supported_decisions),
             "decision": None,
             "thread_id": request.thread_id,
             "turn_id": request.turn_id,

@@ -14,6 +14,7 @@ from devloop.components.contracts import (
     StepExecutionPolicy,
     package_source_hash,
 )
+from devloop.domain.approval import ApprovalPolicy
 from devloop.domain.development import (
     CriterionImplementation,
     CriterionImplementationStatus,
@@ -21,6 +22,7 @@ from devloop.domain.development import (
     ReworkResolutionStatus,
 )
 from devloop.domain.doctor import redact_diagnostic
+from devloop.domain.execution import ExecutionProfile
 from devloop.domain.identifiers import (
     AcceptanceCriterionId,
     DataContractId,
@@ -33,6 +35,7 @@ from devloop.execution.app_server import (
     AppServerApprovalPolicy,
     AppServerApprovalRequest,
     AppServerApprovalsReviewer,
+    AppServerCheckpointDeadline,
     AppServerClient,
     AppServerPermissionProfile,
     AppServerReasoningEffort,
@@ -54,6 +57,23 @@ CONTEXT_MANIFEST_CONTRACT = DataContractId("devloop.context-manifest/v1")
 IMPLEMENTATION_RESULT_CONTRACT = DataContractId("devloop.implementation-result/v1")
 DEVELOPMENT_MODEL = "gpt-5.6-sol"
 DEVELOPMENT_TURN_TIMEOUT_SECONDS = 1800.0
+DEVELOPMENT_CHECKPOINT_SECONDS = 300.0
+DEVELOPMENT_EXECUTION_PROFILES = (
+    ExecutionProfile.full(
+        DEVELOPMENT_COMPONENT_ID.value,
+        DEVELOPMENT_MODEL,
+        AppServerReasoningEffort.XHIGH.value,
+        DEVELOPMENT_TURN_TIMEOUT_SECONDS,
+        DEVELOPMENT_CHECKPOINT_SECONDS,
+    ),
+    ExecutionProfile.lightweight(
+        DEVELOPMENT_COMPONENT_ID.value,
+        DEVELOPMENT_MODEL,
+        AppServerReasoningEffort.LOW.value,
+        600.0,
+        120.0,
+    ),
+)
 _DEVELOPMENT_INSTRUCTIONS = """Implement only the supplied Issue in the current workspace.
 Use the Context Manifest as the complete task context. Do not load unrelated Issues, transcripts,
 run events, model reasoning, or broad memory. Respect repository instructions and Codex sandbox and
@@ -77,6 +97,20 @@ class DevelopmentTurnPaused(DevelopmentComponentError):
 
 class DevelopmentTurnInterrupted(DevelopmentComponentError):
     pass
+
+
+class DevelopmentTurnStalled(DevelopmentComponentError):
+    def __init__(
+        self,
+        message: str,
+        thread_id: ExecutionThreadId,
+        turn_id: ExecutionTurnId,
+        completed_item_ids: tuple[str, ...],
+    ) -> None:
+        super().__init__(message)
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.completed_item_ids = completed_item_ids
 
 
 @dataclass(frozen=True)
@@ -110,14 +144,19 @@ class DevelopmentComponentRunner:
         on_turn_started: Callable[[ExecutionTurnId], None] | None = None,
         on_item_started: Callable[[str], None] | None = None,
         on_item_completed: Callable[[str], None] | None = None,
+        on_file_change: Callable[[str], None] | None = None,
         on_activity: Callable[[str], None] | None = None,
         pause_requested: Callable[[], bool] | None = None,
         interrupt_requested: Callable[[], bool] | None = None,
         on_approval: Callable[[AppServerApprovalRequest], str | None] | None = None,
+        execution_profile: ExecutionProfile | None = None,
     ) -> DevelopmentAgentOutput:
+        profile = _execution_profile(execution_profile)
         executable = resolve_codex_executable()
         instructions = _DEVELOPMENT_INSTRUCTIONS
-        if sys.platform.startswith("win"):
+        if sys.platform.startswith("win") and _requires_windows_acl_handoff(
+            context_manifest
+        ):
             sid = current_windows_user_sid()
             instructions += (
                 "\nWindows handoff requirement: before the final response, grant the parent user "
@@ -138,16 +177,21 @@ class DevelopmentComponentRunner:
             if thread_id is None:
                 thread = client.start_thread(
                     workspace,
-                    model=DEVELOPMENT_MODEL,
-                    reasoning_effort=AppServerReasoningEffort.XHIGH,
+                    model=profile.model,
+                    reasoning_effort=AppServerReasoningEffort(profile.reasoning_effort),
                     developer_instructions=instructions,
                     sandbox=AppServerSandboxMode.WORKSPACE_WRITE,
                     approval_policy=AppServerApprovalPolicy.ON_REQUEST,
                     approvals_reviewer=AppServerApprovalsReviewer.USER,
                     permission_profile=AppServerPermissionProfile.WORKSPACE,
+                    runtime_workspace_roots=(workspace,),
                 )
             else:
-                thread = client.resume_thread(thread_id.value, workspace)
+                thread = client.resume_thread(
+                    thread_id.value,
+                    workspace,
+                    runtime_workspace_roots=(workspace,),
+                )
             bound_thread = ExecutionThreadId(thread.thread_id)
             if on_thread_bound is not None:
                 on_thread_bound(bound_thread)
@@ -163,18 +207,28 @@ class DevelopmentComponentRunner:
             bound_turn = ExecutionTurnId(turn.turn_id)
             if on_turn_started is not None:
                 on_turn_started(bound_turn)
-            result = client.wait_for_turn(
-                thread.thread_id,
-                turn.turn_id,
-                timeout_seconds=DEVELOPMENT_TURN_TIMEOUT_SECONDS,
-                on_agent_delta=on_activity,
-                on_item_started=on_item_started,
-                on_item_completed=on_item_completed,
-                interrupt_requested=lambda: bool(
-                    (pause_requested is not None and pause_requested())
-                    or (interrupt_requested is not None and interrupt_requested())
-                ),
-            )
+            try:
+                result = client.wait_for_turn(
+                    thread.thread_id,
+                    turn.turn_id,
+                    timeout_seconds=profile.budget.timeout_seconds,
+                    checkpoint_seconds=profile.budget.checkpoint_seconds,
+                    on_agent_delta=on_activity,
+                    on_item_started=on_item_started,
+                    on_item_completed=on_item_completed,
+                    on_file_change=on_file_change,
+                    interrupt_requested=lambda: bool(
+                        (pause_requested is not None and pause_requested())
+                        or (interrupt_requested is not None and interrupt_requested())
+                    ),
+                )
+            except AppServerCheckpointDeadline as error:
+                raise DevelopmentTurnStalled(
+                    str(error),
+                    ExecutionThreadId(error.thread_id),
+                    ExecutionTurnId(error.turn_id),
+                    error.completed_item_ids,
+                ) from error
         if (
             result.status is AppServerTurnStatus.INTERRUPTED
             and pause_requested is not None
@@ -210,6 +264,7 @@ class DevelopmentComponentRunner:
                 thread_id.value,
                 workspace,
                 turn_id.value,
+                runtime_workspace_roots=(workspace,),
             )
             if result is None:
                 raise DevelopmentComponentError("Checkpointed development turn is missing.")
@@ -231,7 +286,23 @@ class DevelopmentComponentRunner:
             process_cwd=workspace,
         ) as client:
             client.initialize()
-            client.resume_thread(thread_id.value, workspace)
+            client.resume_thread(
+                thread_id.value,
+                workspace,
+                runtime_workspace_roots=(workspace,),
+            )
+
+
+def _requires_windows_acl_handoff(context_manifest: Mapping[str, object]) -> bool:
+    workspace = context_manifest.get("workspace")
+    if not isinstance(workspace, dict):
+        raise DevelopmentComponentError("Context Manifest workspace is invalid.")
+    required = workspace.get("requires_windows_acl_handoff")
+    if not isinstance(required, bool):
+        raise DevelopmentComponentError(
+            "Context Manifest workspace permission profile is invalid."
+        )
+    return required
 
 
 def _output_from_result(
@@ -295,9 +366,21 @@ def development_component() -> tuple[ComponentManifest, DevelopmentComponentRunn
                     PortDirection.OUTPUT,
                 ),
             ),
+            approval_policy=ApprovalPolicy.standard(DEVELOPMENT_COMPONENT_ID.value),
+            execution_profiles=DEVELOPMENT_EXECUTION_PROFILES,
+            default_execution_profile="FULL",
         ),
         runner,
     )
+
+
+def _execution_profile(profile: ExecutionProfile | None) -> ExecutionProfile:
+    selected = DEVELOPMENT_EXECUTION_PROFILES[0] if profile is None else profile
+    if selected.component_id != DEVELOPMENT_COMPONENT_ID.value:
+        raise DevelopmentComponentError("Execution profile belongs to another component.")
+    if selected not in DEVELOPMENT_EXECUTION_PROFILES:
+        raise DevelopmentComponentError("Execution profile is not supported by development.")
+    return selected
 
 
 def _implementation_output_schema(

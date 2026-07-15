@@ -35,9 +35,11 @@ def test_release_gates_use_external_temp_and_build_only_current_archives() -> No
     assert 'pipx install --force "$wheel"' in shell
     assert powershell.count('Invoke-Native codexcli @("doctor", "--help")') == 2
     assert powershell.count('Invoke-Native codexcli @("run", "--help")') == 2
+    assert powershell.count('Invoke-Native codexcli-gate @("--help")') == 2
     assert 'Invoke-Native uv @("tool", "uninstall", "devloop-codexcli")' in powershell
     assert shell.count("codexcli doctor --help") == 2
     assert shell.count("codexcli run --help") == 2
+    assert shell.count("codexcli-gate --help") == 2
     assert "uv tool uninstall devloop-codexcli" in shell
     assert 'Invoke-Native codexcli @("doctor", "--repo", $root)' in powershell
     assert 'codexcli doctor --repo "$root"' in shell

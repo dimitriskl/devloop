@@ -11,9 +11,13 @@ from devloop.application.doctor import collect_doctor_report, print_doctor_repor
 def run_application(arguments: Sequence[str] | None = None) -> int:
     parsed = parse_arguments(arguments)
     config = ApplicationConfig.resolve(parsed.repository)
+    report = collect_doctor_report(config)
 
     if parsed.command is CliCommand.DOCTOR:
-        report = collect_doctor_report(config)
+        print_doctor_report(report)
+        return int(report.exit_code)
+
+    if not report.ready:
         print_doctor_report(report)
         return int(report.exit_code)
 

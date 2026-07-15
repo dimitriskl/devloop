@@ -42,16 +42,20 @@ codexcli run --repo /path/to/git/repository
 ```
 
 `doctor` checks Python, Git, repository state, Codex discovery/version,
-authentication, App Server handshake, terminal capabilities, and writable
-storage. Resolve every failure before a real run.
+authentication, the installed App Server schema contract, terminal capabilities,
+and writable storage. Resolve every failure before a real run.
 
 `run` opens the launcher and starts no work automatically. Enter a feature
 request to begin analysis. Accepting analysis publishes the run-owned PRD
-Package; repository changes begin only after an explicit workspace choice.
+Package; repository changes begin only after an explicit workspace choice and
+a real-backend permission preflight for that exact canonical workspace root.
 
 ## Options, runs, and resume
 
 - `/options` chooses installed Skills and Agent References per component.
+- `/profile` shows the locked model, reasoning, timeout, and checkpoint budget.
+  Before a component starts, `/profile development lightweight` selects its
+  supported lightweight profile without weakening acceptance or safety policy.
 - `/issues` opens the read-only Issue Board.
 - `/status` prints the active typed status.
 - `/runs` lists current-project runs, including completed runs.

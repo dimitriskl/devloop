@@ -7,16 +7,36 @@ The scripts check these commands before starting any long-running gate.
 
 ## Credential-free gate
 
-Run `.\install\run-release-gates.ps1` on Windows or
-`./install/run-release-gates.sh` on Linux. The gate synchronizes the locked
+Run `.\install\run-verification-tier.ps1 -Tier fast` on Windows or
+`./install/run-verification-tier.sh fast` on Linux. The gate synchronizes the locked
 environment, runs Ruff, mypy, the complete credential-free pytest suite, builds
-the sdist and wheel, audits package contents, installs with both `uv tool` and
-`pipx`, and probes the installed `codexcli` command.
+the deterministic evidence identity, and writes the exact non-secret log and
+manifest under `.release-evidence/`.
+
+The real one-Issue phase-boundary gate is
+`.\install\run-verification-tier.ps1 -Tier vertical` on Windows or
+`./install/run-verification-tier.sh vertical` on Linux. It enters analysis through the
+real App Server and reaches finalization only through the production publication,
+workspace, scheduler, development, review, and QA services.
 
 ## Authenticated real-backend gate
 
-After `codex login`, run the platform script with `-RealBackend` on Windows or
-`--real-backend` on Linux. Required scenarios are:
+After `codex login`, build and test the canonical release artifacts on Linux with:
+
+```text
+./install/run-verification-tier.sh release
+```
+
+Copy the unchanged checkout and the exact two `dist/` artifacts to the Windows
+release host, then run:
+
+```text
+.\install\run-verification-tier.ps1 -Tier release -UseExistingArtifacts
+```
+
+The commands write `.release-evidence/linux-release.log`,
+`.release-evidence/linux-release.json`, `.release-evidence/windows-release.log`, and
+`.release-evidence/windows-release.json`. Required scenarios are:
 
 - doctor and real App Server handshake;
 - real analysis and PRD publication;
@@ -38,6 +58,21 @@ Use `examples/release-demo/run-demo.ps1` or `run-demo.sh` and follow its README.
 The short recording must show real analysis, distinct component views, one
 review or QA rework loop, exact interrupted-phase resume, and finalization. No
 prerecorded or simulated executable workflow is acceptable.
+
+Place the finished recording inside `.release-evidence/`, then record its content hash:
+
+```text
+uv run python install/record-demonstration.py --recording .release-evidence/devloop-demo.mp4
+```
+
+After the Windows and Linux manifests and recording exist, verify and combine them:
+
+```text
+uv run python install/verify-release-evidence.py
+```
+
+This last command remains blocked while release notes contain `PENDING`, while either
+platform is absent, or when commits, identities, or artifact bytes differ.
 
 ## Artifact audit
 

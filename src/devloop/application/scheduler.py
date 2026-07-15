@@ -67,13 +67,20 @@ class WorkflowSchedulerError(RuntimeError):
 
 
 class WorkflowSchedulerService:
-    def __init__(self, config: ApplicationConfig) -> None:
+    def __init__(
+        self,
+        config: ApplicationConfig,
+        *,
+        development_service: WorkspaceDevelopmentService | None = None,
+        review_qa_service: ReviewQaService | None = None,
+        finalization_service: FinalizationService | None = None,
+    ) -> None:
         self._config = config
         self._store = RunStore(config.paths.run_root)
         self._workflow = load_standard_workflow()
-        self._development = WorkspaceDevelopmentService(config)
-        self._review_qa = ReviewQaService(config)
-        self._finalization = FinalizationService(config)
+        self._development = development_service or WorkspaceDevelopmentService(config)
+        self._review_qa = review_qa_service or ReviewQaService(config)
+        self._finalization = finalization_service or FinalizationService(config)
 
     def issue_board(self, run_id: WorkflowRunId) -> tuple[IssueBoardRow, ...]:
         snapshot = self._store.load(run_id)

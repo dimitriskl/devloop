@@ -1,4 +1,4 @@
-param([switch]$RealBackend)
+param([switch]$RealBackend, [switch]$UseExistingArtifacts)
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
@@ -44,8 +44,14 @@ Invoke-Native uv @("sync", "--locked")
 Invoke-Native uv @("run", "ruff", "check", "--no-cache", ".")
 Invoke-Native uv @("run", "mypy", "--cache-dir", (Join-Path $releaseTemp "mypy"))
 Invoke-Native uv @("run", "pytest", "-q", "-m", "not integration", "--basetemp=$baseTemp")
-Clear-ReleaseArchives
-Invoke-Native uv @("build", "--sdist", "--wheel", "--out-dir", "dist")
+if (-not $UseExistingArtifacts) {
+    Clear-ReleaseArchives
+    $env:SOURCE_DATE_EPOCH = (& git show -s --format=%ct HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $env:SOURCE_DATE_EPOCH) {
+        throw "Unable to derive SOURCE_DATE_EPOCH from the release commit."
+    }
+    Invoke-Native uv @("build", "--sdist", "--wheel", "--out-dir", "dist")
+}
 Invoke-Native uv @("run", "python", "install/verify-release.py", "--dist", "dist")
 $wheels = @(Get-ChildItem -LiteralPath "dist" -File -Filter "devloop_codexcli-0.1.0-*.whl")
 if ($wheels.Count -ne 1) {
@@ -62,11 +68,13 @@ Invoke-Native uv @(
 Invoke-Native codexcli @("--help")
 Invoke-Native codexcli @("doctor", "--help")
 Invoke-Native codexcli @("run", "--help")
+Invoke-Native codexcli-gate @("--help")
 Invoke-Native uv @("tool", "uninstall", "devloop-codexcli")
 Invoke-Native pipx @("install", "--force", $wheel.FullName)
 Invoke-Native pipx @("runpip", "devloop-codexcli", "show", "devloop-codexcli")
 Invoke-Native codexcli @("doctor", "--help")
 Invoke-Native codexcli @("run", "--help")
+Invoke-Native codexcli-gate @("--help")
 
 if ($RealBackend) {
     $env:DEVLOOP_REAL_APP_SERVER = "1"
@@ -77,6 +85,7 @@ if ($RealBackend) {
     $env:DEVLOOP_REAL_SCHEDULER = "1"
     $env:DEVLOOP_REAL_RECOVERY = "1"
     $env:DEVLOOP_REAL_UI = "1"
+    $env:DEVLOOP_REAL_VERTICAL = "1"
     Invoke-Native codexcli @("doctor", "--repo", $root)
     Invoke-Native uv @(
         "run", "pytest", "-q", "-m", "integration",

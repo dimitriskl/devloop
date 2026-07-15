@@ -17,6 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import BinaryIO, cast
 
+from devloop.execution.compatibility import validate_strict_output_schema
 from devloop.execution.protocol import (
     MAX_PROTOCOL_LINE_BYTES,
     JsonLineCodec,
@@ -206,6 +207,7 @@ class AppServerApprovalsReviewer(str, Enum):
 
 
 class AppServerReasoningEffort(str, Enum):
+    LOW = "low"
     XHIGH = "xhigh"
     ULTRA = "ultra"
 
@@ -246,12 +248,34 @@ class AppServerApprovalRequest:
     thread_id: str | None = None
     turn_id: str | None = None
     item_id: str | None = None
+    command_family: str | None = None
+    workspace_boundary: str | None = None
+    policy_reason: str | None = None
+    policy_version: str | None = None
+    policy_hash: str | None = None
+    command_hash: str | None = None
 
 
 class AppServerApprovalRequired(AppServerError):
     def __init__(self, request: AppServerApprovalRequest) -> None:
         super().__init__(f"Codex App Server requires user approval for {request.kind.value}.")
         self.request = request
+
+
+class AppServerCheckpointDeadline(AppServerError):
+    def __init__(
+        self,
+        thread_id: str,
+        turn_id: str,
+        completed_item_ids: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(
+            "Codex App Server missed the implementation checkpoint; "
+            "the exact turn was interrupted and remains available for explicit recovery."
+        )
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.completed_item_ids = completed_item_ids
 
 
 @dataclass(frozen=True)
@@ -286,6 +310,15 @@ def is_transient_turn_failure(result: AppServerTurnResult) -> bool:
         return False
     normalized = " ".join(result.failure_message.casefold().split())
     return any(marker in normalized for marker in _TRANSIENT_TURN_FAILURE_MESSAGES)
+
+
+def _runtime_workspace_roots(roots: tuple[Path, ...]) -> list[str]:
+    resolved = tuple(root.expanduser().resolve(strict=True) for root in roots)
+    if not resolved or len(resolved) != len(set(resolved)):
+        raise ValueError("Runtime workspace roots must be unique existing directories.")
+    if any(not root.is_dir() or not root.is_absolute() for root in resolved):
+        raise ValueError("Runtime workspace roots must be unique existing directories.")
+    return [str(root) for root in resolved]
 
 
 class AppServerClient:
@@ -468,12 +501,14 @@ class AppServerClient:
         approval_policy: AppServerApprovalPolicy = AppServerApprovalPolicy.NEVER,
         approvals_reviewer: AppServerApprovalsReviewer | None = None,
         permission_profile: AppServerPermissionProfile | None = None,
+        runtime_workspace_roots: tuple[Path, ...] = (),
+        ephemeral: bool = False,
     ) -> AppServerThread:
         self._require_initialized()
         params: dict[str, object] = {
             "cwd": str(cwd.resolve()),
             "approvalPolicy": approval_policy.value,
-            "ephemeral": False,
+            "ephemeral": ephemeral,
         }
         if permission_profile is None:
             params["sandbox"] = sandbox.value
@@ -487,15 +522,34 @@ class AppServerClient:
             params["config"] = {"model_reasoning_effort": reasoning_effort.value}
         if developer_instructions is not None:
             params["developerInstructions"] = developer_instructions
+        if runtime_workspace_roots:
+            params["runtimeWorkspaceRoots"] = _runtime_workspace_roots(
+                runtime_workspace_roots
+            )
         result = _result_object(self._request(_THREAD_START_METHOD, params), _THREAD_START_METHOD)
         return AppServerThread(_thread_id(result, _THREAD_START_METHOD))
 
-    def resume_thread(self, thread_id: str, cwd: Path) -> AppServerThread:
+    def resume_thread(
+        self,
+        thread_id: str,
+        cwd: Path,
+        *,
+        runtime_workspace_roots: tuple[Path, ...] = (),
+    ) -> AppServerThread:
         self._require_initialized()
+        params: dict[str, object] = {
+            "threadId": thread_id,
+            "cwd": str(cwd.resolve()),
+            "excludeTurns": True,
+        }
+        if runtime_workspace_roots:
+            params["runtimeWorkspaceRoots"] = _runtime_workspace_roots(
+                runtime_workspace_roots
+            )
         result = _result_object(
             self._request(
                 _THREAD_RESUME_METHOD,
-                {"threadId": thread_id, "cwd": str(cwd.resolve())},
+                params,
             ),
             _THREAD_RESUME_METHOD,
         )
@@ -546,12 +600,22 @@ class AppServerClient:
         thread_id: str,
         cwd: Path,
         turn_id: str,
+        *,
+        runtime_workspace_roots: tuple[Path, ...] = (),
     ) -> tuple[AppServerThread, AppServerTurnResult | None]:
         self._require_initialized()
+        params: dict[str, object] = {
+            "threadId": thread_id,
+            "cwd": str(cwd.resolve()),
+        }
+        if runtime_workspace_roots:
+            params["runtimeWorkspaceRoots"] = _runtime_workspace_roots(
+                runtime_workspace_roots
+            )
         result = _result_object(
             self._request(
                 _THREAD_RESUME_METHOD,
-                {"threadId": thread_id, "cwd": str(cwd.resolve())},
+                params,
             ),
             _THREAD_RESUME_METHOD,
         )
@@ -601,6 +665,7 @@ class AppServerClient:
             "input": [{"type": "text", "text": text}],
         }
         if output_schema is not None:
+            validate_strict_output_schema(output_schema)
             params["outputSchema"] = dict(output_schema)
         result = _result_object(self._request(_TURN_START_METHOD, params), _TURN_START_METHOD)
         turn = result.get("turn")
@@ -621,7 +686,10 @@ class AppServerClient:
         on_agent_delta: Callable[[str], None] | None = None,
         on_item_started: Callable[[str], None] | None = None,
         on_item_completed: Callable[[str], None] | None = None,
+        on_file_change: Callable[[str], None] | None = None,
         interrupt_requested: Callable[[], bool] | None = None,
+        checkpoint_seconds: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> AppServerTurnResult:
         if (
             isinstance(timeout_seconds, bool)
@@ -631,6 +699,14 @@ class AppServerClient:
             or timeout_seconds > _MAX_TURN_TIMEOUT_SECONDS
         ):
             raise ValueError("Turn timeout must be greater than zero and at most 3600 seconds.")
+        if checkpoint_seconds is not None and (
+            isinstance(checkpoint_seconds, bool)
+            or not isinstance(checkpoint_seconds, (int, float))
+            or not math.isfinite(checkpoint_seconds)
+            or checkpoint_seconds <= 0
+            or checkpoint_seconds > timeout_seconds
+        ):
+            raise ValueError("Checkpoint deadline must fit inside the turn timeout.")
         self._require_initialized()
         scoped_cancellation = _COOPERATIVE_CANCELLATION.get()
 
@@ -640,14 +716,48 @@ class AppServerClient:
                 or (scoped_cancellation is not None and scoped_cancellation())
             )
 
-        can_cancel = interrupt_requested is not None or scoped_cancellation is not None
-        deadline = time.monotonic() + timeout_seconds
+        can_cancel = (
+            interrupt_requested is not None
+            or scoped_cancellation is not None
+            or checkpoint_seconds is not None
+        )
+        started_at = clock()
+        deadline = started_at + timeout_seconds
+        checkpoint_deadline = (
+            None if checkpoint_seconds is None else started_at + checkpoint_seconds
+        )
         deltas: list[str] = []
         interrupt_sent = False
         interrupt_deadline: float | None = None
+        implementation_started = False
+        checkpoint_expired = False
+
+        def interrupt_for_missed_checkpoint(now: float) -> bool:
+            nonlocal checkpoint_expired, interrupt_deadline, interrupt_sent
+            if (
+                checkpoint_deadline is None
+                or implementation_started
+                or interrupt_sent
+                or now < checkpoint_deadline
+            ):
+                return False
+            try:
+                self.interrupt_turn(thread_id, turn_id)
+            except AppServerError:
+                pass
+            checkpoint_expired = True
+            interrupt_sent = True
+            interrupt_deadline = min(
+                deadline,
+                now + _TURN_INTERRUPT_COMPLETION_GRACE_SECONDS,
+            )
+            return True
+
         while True:
             notification = self._take_notification()
             if notification is not None:
+                if _is_file_change_notification(notification, thread_id, turn_id):
+                    implementation_started = True
                 completed = _consume_turn_notification(
                     notification,
                     thread_id=thread_id,
@@ -656,12 +766,23 @@ class AppServerClient:
                     on_agent_delta=on_agent_delta,
                     on_item_started=on_item_started,
                     on_item_completed=on_item_completed,
+                    on_file_change=on_file_change,
                 )
                 if completed is not None:
+                    if checkpoint_expired:
+                        raise AppServerCheckpointDeadline(
+                            thread_id,
+                            turn_id,
+                            completed.completed_item_ids,
+                        )
                     return completed
+                interrupt_for_missed_checkpoint(clock())
                 continue
-            if interrupt_deadline is not None and time.monotonic() >= interrupt_deadline:
+            now = clock()
+            if interrupt_deadline is not None and now >= interrupt_deadline:
                 self.close()
+                if checkpoint_expired:
+                    raise AppServerCheckpointDeadline(thread_id, turn_id)
                 return AppServerTurnResult(
                     thread_id,
                     turn_id,
@@ -674,6 +795,8 @@ class AppServerClient:
                         "the outcome is unknown."
                     ),
                 )
+            if interrupt_for_missed_checkpoint(now):
+                continue
             if (
                 not interrupt_sent
                 and can_cancel
@@ -689,12 +812,18 @@ class AppServerClient:
                 interrupt_sent = True
                 interrupt_deadline = min(
                     deadline,
-                    time.monotonic() + _TURN_INTERRUPT_COMPLETION_GRACE_SECONDS,
+                    now + _TURN_INTERRUPT_COMPLETION_GRACE_SECONDS,
                 )
                 continue
-            remaining = deadline - time.monotonic()
+            remaining = deadline - now
             if interrupt_deadline is not None:
-                remaining = min(remaining, interrupt_deadline - time.monotonic())
+                remaining = min(remaining, interrupt_deadline - now)
+            if (
+                checkpoint_deadline is not None
+                and not implementation_started
+                and not interrupt_sent
+            ):
+                remaining = min(remaining, checkpoint_deadline - now)
             if remaining <= 0:
                 if interrupt_deadline is not None:
                     continue
@@ -1063,11 +1192,10 @@ def _approval_request(message: RpcServerRequest) -> AppServerApprovalRequest:
     kind = kinds.get(message.method, AppServerApprovalKind.UNKNOWN)
     action = "Review a Codex request"
     target: str | None = None
-    decisions: tuple[str, ...] = ()
+    decisions = _available_decisions(message.params)
     if kind is AppServerApprovalKind.COMMAND:
         action = _optional_request_string(message.params, "command") or "Execute a command"
         target = _optional_request_string(message.params, "cwd")
-        decisions = ("accept", "acceptForSession", "decline", "cancel")
     elif kind is AppServerApprovalKind.FILE_CHANGE:
         action = "Apply file changes"
         target = _optional_request_string(message.params, "grantRoot")
@@ -1096,6 +1224,17 @@ def _optional_request_string(params: Mapping[str, object], name: str) -> str | N
     return value if isinstance(value, str) and value else None
 
 
+def _available_decisions(params: Mapping[str, object]) -> tuple[str, ...]:
+    values = params.get("availableDecisions")
+    if not isinstance(values, list):
+        return ()
+    supported = {"accept", "acceptForSession", "decline", "cancel"}
+    decisions = tuple(
+        value for value in values if isinstance(value, str) and value in supported
+    )
+    return tuple(dict.fromkeys(decisions))
+
+
 def _consume_turn_notification(
     notification: RpcNotification,
     *,
@@ -1105,6 +1244,7 @@ def _consume_turn_notification(
     on_agent_delta: Callable[[str], None] | None,
     on_item_started: Callable[[str], None] | None,
     on_item_completed: Callable[[str], None] | None,
+    on_file_change: Callable[[str], None] | None = None,
 ) -> AppServerTurnResult | None:
     params = notification.params
     notification_thread = params.get("threadId")
@@ -1133,6 +1273,12 @@ def _consume_turn_notification(
         )
         if callback is not None:
             callback(item_id)
+        if (
+            on_file_change is not None
+            and notification.method == _ITEM_COMPLETED_METHOD
+            and cast(dict[str, object], item).get("type") == "fileChange"
+        ):
+            on_file_change(item_id)
         return None
     if notification.method != _TURN_COMPLETED_METHOD:
         return None
@@ -1191,6 +1337,22 @@ def _consume_turn_notification(
         failure_code=failure_code,
         failure_message=failure_message,
     )
+
+
+def _is_file_change_notification(
+    notification: RpcNotification,
+    thread_id: str,
+    turn_id: str,
+) -> bool:
+    if notification.method not in {_ITEM_STARTED_METHOD, _ITEM_COMPLETED_METHOD}:
+        return False
+    if (
+        notification.params.get("threadId") != thread_id
+        or notification.params.get("turnId") != turn_id
+    ):
+        return False
+    item = notification.params.get("item")
+    return isinstance(item, dict) and item.get("type") == "fileChange"
 
 
 def _executable_command(executable: str) -> list[str]:

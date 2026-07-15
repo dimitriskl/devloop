@@ -23,6 +23,9 @@ class HandoffSummary:
     residual_risks: tuple[str, ...]
     workspace_disposition: WorkspaceDisposition
     workspace_path: str
+    approval_decisions: tuple[str, ...] = ()
+    execution_profiles: tuple[str, ...] = ()
+    execution_telemetry: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

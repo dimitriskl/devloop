@@ -4,6 +4,7 @@ import ctypes
 import io
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import pytest
 import devloop.execution.app_server as app_server_module
 from devloop.execution.app_server import (
     AppServerClient,
+    AppServerCheckpointDeadline,
     AppServerError,
     AppServerHandshake,
     AppServerTurnResult,
@@ -25,6 +27,59 @@ from devloop.execution.app_server import (
     cooperative_cancellation,
     is_transient_turn_failure,
 )
+
+
+def test_checkpoint_deadline_interrupts_and_preserves_exact_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+
+    class Reader:
+        calls = 0
+
+        def get(self, *, timeout: float) -> bytes:
+            del timeout
+            self.calls += 1
+            if self.calls == 1:
+                now[0] = 6.0
+                raise queue.Empty
+            return json.dumps(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-stalled",
+                        "turn": {
+                            "id": "turn-stalled",
+                            "status": "interrupted",
+                            "items": [{"id": "item-read", "type": "commandExecution"}],
+                        },
+                    },
+                }
+            ).encode("utf-8")
+
+    client = AppServerClient("codex")
+    client._initialized = True
+    client._reader_items = Reader()  # type: ignore[assignment]
+    interrupts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        client,
+        "interrupt_turn",
+        lambda thread_id, turn_id: interrupts.append((thread_id, turn_id)),
+    )
+
+    with pytest.raises(AppServerCheckpointDeadline) as raised:
+        client.wait_for_turn(
+            "thread-stalled",
+            "turn-stalled",
+            timeout_seconds=30.0,
+            checkpoint_seconds=5.0,
+            clock=lambda: now[0],
+        )
+
+    assert interrupts == [("thread-stalled", "turn-stalled")]
+    assert raised.value.thread_id == "thread-stalled"
+    assert raised.value.turn_id == "turn-stalled"
+    assert raised.value.completed_item_ids == ("item-read",)
 
 
 class _GracefulChildProcess:
@@ -259,6 +314,34 @@ def test_turn_interrupt_sends_the_checkpointed_thread_and_turn(
     ]
 
 
+def test_thread_registration_uses_only_the_exact_runtime_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "external-worktree"
+    workspace.mkdir()
+    requests: list[tuple[str, dict[str, object]]] = []
+    client = AppServerClient("codex")
+    client._initialized = True
+
+    def request(
+        method: str,
+        params: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        requests.append((method, params))
+        return {"thread": {"id": "thread-external"}}
+
+    monkeypatch.setattr(client, "_request", request)
+
+    client.start_thread(workspace, runtime_workspace_roots=(workspace,))
+
+    assert requests[0][0] == "thread/start"
+    assert requests[0][1]["runtimeWorkspaceRoots"] == [str(workspace.resolve())]
+    assert str(tmp_path.resolve()) not in requests[0][1]["runtimeWorkspaceRoots"]
+
+
 def test_worker_cancellation_scope_interrupts_an_app_server_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -419,6 +502,7 @@ def test_approval_mapping_retains_only_typed_display_fields() -> None:
                 "command": "git status --short",
                 "cwd": "C:/repo",
                 "reason": "Inspect the selected workspace.",
+                "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"],
                 "environmentId": "not-persisted",
             },
         )
@@ -437,6 +521,28 @@ def test_approval_mapping_retains_only_typed_display_fields() -> None:
     assert request.turn_id == "turn-1"
     assert request.item_id == "item-1"
     assert "not-persisted" not in repr(request)
+
+
+def test_file_change_approval_uses_its_protocol_response_choices() -> None:
+    request = app_server_module._approval_request(
+        app_server_module.RpcServerRequest(
+            request_id="file-approval-1",
+            method="item/fileChange/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "grantRoot": "/workspace",
+            },
+        )
+    )
+
+    assert request.supported_decisions == (
+        "accept",
+        "acceptForSession",
+        "decline",
+        "cancel",
+    )
 
 
 def test_approval_response_uses_only_the_explicit_user_handler_decision(
@@ -458,6 +564,7 @@ def test_approval_response_uses_only_the_explicit_user_handler_decision(
                     "command": "git status",
                     "cwd": "C:/repo",
                     "reason": "Inspect state",
+                    "availableDecisions": ["accept", "decline", "cancel"],
                 },
             },
             separators=(",", ":"),

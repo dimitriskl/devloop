@@ -1,261 +1,232 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import subprocess
-import time
-from dataclasses import replace
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from textual.widgets import OptionList
+from textual.widgets import Button, OptionList
 
+from devloop.application.analysis import AnalysisWorkflowService
 from devloop.application.commands import launcher_command_registry
 from devloop.application.config import ApplicationConfig
+from devloop.application.development import WorkspaceDevelopmentService
 from devloop.application.recovery import RecoveryDisposition, RecoveryService
-from devloop.components.builtin import installed_component_registry
-from devloop.domain.development import (
-    IssueRuntimeState,
-    IssueStatus,
-    WorkspaceKind,
-    WorkspaceRef,
-)
-from devloop.domain.identifiers import (
-    AttemptId,
-    ExecutionThreadId,
-    ExecutionTurnId,
-    FeatureSlug,
-    IssueId,
-    StepInstanceId,
-    WorkflowRunId,
-)
-from devloop.domain.review_qa import QaCursor
-from devloop.domain.run import (
-    AnalysisCursor,
-    ComponentLock,
-    OperationState,
-    ResolvedWorkflow,
-    RunEventType,
-    StepRunStatus,
-    WorkflowRunSnapshot,
-    WorkflowRunStatus,
-)
-from devloop.execution.app_server import (
-    AppServerClient,
-    AppServerReasoningEffort,
-    AppServerSandboxMode,
-    AppServerTurnStatus,
-)
-from devloop.infrastructure.codex import resolve_codex_executable
-from devloop.infrastructure.git import (
-    capture_repository_state_hash,
-    current_branch,
-    head_commit,
-)
-from devloop.persistence.run_store import RUN_SNAPSHOT_SCHEMA, RunStore, new_run_lease
+from devloop.application.review_qa import ReviewQaInterrupted, ReviewQaService
+from devloop.application.scheduler import WorkflowSchedulerService
+from devloop.application.workspace_preflight import RealAppServerWorkspacePreflight
+from devloop.domain.development import IssueStatus, WorkspaceChoice
+from devloop.domain.identifiers import AttemptId, IssueId, StepInstanceId
+from devloop.domain.run import OperationStatus, WorkflowRunStatus
+from devloop.execution.app_server import AppServerApprovalRequest
+from devloop.persistence.run_store import RunStore
 from devloop.ui.app import RunLauncherApp
 from devloop.ui.composer import Composer
+from devloop.ui.modals import ApprovalModal
 from devloop.ui.qa import QaView
-from devloop.workflow.definition import load_standard_workflow
+
+
+def _repository(path: Path) -> None:
+    path.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "devloop@example.invalid"],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Dev Loop Recovery Gate"],
+        cwd=path,
+        check=True,
+    )
+    (path / "README.md").write_text("# Recovery gate\n", encoding="utf-8")
+    (path / ".gitignore").write_text(
+        ".devloop/\n__pycache__/\n*.pyc\n.pytest_cache/\n",
+        encoding="ascii",
+    )
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "baseline"], cwd=path, check=True)
+
+
+def _approve(request: AppServerApprovalRequest) -> str | None:
+    assert request.policy_hash
+    assert request.command_family
+    assert request.workspace_boundary
+    return "accept" if "accept" in request.supported_decisions else None
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_app_server_recovers_issue_three_qa_in_a_ten_issue_run(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if os.environ.get("DEVLOOP_REAL_RECOVERY") != "1":
         pytest.skip("Set DEVLOOP_REAL_RECOVERY=1 to run the real recovery release gate.")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    xdg_config = tmp_path / "xdg-config"
-    xdg_config.mkdir()
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
     repository = tmp_path / "project"
-    repository.mkdir()
-    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
-    subprocess.run(
-        ["git", "-C", str(repository), "config", "user.email", "devloop@example.invalid"],
-        check=True,
+    _repository(repository)
+    config = ApplicationConfig.resolve(
+        repository,
+        environment={
+            "APPDATA": str(tmp_path / "user-config"),
+            "LOCALAPPDATA": str(tmp_path / "user-data"),
+            "XDG_CONFIG_HOME": str(tmp_path / "user-config"),
+            "XDG_DATA_HOME": str(tmp_path / "user-data"),
+        },
     )
-    subprocess.run(
-        ["git", "-C", str(repository), "config", "user.name", "Dev Loop Tests"],
-        check=True,
+    analysis = AnalysisWorkflowService(config)
+    result = analysis.start(
+        "Create exactly ten Issues in a linear dependency chain: Issue 2 depends on Issue 1, "
+        "and every later Issue depends only on its immediate predecessor. Issue N adds "
+        "module_n.py with value_N() returning integer N and test_module_n.py proving it with "
+        "pytest. Keep every Issue independently implementable and small. Each Issue has exactly "
+        "one acceptance criterion and python -m pytest -q is the verification command. Return "
+        "the full draft now."
     )
-    (repository / "README.md").write_text("recovery release gate\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repository), "commit", "--quiet", "-m", "baseline"],
-        check=True,
-    )
+    if result.clarification is not None:
+        result = analysis.continue_analysis(
+            result.snapshot.run_id,
+            "No clarification is needed. Produce exactly the ten chained Issues described.",
+        )
+    assert result.draft is not None
+    assert len(result.draft.issues) == 10
+    accepted = analysis.accept(result.snapshot.run_id)
+    run_id = accepted.snapshot.run_id
 
-    executable = resolve_codex_executable()
-    with AppServerClient(
-        str(executable),
-        experimental_api=True,
-        process_cwd=repository,
-    ) as client:
-        client.initialize()
-        thread = client.start_thread(
-            repository,
-            model="gpt-5.6-sol",
-            reasoning_effort=AppServerReasoningEffort.ULTRA,
-            sandbox=AppServerSandboxMode.READ_ONLY,
-        )
-        turn = client.start_turn(
-            thread.thread_id,
-            "For QA, run a read-only command that waits for 60 seconds before returning.",
-        )
-        interrupt_after = time.monotonic() + 0.5
-        interrupted = client.wait_for_turn(
-            thread.thread_id,
-            turn.turn_id,
-            timeout_seconds=120.0,
-            interrupt_requested=lambda: time.monotonic() >= interrupt_after,
-        )
-    assert interrupted.status is AppServerTurnStatus.INTERRUPTED
-
-    config = ApplicationConfig.resolve(repository)
+    development = WorkspaceDevelopmentService(
+        config,
+        workspace_preflight=RealAppServerWorkspacePreflight(),
+    )
+    development.prepare(run_id, WorkspaceChoice.CURRENT_CHECKOUT)
+    verification = ReviewQaService(config)
+    scheduler = WorkflowSchedulerService(
+        config,
+        development_service=development,
+        review_qa_service=verification,
+    )
     store = RunStore(config.paths.run_root)
-    workflow = load_standard_workflow()
-    run_id = WorkflowRunId("run-20260712t180000-123456abcdef")
-    snapshot = WorkflowRunSnapshot(
-        schema=RUN_SNAPSHOT_SCHEMA,
-        run_id=run_id,
-        repository=str(repository.resolve()),
-        feature_title="Real exact recovery release gate",
-        feature_slug=FeatureSlug("real-exact-recovery-release-gate"),
-        workflow=ResolvedWorkflow(
-            workflow.workflow_id,
-            workflow.version,
-            workflow.definition_hash,
-        ),
-        component_locks=tuple(
-            ComponentLock(
-                manifest.component_id,
-                manifest.version,
-                manifest.distribution,
-                manifest.package_hash,
-            )
-            for manifest in installed_component_registry().manifests
-        ),
-        active_step=StepInstanceId("qa"),
-        run_status=WorkflowRunStatus.RUNNING,
-        step_status=StepRunStatus.RUNNING,
-        outcome=None,
-        analysis=AnalysisCursor(),
-        lease=new_run_lease(),
-        event_sequence=0,
-        updated_at=datetime.now(timezone.utc).isoformat(),
-        workspace=WorkspaceRef(
-            WorkspaceKind.CURRENT_CHECKOUT,
-            str(repository.resolve()),
-            str(repository.resolve()),
-            current_branch(repository),
-            head_commit(repository),
-        ),
-        issues=tuple(
-            IssueRuntimeState(
-                IssueId(f"ISSUE-{number:03}"),
-                IssueStatus.COMPLETED
-                if number <= 2
-                else IssueStatus.IN_QA
-                if number == 3
-                else IssueStatus.PENDING,
-                StepInstanceId("qa") if number == 3 else None,
-            )
-            for number in range(1, 11)
-        ),
-        operation=OperationState(),
-        workspace_state_hash=capture_repository_state_hash(repository),
-    )
-    created = store.create(snapshot)
-    qa_artifact = store.save_json_artifact(
-        run_id,
-        Path("qa-inputs/ISSUE-003-release-recovery.json"),
-        {"schema": "devloop.qa-input/v1", "issue_id": "ISSUE-003"},
-    )
-    checkpoint = store.record(
-        replace(
-            created,
-            qa=QaCursor(
-                IssueId("ISSUE-003"),
-                AttemptId("attempt-001"),
-                qa_artifact,
-                ExecutionThreadId(thread.thread_id),
-                ExecutionTurnId(turn.turn_id),
-            ),
-        ),
-        event_type=RunEventType.QA_TURN_STARTED,
-    )
-    lease_path = store.run_directory(run_id) / "lease.json"
-    lease = json.loads(lease_path.read_text(encoding="utf-8"))
-    lease["process_id"] = 2_147_483_647
-    lease_path.write_text(json.dumps(lease), encoding="utf-8")
 
-    restarted = RecoveryService(config)
-    candidate = restarted.list_candidates()[0]
-    plan = restarted.inspect(checkpoint.run_id)
+    for _ in range(20):
+        checkpoint = store.load(run_id)
+        if (
+            checkpoint.active_step == StepInstanceId("qa")
+            and checkpoint.qa is not None
+            and checkpoint.qa.issue_id == IssueId("ISSUE-003")
+            and checkpoint.qa.turn_id is None
+        ):
+            break
+        scheduler.advance(run_id, on_approval=_approve)
+    else:
+        pytest.fail("The production scheduler did not reach Issue 3 QA.")
 
-    assert candidate.issue_id == IssueId("ISSUE-003")
-    assert candidate.step == StepInstanceId("qa")
-    assert plan.disposition is RecoveryDisposition.FRESH_ATTEMPT
-    assert plan.snapshot.qa is not None
-    assert plan.snapshot.qa.thread_id == ExecutionThreadId(thread.thread_id)
-    assert plan.snapshot.qa.turn_id == ExecutionTurnId(turn.turn_id)
-    assert [issue.status for issue in plan.snapshot.issues[:3]] == [
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(scheduler.advance, run_id, on_approval=_approve)
+        deadline = asyncio.get_running_loop().time() + 300
+        while True:
+            active = store.load(run_id)
+            if (
+                active.qa is not None
+                and active.qa.turn_id is not None
+                and active.operation.status is OperationStatus.RUNNING
+            ):
+                original_workspace = active.workspace
+                original_cursor = active.qa
+                verification.request_interrupt(run_id)
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail("The real Issue 3 QA turn did not reach an interruptible operation.")
+            await asyncio.sleep(0.1)
+        with pytest.raises(ReviewQaInterrupted):
+            future.result(timeout=120)
+
+    interrupted = store.load(run_id)
+    assert interrupted.workspace == original_workspace
+    assert interrupted.qa is not None
+    assert interrupted.qa.issue_id == IssueId("ISSUE-003")
+    assert interrupted.qa.attempt_id == AttemptId("attempt-001")
+    assert interrupted.qa.thread_id == original_cursor.thread_id
+    assert interrupted.qa.turn_id == original_cursor.turn_id
+    assert [issue.status for issue in interrupted.issues[:3]] == [
         IssueStatus.COMPLETED,
         IssueStatus.COMPLETED,
         IssueStatus.IN_QA,
     ]
-    assert all(issue.status is IssueStatus.PENDING for issue in plan.snapshot.issues[3:])
+    assert all(issue.status is IssueStatus.PENDING for issue in interrupted.issues[3:])
 
+    restarted_recovery = RecoveryService(config)
+    plan = restarted_recovery.inspect(run_id)
+    assert plan.disposition is RecoveryDisposition.FRESH_ATTEMPT
+    assert plan.snapshot.qa == interrupted.qa
+
+    restarted_review_qa = ReviewQaService(config)
     app = RunLauncherApp(
         repository,
         launcher_command_registry(),
-        recovery_service=restarted,
+        recovery_service=restarted_recovery,
+        review_qa_service=restarted_review_qa,
     )
     async with app.run_test(size=(140, 40)) as pilot:
         app.post_message(Composer.Submitted("/resume"))
         await pilot.pause()
         menu = app.query_one("#command-menu", OptionList)
         assert menu.option_count == 1
-        prompt = str(menu.get_option_at_index(0).prompt)
-        assert "ISSUE-003" in prompt
-        assert "qa" in prompt
-
+        assert "ISSUE-003" in str(menu.get_option_at_index(0).prompt)
+        assert "qa" in str(menu.get_option_at_index(0).prompt)
         menu.highlighted = 0
         menu.focus()
         await pilot.press("enter")
         await pilot.pause()
-        assert menu.option_count == 1
         assert "transcript-free Recovery Attempt" in str(
             menu.get_option_at_index(0).prompt
         )
-
         menu.highlighted = 0
         menu.focus()
         await pilot.press("enter")
-        for _ in range(50):
+        replacement_thread = None
+        for _ in range(30_000):
+            await asyncio.sleep(0.01)
             await pilot.pause()
             restored = store.load(run_id)
-            if restored.qa is not None and restored.qa.thread_id is None:
+            if (
+                restored.qa is not None
+                and restored.qa.thread_id is not None
+                and restored.qa.turn_id is not None
+                and restored.qa.thread_id != original_cursor.thread_id
+            ):
+                replacement_thread = restored.qa.thread_id
+                restarted_review_qa.request_interrupt(run_id)
                 break
         else:
-            pytest.fail("The selected QA Recovery Attempt did not start.")
-
+            pytest.fail("The explicit QA Recovery Attempt did not bind a fresh real thread.")
+        for _ in range(12_000):
+            await asyncio.sleep(0.01)
+            await pilot.pause()
+            if isinstance(app.screen, ApprovalModal):
+                decision = next(
+                    (
+                        button
+                        for button in app.screen.query(Button)
+                        if button.id in {"approval-accept", "approval-decline"}
+                    ),
+                    None,
+                )
+                assert decision is not None
+                decision.press()
+            if store.load(run_id).run_status is WorkflowRunStatus.AWAITING_USER:
+                break
+        else:
+            pytest.fail("The fresh QA Recovery Attempt did not preserve its interruption.")
         assert app.query_one("#qa-view", QaView).display
 
     restored = store.load(run_id)
-    assert restored.workspace == checkpoint.workspace
+    assert restored.workspace == original_workspace
     assert restored.qa is not None
     assert restored.qa.issue_id == IssueId("ISSUE-003")
     assert restored.qa.attempt_id == AttemptId("attempt-001")
-    assert restored.qa.input_manifest == qa_artifact
-    assert restored.qa.thread_id is None
-    assert restored.qa.turn_id is None
+    assert restored.qa.input_manifest == original_cursor.input_manifest
+    assert restored.qa.thread_id == replacement_thread
+    assert restored.qa.thread_id != original_cursor.thread_id
     assert [issue.status for issue in restored.issues[:3]] == [
         IssueStatus.COMPLETED,
         IssueStatus.COMPLETED,

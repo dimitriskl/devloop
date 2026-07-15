@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -37,6 +38,7 @@ from devloop.components.development import (
 from devloop.components.qa import QaAgentOutput, QaComponentError, QaTurnPaused
 from devloop.components.review import ReviewAgentOutput
 from devloop.components.workspace import WorkspacePreparationCancelled, WorkspaceProposal
+from devloop.domain.approval import ApprovalPolicy
 from devloop.domain.development import (
     ArtifactRef,
     ChangeKind,
@@ -48,7 +50,6 @@ from devloop.domain.development import (
     WorkspaceChoice,
     WorkspaceKind,
 )
-from devloop.domain.doctor import redact_diagnostic
 from devloop.domain.identifiers import (
     AcceptanceCriterionId,
     AttemptId,
@@ -111,6 +112,7 @@ from devloop.workflow.definition import load_standard_workflow
 def _payload() -> dict[str, object]:
     return {
         "schema": "devloop.analysis-draft/v1",
+        "authority": "STRUCTURED_RENDERER",
         "feature_title": "Hello feature",
         "feature_slug": "hello-feature",
         "prd_markdown": """<!-- devloop:prd:v1 -->
@@ -904,16 +906,27 @@ def test_development_persists_a_typed_redacted_approval_request(
     approval_ref = paused.development.approval_request
     assert approval_ref is not None
     approval = RunStore(config.paths.run_root).load_json_artifact(run_id, approval_ref)
+    policy = ApprovalPolicy.standard("development")
     assert approval == {
-        "schema": "devloop.approval-request/v1",
+        "schema": "devloop.approval-request/v2",
         "step_id": "development",
         "issue_id": "ISSUE-001",
         "attempt_id": "attempt-001",
         "request_id": "approval-request-7",
         "kind": "COMMAND",
         "method": "item/commandExecution/requestApproval",
-        "action": "git status --short token=[redacted]",
-        "target": redact_diagnostic(str(repository), limit=2000),
+        "parsed_action": "Read-only Git status",
+        "command_family": "GIT_INSPECTION",
+        "workspace_boundary": "WORKSPACE",
+        "classification": "USER_DECISION",
+        "policy_version": "1.0.0",
+        "policy_hash": policy.policy_hash,
+        "policy_reason": (
+            "The request is inside the selected workspace and still requires your decision."
+        ),
+        "command_hash": hashlib.sha256(
+            b"git status --short token=secret-value"
+        ).hexdigest(),
         "reason": "Inspect token=[redacted] before continuing.",
         "supported_decisions": ["accept", "acceptForSession", "decline", "cancel"],
         "decision": None,
@@ -921,6 +934,78 @@ def test_development_persists_a_typed_redacted_approval_request(
         "turn_id": "development-turn-approval",
         "item_id": "item-approval-7",
     }
+
+
+def test_development_persists_selected_approval_as_redacted_run_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "project"
+    _git_repository(repository)
+    run_id = WorkflowRunId("run-20260710t120018-123456abcdef")
+    config = _accepted_run(repository, run_id)
+    service = WorkspaceDevelopmentService(config)
+    service.prepare(run_id, WorkspaceChoice.CURRENT_CHECKOUT)
+
+    def approve_and_complete(**arguments: object) -> DevelopmentAgentOutput:
+        thread_bound = arguments["on_thread_bound"]
+        turn_started = arguments["on_turn_started"]
+        approval = arguments["on_approval"]
+        assert callable(thread_bound)
+        assert callable(turn_started)
+        assert callable(approval)
+        thread_bound(ExecutionThreadId("development-thread-decision"))
+        turn_started(ExecutionTurnId("development-turn-decision"))
+        decision = approval(
+            AppServerApprovalRequest(
+                "approval-request-decision-1",
+                AppServerApprovalKind.COMMAND,
+                AppServerRequestMethod.COMMAND_APPROVAL.value,
+                "git status --short token=secret-value",
+                str(repository),
+                "Inspect token=secret-value before continuing.",
+                ("accept", "acceptForSession", "decline", "cancel"),
+                "development-thread-decision",
+                "development-turn-decision",
+                "item-decision-1",
+            )
+        )
+        assert decision == "accept"
+        (repository / "greeting.py").write_text(
+            'def greeting() -> str:\n    return "Hello"\n',
+            encoding="utf-8",
+        )
+        return DevelopmentAgentOutput(
+            ExecutionThreadId("development-thread-decision"),
+            ExecutionTurnId("development-turn-decision"),
+            (),
+            (
+                CriterionImplementation(
+                    AcceptanceCriterionId("AC-ISSUE-001-001"),
+                    CriterionImplementationStatus.IMPLEMENTED,
+                    "The greeting behavior is implemented.",
+                ),
+            ),
+            ("python -m pytest -q",),
+            (),
+            (),
+            (),
+            "Implemented the greeting.",
+        )
+
+    monkeypatch.setattr(service._development_runner, "run_turn", approve_and_complete)
+
+    completed = service.develop(run_id, on_approval=lambda request: "accept")
+
+    assert completed.snapshot.approval_decisions
+    decision_ref = completed.snapshot.approval_decisions[0]
+    payload = RunStore(config.paths.run_root).load_json_artifact(run_id, decision_ref)
+    serialized = json.dumps(payload)
+    assert payload["schema"] == "devloop.approval-decision/v1"
+    assert payload["decision_scope"] == "ONCE"
+    assert payload["workspace_boundary"] == "WORKSPACE"
+    assert "git status" not in serialized
+    assert "secret-value" not in serialized
 
 
 @pytest.mark.parametrize(

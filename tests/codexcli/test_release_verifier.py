@@ -28,6 +28,7 @@ def _write_valid_release_artifacts(
             "devloop_codexcli-0.1.0.dist-info/entry_points.txt",
             "[console_scripts]\n"
             "codexcli = devloop.entrypoint:main\n\n"
+            "codexcli-gate = devloop.verification.cli:main\n\n"
             "[devloop.step_components]\n"
             "workspace-finalization = "
             "devloop.components.finalization:finalization_component\n",

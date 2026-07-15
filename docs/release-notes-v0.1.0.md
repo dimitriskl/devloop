@@ -11,6 +11,10 @@ review, QA, and local finalization.
 
 - Real Codex App Server execution with no fake or simulated backend.
 - Typed, persisted workflow cursors and explicit interrupted-phase recovery.
+- Installed App Server contract profiling and exact external-worktree permission preflight.
+- Deterministic planning identity and Markdown rendering from structured content.
+- Versioned approval policies, redacted decision artifacts, execution profiles, phase telemetry,
+  checkpoint recovery, and content-addressed verification evidence.
 - Dependency-aware sequential Issue scheduling with bounded review and QA
   rework.
 - A shared Textual shell with distinct Step Views, a read-only Issue Board,

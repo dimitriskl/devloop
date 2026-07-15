@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from devloop.domain.approval import ApprovalPolicy
+from devloop.domain.execution import ExecutionProfile
 from devloop.domain.identifiers import DataContractId, StepComponentId
 
 COMPONENT_MANIFEST_SCHEMA = "devloop.step-component/v1"
@@ -50,6 +52,9 @@ class ComponentManifest:
     package_hash: str
     execution_policy: StepExecutionPolicy
     ports: tuple[ComponentPort, ...]
+    approval_policy: ApprovalPolicy | None = None
+    execution_profiles: tuple[ExecutionProfile, ...] = ()
+    default_execution_profile: str | None = None
 
 
 class StepComponentRunner(Protocol):
@@ -98,6 +103,22 @@ def _validate_manifest(manifest: ComponentManifest) -> None:
         raise ComponentRegistryError("Component manifest distribution is invalid.")
     if _SHA256.fullmatch(manifest.package_hash) is None:
         raise ComponentRegistryError("Component manifest package hash must be SHA-256.")
+    if (
+        manifest.approval_policy is not None
+        and manifest.approval_policy.component_id != manifest.component_id.value
+    ):
+        raise ComponentRegistryError("Approval policy belongs to a different component.")
+    profile_ids = [item.profile_id.value for item in manifest.execution_profiles]
+    if len(profile_ids) != len(set(profile_ids)):
+        raise ComponentRegistryError("Component execution profiles must be unique.")
+    if any(
+        item.component_id != manifest.component_id.value
+        for item in manifest.execution_profiles
+    ):
+        raise ComponentRegistryError("Execution profile belongs to a different component.")
+    if manifest.default_execution_profile is not None:
+        if manifest.default_execution_profile not in profile_ids:
+            raise ComponentRegistryError("Default execution profile is not installed.")
     port_keys = [(port.direction, port.name) for port in manifest.ports]
     if len(port_keys) != len(set(port_keys)):
         raise ComponentRegistryError("Component manifest contains duplicate ports.")

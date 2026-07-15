@@ -58,7 +58,11 @@ class ApprovalModal(ModalScreen[ApprovalDecision | None]):
             yield Label("Codex approval required")
             yield Static(
                 f"Step: {self.request.step.value}\nIssue: {issue}\n"
-                f"Action: {self.request.action}\nTarget: {target}\nReason: {reason}"
+                f"Parsed action: {self.request.action}\nTarget: {target}\n"
+                f"Command family: {self.request.command_family}\n"
+                f"Workspace boundary: {self.request.workspace_boundary}\n"
+                f"Policy: {self.request.policy_version}\n"
+                f"Policy reason: {self.request.policy_reason}\nBackend reason: {reason}"
             )
             with Horizontal(classes="modal-actions"):
                 for decision in self.request.supported_decisions:

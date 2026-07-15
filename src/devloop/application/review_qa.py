@@ -6,8 +6,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from devloop.application.approvals import (
+    classify_backend_approval,
+    persist_approval_decision,
+)
 from devloop.application.config import ApplicationConfig
 from devloop.application.retry import run_with_transient_retries
+from devloop.application.telemetry import ExecutionTelemetryRecorder
 from devloop.components.builtin import installed_component_registry
 from devloop.components.qa import (
     QA_COMPONENT_ID,
@@ -24,6 +29,7 @@ from devloop.components.review import (
     ReviewTurnPaused,
 )
 from devloop.domain.capabilities import capabilities_for
+from devloop.domain.approval import locked_approval_policy
 from devloop.domain.development import (
     ArtifactRef,
     CapabilityProfile,
@@ -35,6 +41,7 @@ from devloop.domain.development import (
     WorkspaceRef,
 )
 from devloop.domain.doctor import redact_diagnostic
+from devloop.domain.execution import ExecutionPhase, locked_execution_profile
 from devloop.domain.identifiers import (
     AttemptId,
     CapabilityId,
@@ -166,6 +173,9 @@ class ReviewQaService:
         validate_component_ports(self._workflow.step(QA_STEP_ID), qa_manifest)
         self._review_runner = review_runner
         self._qa_runner = qa_runner
+        self._review_manifest = review_manifest
+        self._qa_manifest = qa_manifest
+        self._telemetry = ExecutionTelemetryRecorder(self._store)
         self._stop_lock = threading.Lock()
         self._pause_requests: set[WorkflowRunId] = set()
         self._interrupt_requests: set[WorkflowRunId] = set()
@@ -282,6 +292,28 @@ class ReviewQaService:
         if cursor is None:
             raise ReviewQaError("Review cursor was not checkpointed.")
         review_input = self._store.load_json_artifact(current.run_id, cursor.input_manifest)
+        attempt_key = f"{cursor.issue_id.value}:{cursor.attempt_id.value}"
+        current = self._telemetry.record(
+            current,
+            CODE_REVIEW_COMPONENT_ID.value,
+            attempt_key,
+            ExecutionPhase.CONTEXT_LOADED,
+        )
+
+        def phase(value: ExecutionPhase, *, applicable: bool = True) -> None:
+            nonlocal current
+            current = self._telemetry.record(
+                current,
+                CODE_REVIEW_COMPONENT_ID.value,
+                attempt_key,
+                value,
+                applicable=applicable,
+            )
+
+        def activity(delta: str) -> None:
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            if on_activity is not None:
+                on_activity(delta)
 
         def thread_bound(thread_id: ExecutionThreadId) -> None:
             nonlocal current
@@ -305,6 +337,7 @@ class ReviewQaService:
 
         def item_started(item_id: str) -> None:
             nonlocal current
+            phase(ExecutionPhase.FIRST_ACTIVITY)
             current = replace(
                 current,
                 operation=OperationState(item_id, OperationStatus.RUNNING),
@@ -336,6 +369,37 @@ class ReviewQaService:
             )
             _report_retry(on_activity, "code review", attempt, delay)
 
+        def approval_handler(request: AppServerApprovalRequest) -> str | None:
+            nonlocal current
+            manifest_policy = self._review_manifest.approval_policy
+            if manifest_policy is None:
+                raise ReviewQaError("Code-review approval policy is missing.")
+            policy = locked_approval_policy(
+                current.approval_policies,
+                CODE_REVIEW_COMPONENT_ID.value,
+                manifest_policy,
+            )
+            classified_request, classification = classify_backend_approval(
+                request,
+                Path(workspace.path),
+                policy,
+            )
+            if on_approval is None:
+                return None
+            decision = on_approval(classified_request)
+            if decision is not None:
+                current = persist_approval_decision(
+                    self._store,
+                    current,
+                    component_id=CODE_REVIEW_COMPONENT_ID.value,
+                    issue_id=issue.issue_id.value,
+                    attempt_id=cursor.attempt_id.value,
+                    request=classified_request,
+                    classification=classification,
+                    selected_decision=decision,
+                )
+            return decision
+
         def execute(retry_recovery: bool) -> ReviewAgentOutput:
             active = current.review
             if active is None:
@@ -360,10 +424,15 @@ class ReviewQaService:
                 on_turn_started=turn_started,
                 on_item_started=item_started,
                 on_item_completed=item_completed,
-                on_activity=on_activity,
+                on_activity=activity,
                 pause_requested=lambda: self._pause_requested(run_id),
                 interrupt_requested=lambda: self._interrupt_requested(run_id),
-                on_approval=on_approval,
+                on_approval=approval_handler,
+                execution_profile=locked_execution_profile(
+                    current.execution_profiles,
+                    CODE_REVIEW_COMPONENT_ID.value,
+                    self._review_manifest.execution_profiles[0],
+                ),
             )
 
         try:
@@ -373,10 +442,21 @@ class ReviewQaService:
                 retries_used=cursor.transient_retries,
                 on_retry=retry_scheduled,
             )
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            phase(ExecutionPhase.FIRST_FILE_CHANGE, applicable=False)
+            phase(ExecutionPhase.VERIFICATION_STARTED)
+            phase(ExecutionPhase.STRUCTURED_OUTPUT)
             after = self._verified_changes(workspace, implementation, repository_baseline)
             if after != before:
                 raise ReviewQaError("Read-only code review changed the implementation state.")
-            return self._finalize_review(current, issue, workspace, implementation, output)
+            result = self._finalize_review(current, issue, workspace, implementation, output)
+            completed = self._telemetry.record(
+                result.snapshot,
+                CODE_REVIEW_COMPONENT_ID.value,
+                attempt_key,
+                ExecutionPhase.COMPLETED,
+            )
+            return replace(result, snapshot=completed)
         except ReviewTurnPaused as error:
             paused = self._checkpoint_interrupted_turn(current, pause_run=True)
             raise ReviewQaPaused(paused) from error
@@ -441,6 +521,28 @@ class ReviewQaService:
         if cursor is None:
             raise ReviewQaError("QA cursor was not checkpointed.")
         qa_input = self._store.load_json_artifact(current.run_id, cursor.input_manifest)
+        attempt_key = f"{cursor.issue_id.value}:{cursor.attempt_id.value}"
+        current = self._telemetry.record(
+            current,
+            QA_COMPONENT_ID.value,
+            attempt_key,
+            ExecutionPhase.CONTEXT_LOADED,
+        )
+
+        def phase(value: ExecutionPhase, *, applicable: bool = True) -> None:
+            nonlocal current
+            current = self._telemetry.record(
+                current,
+                QA_COMPONENT_ID.value,
+                attempt_key,
+                value,
+                applicable=applicable,
+            )
+
+        def activity(delta: str) -> None:
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            if on_activity is not None:
+                on_activity(delta)
 
         def thread_bound(thread_id: ExecutionThreadId) -> None:
             nonlocal current
@@ -472,6 +574,7 @@ class ReviewQaService:
 
         def item_started(item_id: str) -> None:
             nonlocal current
+            phase(ExecutionPhase.FIRST_ACTIVITY)
             current = replace(
                 current,
                 operation=OperationState(item_id, OperationStatus.RUNNING),
@@ -503,6 +606,37 @@ class ReviewQaService:
             )
             _report_retry(on_activity, "QA", attempt, delay)
 
+        def approval_handler(request: AppServerApprovalRequest) -> str | None:
+            nonlocal current
+            manifest_policy = self._qa_manifest.approval_policy
+            if manifest_policy is None:
+                raise ReviewQaError("QA approval policy is missing.")
+            policy = locked_approval_policy(
+                current.approval_policies,
+                QA_COMPONENT_ID.value,
+                manifest_policy,
+            )
+            classified_request, classification = classify_backend_approval(
+                request,
+                Path(workspace.path),
+                policy,
+            )
+            if on_approval is None:
+                return None
+            decision = on_approval(classified_request)
+            if decision is not None:
+                current = persist_approval_decision(
+                    self._store,
+                    current,
+                    component_id=QA_COMPONENT_ID.value,
+                    issue_id=issue.issue_id.value,
+                    attempt_id=cursor.attempt_id.value,
+                    request=classified_request,
+                    classification=classification,
+                    selected_decision=decision,
+                )
+            return decision
+
         def execute(retry_recovery: bool) -> QaAgentOutput:
             active = current.qa
             if active is None:
@@ -528,10 +662,15 @@ class ReviewQaService:
                 on_turn_started=turn_started,
                 on_item_started=item_started,
                 on_item_completed=item_completed,
-                on_activity=on_activity,
+                on_activity=activity,
                 pause_requested=lambda: self._pause_requested(run_id),
                 interrupt_requested=lambda: self._interrupt_requested(run_id),
-                on_approval=on_approval,
+                on_approval=approval_handler,
+                execution_profile=locked_execution_profile(
+                    current.execution_profiles,
+                    QA_COMPONENT_ID.value,
+                    self._qa_manifest.execution_profiles[0],
+                ),
             )
 
         try:
@@ -541,13 +680,17 @@ class ReviewQaService:
                 retries_used=cursor.transient_retries,
                 on_retry=retry_scheduled,
             )
+            phase(ExecutionPhase.FIRST_ACTIVITY)
+            phase(ExecutionPhase.FIRST_FILE_CHANGE, applicable=False)
+            phase(ExecutionPhase.VERIFICATION_STARTED)
+            phase(ExecutionPhase.STRUCTURED_OUTPUT)
             after, drift = self._qa_state_after(
                 workspace,
                 implementation,
                 before,
                 repository_baseline,
             )
-            return self._finalize_qa(
+            result = self._finalize_qa(
                 current,
                 issue,
                 implementation,
@@ -555,6 +698,13 @@ class ReviewQaService:
                 source_state_changed=bool(drift),
                 state_change_evidence=drift,
             )
+            completed = self._telemetry.record(
+                result.snapshot,
+                QA_COMPONENT_ID.value,
+                attempt_key,
+                ExecutionPhase.COMPLETED,
+            )
+            return replace(result, snapshot=completed)
         except (QaTurnPaused, QaTurnInterrupted) as error:
             blocked = self._qa_changed_after_failure(
                 workspace,

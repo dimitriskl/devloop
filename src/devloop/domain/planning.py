@@ -47,6 +47,11 @@ class ValidationCode(str, Enum):
     PUBLICATION_CONFLICT = "PUBLICATION_CONFLICT"
 
 
+class PlanningAuthority(str, Enum):
+    LEGACY_MIXED = "LEGACY_MIXED"
+    STRUCTURED_RENDERER = "STRUCTURED_RENDERER"
+
+
 @dataclass(frozen=True)
 class ValidationFinding:
     code: ValidationCode
@@ -84,6 +89,7 @@ class AnalysisDraft:
     requirement_ids: tuple[RequirementId, ...]
     issues: tuple[IssueDraft, ...]
     revision: int
+    authority: PlanningAuthority = PlanningAuthority.LEGACY_MIXED
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 codexcli = "devloop.entrypoint:main"
+codexcli-gate = "devloop.verification.cli:main"
 
 [project.entry-points."devloop.step_components"]
 analysis = "devloop.components.analysis:analysis_component"
@@ -71,6 +72,7 @@ include = [
     "src/devloop/persistence/**/*.py",
     "src/devloop/planning/**/*.py",
     "src/devloop/ui/**/*.py",
+    "src/devloop/verification/**/*.py",
     "src/devloop/workflow/**/*.py",
     "src/devloop/workflows/**/*.py",
     "tests/codexcli/**/*.py",
@@ -94,5 +96,6 @@ files = [
     "src/devloop/persistence",
     "src/devloop/planning",
     "src/devloop/ui",
+    "src/devloop/verification",
     "src/devloop/workflow",
 ]

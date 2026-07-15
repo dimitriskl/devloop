@@ -14,6 +14,8 @@ from devloop.components.contracts import (
     package_source_hash,
 )
 from devloop.components.structured_output import final_object, required_string
+from devloop.domain.approval import ApprovalPolicy
+from devloop.domain.execution import ExecutionProfile
 from devloop.domain.identifiers import (
     DataContractId,
     ExecutionThreadId,
@@ -48,6 +50,23 @@ REVIEW_CONTRACT = DataContractId("devloop.review-result/v1")
 REWORK_REQUEST_CONTRACT = DataContractId("devloop.rework-request/v1")
 REVIEW_MODEL = "gpt-5.6-sol"
 REVIEW_TURN_TIMEOUT_SECONDS = 1800.0
+REVIEW_CHECKPOINT_SECONDS = 240.0
+REVIEW_EXECUTION_PROFILES = (
+    ExecutionProfile.full(
+        CODE_REVIEW_COMPONENT_ID.value,
+        REVIEW_MODEL,
+        AppServerReasoningEffort.XHIGH.value,
+        REVIEW_TURN_TIMEOUT_SECONDS,
+        REVIEW_CHECKPOINT_SECONDS,
+    ),
+    ExecutionProfile.lightweight(
+        CODE_REVIEW_COMPONENT_ID.value,
+        REVIEW_MODEL,
+        AppServerReasoningEffort.LOW.value,
+        600.0,
+        120.0,
+    ),
+)
 
 _REVIEW_INSTRUCTIONS = """Review only the supplied Issue implementation. Treat the structured
 Review Input as the complete context. Do not load development transcripts, unrelated Issues, run
@@ -97,9 +116,12 @@ class ReviewComponentRunner:
         pause_requested: Callable[[], bool] | None = None,
         interrupt_requested: Callable[[], bool] | None = None,
         on_approval: Callable[[AppServerApprovalRequest], str | None] | None = None,
+        execution_profile: ExecutionProfile | None = None,
     ) -> ReviewAgentOutput:
+        profile = _execution_profile(execution_profile)
         with AppServerClient(
             str(resolve_codex_executable()),
+            experimental_api=True,
             process_cwd=workspace,
             approval_handler=on_approval,
         ) as client:
@@ -107,14 +129,19 @@ class ReviewComponentRunner:
             if thread_id is None:
                 thread = client.start_thread(
                     workspace,
-                    model=REVIEW_MODEL,
-                    reasoning_effort=AppServerReasoningEffort.XHIGH,
+                    model=profile.model,
+                    reasoning_effort=AppServerReasoningEffort(profile.reasoning_effort),
                     developer_instructions=_REVIEW_INSTRUCTIONS,
                     sandbox=AppServerSandboxMode.READ_ONLY,
                     approval_policy=AppServerApprovalPolicy.NEVER,
+                    runtime_workspace_roots=(workspace,),
                 )
             else:
-                thread = client.resume_thread(thread_id.value, workspace)
+                thread = client.resume_thread(
+                    thread_id.value,
+                    workspace,
+                    runtime_workspace_roots=(workspace,),
+                )
             bound_thread = ExecutionThreadId(thread.thread_id)
             if on_thread_bound is not None:
                 on_thread_bound(bound_thread)
@@ -130,7 +157,7 @@ class ReviewComponentRunner:
             result = client.wait_for_turn(
                 thread.thread_id,
                 turn.turn_id,
-                timeout_seconds=REVIEW_TURN_TIMEOUT_SECONDS,
+                timeout_seconds=profile.budget.timeout_seconds,
                 on_agent_delta=on_activity,
                 on_item_started=on_item_started,
                 on_item_completed=on_item_completed,
@@ -162,9 +189,18 @@ class ReviewComponentRunner:
         on_item_started: Callable[[str], None] | None = None,
         on_item_completed: Callable[[str], None] | None = None,
     ) -> ReviewAgentOutput:
-        with AppServerClient(str(resolve_codex_executable()), process_cwd=workspace) as client:
+        with AppServerClient(
+            str(resolve_codex_executable()),
+            experimental_api=True,
+            process_cwd=workspace,
+        ) as client:
             client.initialize()
-            _, result = client.resume_thread_with_turn(thread_id.value, workspace, turn_id.value)
+            _, result = client.resume_thread_with_turn(
+                thread_id.value,
+                workspace,
+                turn_id.value,
+                runtime_workspace_roots=(workspace,),
+            )
             if result is None:
                 raise ReviewComponentError("Checkpointed review turn is missing.")
             if result.status is AppServerTurnStatus.IN_PROGRESS:
@@ -199,9 +235,21 @@ def review_component() -> tuple[ComponentManifest, ReviewComponentRunner]:
                     required=False,
                 ),
             ),
+            approval_policy=ApprovalPolicy.read_only(CODE_REVIEW_COMPONENT_ID.value),
+            execution_profiles=REVIEW_EXECUTION_PROFILES,
+            default_execution_profile="FULL",
         ),
         ReviewComponentRunner(),
     )
+
+
+def _execution_profile(profile: ExecutionProfile | None) -> ExecutionProfile:
+    selected = REVIEW_EXECUTION_PROFILES[0] if profile is None else profile
+    if selected.component_id != CODE_REVIEW_COMPONENT_ID.value:
+        raise ReviewComponentError("Execution profile belongs to another component.")
+    if selected not in REVIEW_EXECUTION_PROFILES:
+        raise ReviewComponentError("Execution profile is not supported by code review.")
+    return selected
 
 
 def _output_from_result(result: AppServerTurnResult) -> ReviewAgentOutput:

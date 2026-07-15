@@ -31,3 +31,10 @@ Use the request from `feature-request.md`. During the recording:
 
 Do not show authentication data, environment dumps, hidden reasoning, or raw
 transcripts in the recording. Repository publication remains outside the app.
+
+Save the recording as `.release-evidence/devloop-demo.mp4` and run the exact
+workspace-local evidence command:
+
+```text
+uv run python install/record-demonstration.py --recording .release-evidence/devloop-demo.mp4
+```

@@ -21,6 +21,10 @@ class ApprovalRequest:
     target: str | None
     reason: str | None
     supported_decisions: tuple[ApprovalDecision, ...]
+    command_family: str = "OTHER"
+    workspace_boundary: str = "UNKNOWN"
+    policy_reason: str = "Explicit user decision required."
+    policy_version: str = "unknown"
 
     def __post_init__(self) -> None:
         if not self.action.strip():

@@ -22,6 +22,7 @@ from devloop.application.development import WorkspaceDevelopmentService
 from devloop.application.recovery import RecoveryService
 from devloop.application.review_qa import ReviewQaService
 from devloop.application.scheduler import WorkflowSchedulerService
+from devloop.application.workspace_preflight import RealAppServerWorkspacePreflight
 from devloop.domain.run import WorkflowRunStatus
 from devloop.persistence.run_store import RunStore
 from devloop.ui.analysis import AnalysisView
@@ -102,19 +103,30 @@ async def test_real_ui_runs_the_standard_workflow_with_explicit_approval(
     environment = {
         "APPDATA": str(tmp_path / "user-config"),
         "LOCALAPPDATA": str(tmp_path / "user-data"),
+        "XDG_CONFIG_HOME": str(tmp_path / "user-config"),
+        "XDG_DATA_HOME": str(tmp_path / "user-data"),
     }
     config = ApplicationConfig.resolve(repository, environment=environment)
     capabilities = CapabilityProfileService(
         config.paths.user_config,
         standard_capability_catalog(),
     )
+    development_service = WorkspaceDevelopmentService(
+        config,
+        workspace_preflight=RealAppServerWorkspacePreflight(),
+    )
+    review_qa_service = ReviewQaService(config)
     app = RunLauncherApp(
         repository,
         launcher_command_registry(),
         analysis_service=AnalysisWorkflowService(config),
-        workspace_service=WorkspaceDevelopmentService(config),
-        review_qa_service=ReviewQaService(config),
-        scheduler_service=WorkflowSchedulerService(config),
+        workspace_service=development_service,
+        review_qa_service=review_qa_service,
+        scheduler_service=WorkflowSchedulerService(
+            config,
+            development_service=development_service,
+            review_qa_service=review_qa_service,
+        ),
         recovery_service=RecoveryService(config),
         capability_service=capabilities,
         control_service=WorkflowControlService(config),
@@ -122,6 +134,7 @@ async def test_real_ui_runs_the_standard_workflow_with_explicit_approval(
     store = RunStore(config.paths.run_root)
     seen_views: set[str] = set()
     approval_count = 0
+    defect_injected = False
 
     async with app.run_test(size=(140, 40)) as pilot:
         app.post_message(Composer.Submitted("/options"))
@@ -232,6 +245,22 @@ async def test_real_ui_runs_the_standard_workflow_with_explicit_approval(
                 seen_views.add("workspace-finalization")
 
             if isinstance(app.screen, ApprovalModal):
+                if (
+                    not defect_injected
+                    and app.screen.request.command_family == "FOCUSED_TEST"
+                    and (repository / "greeting.py").exists()
+                ):
+                    (repository / "greeting.py").write_text(
+                        'def greeting() -> str:\n    return "Goodbye"\n',
+                        encoding="utf-8",
+                    )
+                    (repository / "test_greeting.py").write_text(
+                        "from greeting import greeting\n\n"
+                        "def test_greeting() -> None:\n"
+                        '    assert greeting() == "Goodbye"\n',
+                        encoding="utf-8",
+                    )
+                    defect_injected = True
                 approval = next(
                     (
                         button
@@ -264,6 +293,9 @@ async def test_real_ui_runs_the_standard_workflow_with_explicit_approval(
         "workspace-finalization",
     }
     assert approval_count >= 1
+    assert defect_injected
     completed = store.load(run_id)
     assert completed.run_status is WorkflowRunStatus.COMPLETED
     assert completed.capability_profiles == locked_profiles
+    assert len(completed.attempts) >= 2
+    assert any(item.rework_request is not None for item in completed.attempts)

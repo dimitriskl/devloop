@@ -44,6 +44,10 @@ from devloop.application.development import (
     WorkspacePrepared,
 )
 from devloop.application.finalization import FinalizationError
+from devloop.application.execution_profiles import (
+    ExecutionProfileSelectionError,
+    ExecutionProfileSelectionService,
+)
 from devloop.application.recovery import (
     FINALIZATION_STEP_ID,
     RecoveryDisposition,
@@ -67,7 +71,14 @@ from devloop.application.scheduler import (
 from devloop.components.workspace import WorkspacePreparationCancelled, WorkspaceProposal
 from devloop.domain.commands import CommandScope, SlashCommand, SlashCommandRegistry
 from devloop.domain.development import WorkspaceChoice
-from devloop.domain.identifiers import AttemptId, IssueId, StepInstanceId, WorkflowRunId
+from devloop.domain.execution import ExecutionProfileId
+from devloop.domain.identifiers import (
+    AttemptId,
+    IssueId,
+    StepComponentId,
+    StepInstanceId,
+    WorkflowRunId,
+)
 from devloop.domain.language import LanguageTag
 from devloop.domain.operations import (
     ApprovalDecision,
@@ -183,6 +194,7 @@ class RunLauncherApp(App[None]):
         recovery_service: RecoveryService | None = None,
         capability_service: CapabilityProfileService | None = None,
         control_service: WorkflowControlService | None = None,
+        execution_profile_service: ExecutionProfileSelectionService | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository
@@ -195,6 +207,7 @@ class RunLauncherApp(App[None]):
         self._recovery_service = recovery_service
         self._capability_service = capability_service
         self._control_service = control_service
+        self._execution_profile_service = execution_profile_service
         self._language = LanguageTag("en")
         self._started_at = time.monotonic()
         self._active_run_id: WorkflowRunId | None = None
@@ -680,6 +693,9 @@ class RunLauncherApp(App[None]):
                 str(self.query_one("#status", WorkflowStatusBar).render())
             )
             return
+        if command == "/profile":
+            self._handle_execution_profile(parts)
+            return
         if command == "/language":
             if len(parts) == 2:
                 try:
@@ -935,6 +951,10 @@ class RunLauncherApp(App[None]):
             request.target,
             request.reason,
             tuple(supported),
+            request.command_family or "OTHER",
+            request.workspace_boundary or "UNKNOWN",
+            request.policy_reason or "Explicit user decision required.",
+            request.policy_version or "unknown",
         )
         if not approval.supported_decisions:
             self._show_error("The backend did not advertise a supported approval decision.")
@@ -957,6 +977,48 @@ class RunLauncherApp(App[None]):
     ) -> None:
         selected.append(decision)
         completed.set()
+
+    def _handle_execution_profile(self, parts: list[str]) -> None:
+        service = self._execution_profile_service
+        if service is None:
+            self._show_error("Execution profiles are unavailable.")
+            return
+        output = self.query_one("#activity", RichLog)
+        if len(parts) == 1:
+            profiles = (
+                service.available()
+                if self._active_run_id is None
+                else service.selected(self._active_run_id)
+            )
+            for profile in profiles:
+                output.write(
+                    f"{profile.component_id} | {profile.profile_id.value.lower()} | "
+                    f"model={profile.model} | reasoning={profile.reasoning_effort} | "
+                    f"timeout={profile.budget.timeout_seconds:g}s | "
+                    f"checkpoint={profile.budget.checkpoint_seconds:g}s"
+                )
+            return
+        if len(parts) != 3 or self._active_run_id is None:
+            self._show_error("Use /profile <component> <full|lightweight> in an active run.")
+            return
+        try:
+            selected_snapshot = service.select(
+                self._active_run_id,
+                StepComponentId(parts[1]),
+                ExecutionProfileId(parts[2].upper()),
+            )
+        except (ExecutionProfileSelectionError, ValueError) as error:
+            self._show_error(str(error))
+            return
+        profile = next(
+            item
+            for item in selected_snapshot.execution_profiles
+            if item.component_id == parts[1]
+        )
+        output.write(
+            f"Locked {profile.component_id} profile={profile.profile_id.value.lower()} "
+            f"model={profile.model} reasoning={profile.reasoning_effort}."
+        )
 
     def _active_issue_id(self) -> IssueId | None:
         if self._active_run_id is None or self._scheduler_service is None:
@@ -1703,17 +1765,29 @@ class RunLauncherApp(App[None]):
 
 
 def run_launcher(config: ApplicationConfig, commands: SlashCommandRegistry) -> None:
+    from devloop.application.workspace_preflight import RealAppServerWorkspacePreflight
+
+    workspace_service = WorkspaceDevelopmentService(
+        config,
+        workspace_preflight=RealAppServerWorkspacePreflight(),
+    )
+    review_qa_service = ReviewQaService(config)
     RunLauncherApp(
         config.repository,
         commands,
         analysis_service=AnalysisWorkflowService(config),
-        workspace_service=WorkspaceDevelopmentService(config),
-        review_qa_service=ReviewQaService(config),
-        scheduler_service=WorkflowSchedulerService(config),
+        workspace_service=workspace_service,
+        review_qa_service=review_qa_service,
+        scheduler_service=WorkflowSchedulerService(
+            config,
+            development_service=workspace_service,
+            review_qa_service=review_qa_service,
+        ),
         recovery_service=RecoveryService(config),
         capability_service=CapabilityProfileService(
             config.paths.user_config,
             standard_capability_catalog(),
         ),
         control_service=WorkflowControlService(config),
+        execution_profile_service=ExecutionProfileSelectionService(config),
     ).run()

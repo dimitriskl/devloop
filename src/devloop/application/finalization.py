@@ -86,6 +86,10 @@ class FinalizationService:
             started,
             implementations=implementations,
             qa_results=qa_results,
+            approval_decisions=tuple(
+                self._store.load_json_artifact(started.run_id, artifact)
+                for artifact in started.approval_decisions
+            ),
         )
         artifact = self._store.save_json_artifact(
             started.run_id,
@@ -114,6 +118,7 @@ def build_handoff_summary(
     *,
     implementations: Sequence[Mapping[str, object]],
     qa_results: Sequence[Mapping[str, object]],
+    approval_decisions: Sequence[Mapping[str, object]] = (),
 ) -> HandoffSummary:
     if snapshot.workspace is None:
         raise FinalizationError("A Handoff Summary requires a selected workspace.")
@@ -131,6 +136,18 @@ def build_handoff_summary(
     for result in qa_results:
         verification.extend(_verification_lines(result.get("checks")))
         residual_risks.extend(_strings(result.get("residual_risks")))
+    approvals = tuple(_approval_line(item) for item in approval_decisions)
+    profiles = tuple(
+        f"{item.component_id} | {item.profile_id.value} | model={item.model} | "
+        f"reasoning={item.reasoning_effort} | timeout={item.budget.timeout_seconds:g}s | "
+        f"checkpoint={item.budget.checkpoint_seconds:g}s"
+        for item in snapshot.execution_profiles
+    )
+    telemetry = tuple(
+        f"{item.component_id} | {item.attempt_key} | {item.phase.value} | "
+        f"elapsed_ms={item.elapsed_ms} | applicable={str(item.applicable).lower()}"
+        for item in snapshot.execution_telemetry.events
+    )
     return HandoffSummary(
         HANDOFF_SUMMARY_SCHEMA,
         snapshot.run_id,
@@ -140,6 +157,9 @@ def build_handoff_summary(
         tuple(_unique(residual_risks)),
         WorkspaceDisposition.LEAVE_INTACT,
         snapshot.workspace.path,
+        tuple(_unique(approvals)),
+        profiles,
+        telemetry,
     )
 
 
@@ -153,6 +173,9 @@ def handoff_summary_to_dict(summary: HandoffSummary) -> dict[str, object]:
         "residual_risks": list(summary.residual_risks),
         "workspace_disposition": summary.workspace_disposition.value,
         "workspace_path": summary.workspace_path,
+        "approval_decisions": list(summary.approval_decisions),
+        "execution_profiles": list(summary.execution_profiles),
+        "execution_telemetry": list(summary.execution_telemetry),
     }
 
 
@@ -175,7 +198,25 @@ def handoff_summary_from_dict(value: Mapping[str, object]) -> HandoffSummary:
         _strings(value.get("residual_risks")),
         WorkspaceDisposition(disposition),
         workspace_path,
+        _strings(value.get("approval_decisions")),
+        _strings(value.get("execution_profiles")),
+        _strings(value.get("execution_telemetry")),
     )
+
+
+def _approval_line(value: Mapping[str, object]) -> str:
+    fields = (
+        "component_id",
+        "command_family",
+        "workspace_boundary",
+        "selected_decision",
+        "decision_scope",
+        "policy_version",
+    )
+    parts = [value.get(field) for field in fields]
+    if not all(isinstance(item, str) and item for item in parts):
+        raise FinalizationError("Approval Decision Artifact is invalid.")
+    return " | ".join(cast(list[str], parts))
 
 
 def _changed_paths(value: object) -> tuple[str, ...]:

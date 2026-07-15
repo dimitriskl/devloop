@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from devloop.domain.capabilities import ResolvedCapabilityProfile
+from devloop.domain.approval import ApprovalPolicy
 from devloop.domain.development import (
     DevelopmentCursor,
     IssueRuntimeState,
@@ -11,6 +12,7 @@ from devloop.domain.development import (
     WorkspaceRef,
 )
 from devloop.domain.finalization import FinalizationCursor
+from devloop.domain.execution import ExecutionProfile, ExecutionTelemetry
 from devloop.domain.identifiers import (
     ExecutionThreadId,
     ExecutionTurnId,
@@ -66,6 +68,7 @@ class RunEventType(str, Enum):
     RUN_RESUMED = "RUN_RESUMED"
     ANALYSIS_ACCEPTED = "ANALYSIS_ACCEPTED"
     WORKSPACE_PREPARATION_STARTED = "WORKSPACE_PREPARATION_STARTED"
+    WORKSPACE_PREFLIGHT_FAILED = "WORKSPACE_PREFLIGHT_FAILED"
     WORKSPACE_PREPARED = "WORKSPACE_PREPARED"
     CONTEXT_MANIFEST_SAVED = "CONTEXT_MANIFEST_SAVED"
     DEVELOPMENT_THREAD_BOUND = "DEVELOPMENT_THREAD_BOUND"
@@ -105,6 +108,10 @@ class RunEventType(str, Enum):
     OPERATION_COMPLETED = "OPERATION_COMPLETED"
     OPERATION_UNKNOWN = "OPERATION_UNKNOWN"
     RECOVERY_ATTEMPT_STARTED = "RECOVERY_ATTEMPT_STARTED"
+    EXECUTION_PHASE_RECORDED = "EXECUTION_PHASE_RECORDED"
+    EXECUTION_STALLED = "EXECUTION_STALLED"
+    APPROVAL_DECISION_RECORDED = "APPROVAL_DECISION_RECORDED"
+    EXECUTION_PROFILE_SELECTED = "EXECUTION_PROFILE_SELECTED"
 
 
 class BackendActivity(str, Enum):
@@ -186,6 +193,10 @@ class WorkflowRunSnapshot:
     operation: OperationState = OperationState()
     workspace_state_hash: str | None = None
     capability_profiles: tuple[ResolvedCapabilityProfile, ...] = ()
+    execution_profiles: tuple[ExecutionProfile, ...] = ()
+    execution_telemetry: ExecutionTelemetry = ExecutionTelemetry()
+    approval_decisions: tuple[ArtifactRef, ...] = ()
+    approval_policies: tuple[ApprovalPolicy, ...] = ()
 
     @property
     def terminal(self) -> bool:

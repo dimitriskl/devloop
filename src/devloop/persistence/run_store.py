@@ -14,6 +14,7 @@ from pathlib import Path, PureWindowsPath
 from typing import cast
 
 from devloop.analysis.package import analysis_draft_to_dict, parse_analysis_draft
+from devloop.domain.approval import approval_policy_from_payload, approval_policy_payload
 from devloop.domain.capabilities import ResolvedCapabilityProfile
 from devloop.domain.development import (
     ArtifactRef,
@@ -28,6 +29,13 @@ from devloop.domain.development import (
     WorkspaceRef,
 )
 from devloop.domain.doctor import redact_sensitive_text
+from devloop.domain.execution import (
+    ExecutionPhase,
+    ExecutionPhaseEvent,
+    ExecutionTelemetry,
+    execution_profile_from_payload,
+    execution_profile_payload,
+)
 from devloop.domain.finalization import FinalizationCursor, WorkspaceDisposition
 from devloop.domain.identifiers import (
     AttemptId,
@@ -68,6 +76,13 @@ from devloop.domain.scheduler import (
     IssueAttemptRecord,
     validate_attempt_history,
     validate_attempt_record,
+)
+from devloop.domain.workspace import (
+    WorkspacePermissionProfile,
+    WorkspaceProbeId,
+    WorkspaceProbeResult,
+    WorkspaceProbeStatus,
+    workspace_permission_profile_to_dict,
 )
 from devloop.infrastructure.paths import (
     ANALYSIS_DRAFT_FILENAME,
@@ -113,6 +128,7 @@ _ALLOWED_PERSISTED_FIELDS = frozenset(
         "acceptance_condition",
         "acceptance_criteria",
         "action",
+        "approval_decisions",
         "assumptions",
         "attempt",
         "attempt_id",
@@ -124,18 +140,25 @@ _ALLOWED_PERSISTED_FIELDS = frozenset(
         "capability_profile",
         "changed_files",
         "checks",
+        "classification",
         "command",
+        "command_family",
+        "command_hash",
         "commands",
         "completed_issues",
+        "component_id",
         "criteria",
         "criterion_id",
         "decision",
+        "decision_scope",
         "diff_hash",
         "disposition",
         "duration_ms",
         "evidence",
         "exit_code",
         "expected_behavior",
+        "execution_profiles",
+        "execution_telemetry",
         "file_path",
         "findings",
         "from_attempt",
@@ -153,6 +176,10 @@ _ALLOWED_PERSISTED_FIELDS = frozenset(
         "method",
         "outcome",
         "path",
+        "parsed_action",
+        "policy_hash",
+        "policy_reason",
+        "policy_version",
         "position",
         "prd_sections",
         "prohibited_operations",
@@ -163,8 +190,10 @@ _ALLOWED_PERSISTED_FIELDS = frozenset(
         "repository_state",
         "repository_state_hash",
         "request_id",
+        "request_kind",
         "requirement",
         "requirements",
+        "requires_windows_acl_handoff",
         "residual_risks",
         "result_state",
         "review",
@@ -173,6 +202,7 @@ _ALLOWED_PERSISTED_FIELDS = frozenset(
         "risks",
         "run_id",
         "schema",
+        "selected_decision",
         "severity",
         "source",
         "source_state_changed",
@@ -189,6 +219,7 @@ _ALLOWED_PERSISTED_FIELDS = frozenset(
         "turn_id",
         "verification_evidence",
         "workspace",
+        "workspace_boundary",
         "workspace_disposition",
         "workspace_path",
     }
@@ -718,6 +749,30 @@ def snapshot_to_dict(snapshot: WorkflowRunSnapshot) -> dict[str, object]:
             }
             for item in snapshot.capability_profiles
         ],
+        "execution_profiles": [
+            execution_profile_payload(profile) for profile in snapshot.execution_profiles
+        ],
+        "execution_telemetry": {
+            "schema": snapshot.execution_telemetry.schema,
+            "events": [
+                {
+                    "phase": event.phase.value,
+                    "occurred_at": event.occurred_at,
+                    "elapsed_ms": event.elapsed_ms,
+                    "component_id": event.component_id,
+                    "attempt_key": event.attempt_key,
+                    "applicable": event.applicable,
+                }
+                for event in snapshot.execution_telemetry.events
+            ],
+        },
+        "approval_decisions": [
+            {"path": item.path, "content_hash": item.content_hash}
+            for item in snapshot.approval_decisions
+        ],
+        "approval_policies": [
+            approval_policy_payload(policy) for policy in snapshot.approval_policies
+        ],
         "active_step": snapshot.active_step.value,
         "run_status": snapshot.run_status.value,
         "step_status": snapshot.step_status.value,
@@ -773,6 +828,10 @@ def snapshot_from_dict(data: Mapping[str, object]) -> WorkflowRunSnapshot:
     lease = _object(data, "lease")
     locks_value = data.get("component_locks")
     profiles_value = data.get("capability_profiles", [])
+    execution_profiles_value = data.get("execution_profiles", [])
+    telemetry_value = data.get("execution_telemetry")
+    approval_decisions_value = data.get("approval_decisions", [])
+    approval_policies_value = data.get("approval_policies", [])
     if not isinstance(locks_value, list):
         raise ValueError("Workflow Run component locks are invalid.")
     locks: list[ComponentLock] = []
@@ -808,6 +867,36 @@ def snapshot_from_dict(data: Mapping[str, object]) -> WorkflowRunSnapshot:
         )
     if len({profile.component_id for profile in profiles}) != len(profiles):
         raise ValueError("Workflow Run capability profiles must be unique.")
+    if not isinstance(execution_profiles_value, list):
+        raise ValueError("Workflow Run execution profiles are invalid.")
+    execution_profiles = []
+    for value in execution_profiles_value:
+        if not isinstance(value, dict):
+            raise ValueError("Workflow Run execution profile is invalid.")
+        execution_profiles.append(execution_profile_from_payload(value))
+    if len({item.component_id for item in execution_profiles}) != len(execution_profiles):
+        raise ValueError("Workflow Run execution profiles must be unique per component.")
+    telemetry = _execution_telemetry_from_value(telemetry_value)
+    if not isinstance(approval_decisions_value, list):
+        raise ValueError("Workflow Run approval decisions are invalid.")
+    approval_decisions_list: list[ArtifactRef] = []
+    for value in approval_decisions_value:
+        artifact = _artifact_from_value(value, "approval decision", required=True)
+        if artifact is None:
+            raise ValueError("Workflow Run approval decision is missing.")
+        approval_decisions_list.append(artifact)
+    approval_decisions = tuple(approval_decisions_list)
+    if not isinstance(approval_policies_value, list):
+        raise ValueError("Workflow Run approval policies are invalid.")
+    approval_policies = tuple(
+        approval_policy_from_payload(value)
+        for value in approval_policies_value
+        if isinstance(value, dict)
+    )
+    if len(approval_policies) != len(approval_policies_value):
+        raise ValueError("Workflow Run approval policy is invalid.")
+    if len({item.component_id for item in approval_policies}) != len(approval_policies):
+        raise ValueError("Workflow Run approval policies must be unique per component.")
     outcome_value = data.get("outcome")
     thread_value = analysis.get("thread_id")
     turn_value = analysis.get("turn_id")
@@ -926,7 +1015,53 @@ def snapshot_from_dict(data: Mapping[str, object]) -> WorkflowRunSnapshot:
         operation=operation,
         workspace_state_hash=workspace_state_hash,
         capability_profiles=tuple(profiles),
+        execution_profiles=tuple(execution_profiles),
+        execution_telemetry=telemetry,
+        approval_decisions=approval_decisions,
+        approval_policies=approval_policies,
     )
+
+
+def _execution_telemetry_from_value(value: object) -> ExecutionTelemetry:
+    if value is None:
+        return ExecutionTelemetry()
+    if not isinstance(value, dict):
+        raise ValueError("Workflow Run execution telemetry is invalid.")
+    schema = value.get("schema")
+    events_value = value.get("events")
+    if not isinstance(schema, str) or not isinstance(events_value, list):
+        raise ValueError("Workflow Run execution telemetry is invalid.")
+    events: list[ExecutionPhaseEvent] = []
+    for event_value in events_value:
+        if not isinstance(event_value, dict):
+            raise ValueError("Workflow Run execution phase event is invalid.")
+        elapsed = event_value.get("elapsed_ms")
+        occurred_at = event_value.get("occurred_at")
+        phase = event_value.get("phase")
+        component_id = event_value.get("component_id", "workflow")
+        attempt_key = event_value.get("attempt_key", "run")
+        applicable = event_value.get("applicable", True)
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, int)
+            or not isinstance(occurred_at, str)
+            or not isinstance(phase, str)
+            or not isinstance(component_id, str)
+            or not isinstance(attempt_key, str)
+            or not isinstance(applicable, bool)
+        ):
+            raise ValueError("Workflow Run execution phase event is invalid.")
+        events.append(
+            ExecutionPhaseEvent(
+                ExecutionPhase(phase),
+                occurred_at,
+                elapsed,
+                component_id,
+                attempt_key,
+                applicable,
+            )
+        )
+    return ExecutionTelemetry(schema, tuple(events))
 
 
 def _planning_package_to_dict(value: PlanningPackageRef | None) -> dict[str, object] | None:
@@ -945,6 +1080,11 @@ def _workspace_to_dict(value: WorkspaceRef | None) -> dict[str, object] | None:
         "branch": value.branch,
         "base_commit": value.base_commit,
         "baseline": _baseline_to_list(value.baseline),
+        "permission_profile": (
+            None
+            if value.permission_profile is None
+            else workspace_permission_profile_to_dict(value.permission_profile)
+        ),
     }
 
 
@@ -1064,6 +1204,7 @@ def _workspace_from_value(value: object) -> WorkspaceRef | None:
     if branch is not None and not isinstance(branch, str):
         raise ValueError("Workflow Run workspace branch is invalid.")
     baseline = _baseline_from_value(baseline_value, "workspace")
+    permission_profile = _workspace_permission_from_value(data.get("permission_profile"))
     return WorkspaceRef(
         WorkspaceKind(_string(data, "kind")),
         _string(data, "repository_root"),
@@ -1071,6 +1212,47 @@ def _workspace_from_value(value: object) -> WorkspaceRef | None:
         branch,
         _string(data, "base_commit"),
         baseline,
+        permission_profile,
+    )
+
+
+def _workspace_permission_from_value(value: object) -> WorkspacePermissionProfile | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Workflow Run workspace permission profile is invalid.")
+    data = cast(dict[str, object], value)
+    results_value = data.get("results")
+    if not isinstance(results_value, list):
+        raise ValueError("Workflow Run workspace permission results are invalid.")
+    results: list[WorkspaceProbeResult] = []
+    for result_value in results_value:
+        if not isinstance(result_value, dict):
+            raise ValueError("Workflow Run workspace permission result is invalid.")
+        result = cast(dict[str, object], result_value)
+        results.append(
+            WorkspaceProbeResult(
+                WorkspaceProbeId(_string(result, "probe_id")),
+                WorkspaceProbeStatus(_string(result, "status")),
+                _string(result, "evidence"),
+            )
+        )
+    real_backend_verified = data.get("real_backend_verified")
+    requires_windows_acl_handoff = data.get("requires_windows_acl_handoff")
+    if not isinstance(real_backend_verified, bool) or not isinstance(
+        requires_windows_acl_handoff,
+        bool,
+    ):
+        raise ValueError("Workflow Run workspace permission flags are invalid.")
+    return WorkspacePermissionProfile(
+        _string(data, "schema"),
+        WorkflowRunId(_string(data, "run_id")),
+        _string(data, "canonical_root"),
+        _string(data, "permission_profile"),
+        _string(data, "probe_version"),
+        real_backend_verified,
+        requires_windows_acl_handoff,
+        tuple(results),
     )
 
 

@@ -12,6 +12,7 @@ from devloop.domain.identifiers import (
     IssueId,
     StepInstanceId,
 )
+from devloop.domain.workspace import WorkspacePermissionProfile
 
 
 class WorkspaceChoice(str, Enum):
@@ -88,6 +89,7 @@ class WorkspaceRef:
     branch: str | None
     base_commit: str
     baseline: tuple[WorkspaceBaselineEntry, ...] = ()
+    permission_profile: WorkspacePermissionProfile | None = None
 
 
 @dataclass(frozen=True)

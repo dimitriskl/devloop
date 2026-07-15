@@ -11,13 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from devloop.application.backend_compatibility import (
+    InstalledBackendCompatibilityService,
+)
 from devloop.application.config import ApplicationConfig
 from devloop.domain.doctor import (
     DoctorCheckId,
     DoctorCheckResult,
     DoctorReport,
+    redact_diagnostic,
 )
 from devloop.execution.app_server import AppServerClient, AppServerStatus
+from devloop.execution.compatibility import CompatibilityError, InstalledBackendProfile
 from devloop.infrastructure.codex import (
     CodexExecutableError,
     resolve_codex_executable,
@@ -168,6 +173,44 @@ def check_app_server(status: AppServerStatus | None) -> DoctorCheckResult:
     )
 
 
+def check_backend_compatibility(
+    profile: InstalledBackendProfile | None,
+) -> DoctorCheckResult:
+    if profile is None:
+        return DoctorCheckResult.failed(
+            DoctorCheckId.BACKEND_COMPATIBILITY,
+            "Installed App Server contract",
+            "The installed App Server compatibility profile could not be produced.",
+            "Update or reinstall Codex CLI, then run the doctor again.",
+        )
+    if not profile.compatible:
+        details = "; ".join(
+            f"{finding.code}: {finding.summary}" for finding in profile.findings
+        )
+        actions = "; ".join(dict.fromkeys(finding.action for finding in profile.findings))
+        return DoctorCheckResult.failed(
+            DoctorCheckId.BACKEND_COMPATIBILITY,
+            "Installed App Server contract",
+            redact_diagnostic(details, limit=8000),
+            redact_diagnostic(actions, limit=4000),
+        )
+    if not profile.platform_preflight_verified:
+        return DoctorCheckResult.failed(
+            DoctorCheckId.BACKEND_COMPATIBILITY,
+            "Installed App Server contract",
+            "The bounded real-backend platform preflight has not passed.",
+            "Run the doctor again after repairing workspace permissions and Git access.",
+        )
+    return DoctorCheckResult.passed(
+        DoctorCheckId.BACKEND_COMPATIBILITY,
+        "Installed App Server contract",
+        (
+            f"Codex CLI {profile.codex_version} supports the locked workflow contract "
+            f"({len(profile.supported_methods)} methods)."
+        ),
+    )
+
+
 def check_authentication(status: AppServerStatus | None) -> DoctorCheckResult:
     if status is None:
         return DoctorCheckResult.failed(
@@ -263,6 +306,12 @@ def collect_doctor_report(config: ApplicationConfig) -> DoctorReport:
         codex_executable,
         timeout_seconds=config.app_server_timeout_seconds,
     )
+    extracted_codex_version = extract_version(codex_version.output) if codex_version else None
+    compatibility_profile = _probe_backend_compatibility(
+        config,
+        codex_executable,
+        extracted_codex_version,
+    )
     stdin_is_terminal, stdout_is_terminal = _terminal_capabilities()
 
     return DoctorReport.from_checks(
@@ -278,6 +327,7 @@ def collect_doctor_report(config: ApplicationConfig) -> DoctorReport:
             check_codex_executable(codex_executable),
             check_codex_version(codex_executable, codex_version),
             check_app_server(app_server_status),
+            check_backend_compatibility(compatibility_profile),
             check_authentication(app_server_status),
             check_terminal(
                 stdin_is_terminal=stdin_is_terminal,
@@ -363,6 +413,19 @@ def _probe_app_server(
             return client.probe()
     except Exception:
         # Never render protocol, process, account, home, or stderr details.
+        return None
+
+
+def _probe_backend_compatibility(
+    config: ApplicationConfig,
+    executable: Path | None,
+    codex_version: str | None,
+) -> InstalledBackendProfile | None:
+    if executable is None or codex_version is None:
+        return None
+    try:
+        return InstalledBackendCompatibilityService(config).profile(executable, codex_version)
+    except (CompatibilityError, OSError, ValueError):
         return None
 
 

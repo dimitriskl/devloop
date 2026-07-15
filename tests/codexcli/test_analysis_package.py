@@ -21,6 +21,7 @@ RUN_ID = WorkflowRunId("run-20260710t120000-123456abcdef")
 def valid_payload() -> dict[str, object]:
     return {
         "schema": "devloop.analysis-draft/v1",
+        "authority": "STRUCTURED_RENDERER",
         "feature_title": "Price comparison",
         "feature_slug": "price-comparison",
         "prd_markdown": """<!-- devloop:prd:v1 -->
@@ -87,6 +88,14 @@ def test_valid_draft_publishes_hash_locked_issue_set_without_statuses(tmp_path: 
     )
     with pytest.raises(AnalysisPublicationError, match="will not be overwritten"):
         publish_analysis_package(tmp_path, unrelated)
+
+
+def test_legacy_mixed_authority_draft_cannot_publish_a_new_package(tmp_path: Path) -> None:
+    payload = valid_payload()
+    payload.pop("authority")
+
+    with pytest.raises(AnalysisPublicationError, match="structured-renderer"):
+        publish_analysis_package(tmp_path, parse_analysis_draft(payload, RUN_ID))
 
 
 def test_dependency_cycles_and_requirement_gaps_are_validation_findings() -> None:

@@ -82,12 +82,22 @@ class WorkspaceComponentRunner:
                 proposal.base_commit,
                 capture_workspace_baseline(proposal.current_path),
             )
-        create_worktree(
-            proposal.repository,
-            proposal.dedicated_path,
-            proposal.dedicated_branch,
-            proposal.base_commit,
-        )
+        if proposal.dedicated_path.exists():
+            if (
+                repository_root(proposal.dedicated_path) != proposal.dedicated_path.resolve()
+                or current_branch(proposal.dedicated_path) != proposal.dedicated_branch
+                or head_commit(proposal.dedicated_path) != proposal.base_commit
+            ):
+                raise WorkspacePreparationCancelled(
+                    "Existing dedicated workspace does not match the accepted proposal."
+                )
+        else:
+            create_worktree(
+                proposal.repository,
+                proposal.dedicated_path,
+                proposal.dedicated_branch,
+                proposal.base_commit,
+            )
         return WorkspaceRef(
             WorkspaceKind.DEDICATED_WORKTREE,
             str(proposal.repository),

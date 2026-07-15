@@ -26,6 +26,12 @@ def launcher_command_registry() -> SlashCommandRegistry:
                 CommandScope.GLOBAL,
             ),
             SlashCommand(
+                SlashCommandId("profile"),
+                "Execution profile",
+                "Show or select a component model, reasoning, and budget profile.",
+                CommandScope.GLOBAL,
+            ),
+            SlashCommand(
                 SlashCommandId("language"),
                 "Language",
                 "Choose the content language for new user-authored text.",

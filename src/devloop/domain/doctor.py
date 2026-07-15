@@ -19,6 +19,7 @@ class DoctorCheckId(str, Enum):
     CODEX_EXECUTABLE = "codex-executable"
     CODEX_VERSION = "codex-version"
     APP_SERVER = "app-server"
+    BACKEND_COMPATIBILITY = "backend-compatibility"
     AUTHENTICATION = "authentication"
     TERMINAL = "terminal"
     STORAGE = "storage"

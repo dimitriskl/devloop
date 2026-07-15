@@ -528,6 +528,8 @@ def _active_artifacts(snapshot: WorkflowRunSnapshot) -> tuple[ArtifactRef, ...]:
         add(attempt.review)
         add(attempt.qa_result)
         add(attempt.rework_request)
+    for approval in snapshot.approval_decisions:
+        add(approval)
     return tuple(
         {
             (artifact.path, artifact.content_hash): artifact

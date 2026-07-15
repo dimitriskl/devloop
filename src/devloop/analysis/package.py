@@ -27,6 +27,7 @@ from devloop.domain.planning import (
     AcceptanceCriterion,
     AnalysisDraft,
     IssueDraft,
+    PlanningAuthority,
     PublishedPackage,
     ValidationCode,
     ValidationFinding,
@@ -74,6 +75,9 @@ def parse_analysis_draft(payload: Mapping[str, object], run_id: WorkflowRunId) -
         requirement_ids=requirements,
         issues=issues,
         revision=revision,
+        authority=PlanningAuthority(
+            payload.get("authority", PlanningAuthority.LEGACY_MIXED.value)
+        ),
     )
 
 
@@ -101,6 +105,7 @@ def analysis_draft_to_dict(draft: AnalysisDraft) -> dict[str, object]:
             for issue in draft.issues
         ],
         "revision": draft.revision,
+        "authority": draft.authority.value,
     }
 
 
@@ -188,6 +193,10 @@ def validate_analysis_draft(draft: AnalysisDraft) -> tuple[ValidationFinding, ..
 
 
 def publish_analysis_package(repository: Path, draft: AnalysisDraft) -> PublishedPackage:
+    if draft.authority is not PlanningAuthority.STRUCTURED_RENDERER:
+        raise AnalysisPublicationError(
+            "Only structured-renderer planning output can publish a new PRD Package."
+        )
     findings = validate_analysis_draft(draft)
     if findings:
         raise AnalysisPublicationError(

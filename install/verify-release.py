@@ -47,6 +47,8 @@ def main() -> int:
         raise SystemExit("Wheel metadata contains legacy bundle instructions.")
     if "codexcli = devloop.entrypoint:main" not in entry_points:
         raise SystemExit("Wheel does not expose the codexcli command.")
+    if "codexcli-gate = devloop.verification.cli:main" not in entry_points:
+        raise SystemExit("Wheel does not expose the versioned verification tiers.")
     finalization_entry_point = (
         "workspace-finalization = devloop.components.finalization:finalization_component"
     )

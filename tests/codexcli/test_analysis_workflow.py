@@ -42,6 +42,7 @@ RUN_ID = WorkflowRunId("run-20260711t120000-123456abcdef")
 def _draft_payload() -> dict[str, object]:
     return {
         "schema": "devloop.analysis-draft/v1",
+        "authority": "STRUCTURED_RENDERER",
         "feature_title": "Price comparison",
         "feature_slug": "price-comparison",
         "prd_markdown": """<!-- devloop:prd:v1 -->

@@ -26,6 +26,8 @@ from devloop.components.structured_output import (
     required_string,
     string_tuple,
 )
+from devloop.domain.approval import ApprovalPolicy
+from devloop.domain.execution import ExecutionProfile
 from devloop.domain.identifiers import (
     AcceptanceCriterionId,
     DataContractId,
@@ -59,6 +61,23 @@ QA_DISTRIBUTION = "devloop-codexcli"
 QA_RESULT_CONTRACT = DataContractId("devloop.qa-result/v1")
 QA_MODEL = "gpt-5.6-sol"
 QA_TURN_TIMEOUT_SECONDS = 1800.0
+QA_CHECKPOINT_SECONDS = 240.0
+QA_EXECUTION_PROFILES = (
+    ExecutionProfile.full(
+        QA_COMPONENT_ID.value,
+        QA_MODEL,
+        AppServerReasoningEffort.XHIGH.value,
+        QA_TURN_TIMEOUT_SECONDS,
+        QA_CHECKPOINT_SECONDS,
+    ),
+    ExecutionProfile.lightweight(
+        QA_COMPONENT_ID.value,
+        QA_MODEL,
+        AppServerReasoningEffort.LOW.value,
+        600.0,
+        120.0,
+    ),
+)
 
 _QA_INSTRUCTIONS = """Verify only the supplied Issue implementation. Treat the structured QA
 Input as the complete context. Do not load development or review transcripts, unrelated Issues,
@@ -111,7 +130,9 @@ class QaComponentRunner:
         pause_requested: Callable[[], bool] | None = None,
         interrupt_requested: Callable[[], bool] | None = None,
         on_approval: Callable[[AppServerApprovalRequest], str | None] | None = None,
+        execution_profile: ExecutionProfile | None = None,
     ) -> QaAgentOutput:
+        profile = _execution_profile(execution_profile)
         with AppServerClient(
             str(resolve_codex_executable()),
             experimental_api=True,
@@ -123,14 +144,19 @@ class QaComponentRunner:
             if thread_id is None:
                 thread = client.start_thread(
                     workspace,
-                    model=QA_MODEL,
-                    reasoning_effort=AppServerReasoningEffort.XHIGH,
+                    model=profile.model,
+                    reasoning_effort=AppServerReasoningEffort(profile.reasoning_effort),
                     developer_instructions=_QA_INSTRUCTIONS,
                     approval_policy=AppServerApprovalPolicy.ON_REQUEST,
                     permission_profile=AppServerPermissionProfile.WORKSPACE,
+                    runtime_workspace_roots=(workspace,),
                 )
             else:
-                thread = client.resume_thread(thread_id.value, workspace)
+                thread = client.resume_thread(
+                    thread_id.value,
+                    workspace,
+                    runtime_workspace_roots=(workspace,),
+                )
             bound_thread = ExecutionThreadId(thread.thread_id)
             if on_thread_bound is not None:
                 on_thread_bound(bound_thread)
@@ -146,7 +172,7 @@ class QaComponentRunner:
             result = client.wait_for_turn(
                 thread.thread_id,
                 turn.turn_id,
-                timeout_seconds=QA_TURN_TIMEOUT_SECONDS,
+                timeout_seconds=profile.budget.timeout_seconds,
                 on_agent_delta=on_activity,
                 on_item_started=on_item_started,
                 on_item_completed=on_item_completed,
@@ -184,7 +210,12 @@ class QaComponentRunner:
             process_cwd=workspace,
         ) as client:
             client.initialize()
-            _, result = client.resume_thread_with_turn(thread_id.value, workspace, turn_id.value)
+            _, result = client.resume_thread_with_turn(
+                thread_id.value,
+                workspace,
+                turn_id.value,
+                runtime_workspace_roots=(workspace,),
+            )
             if result is None:
                 raise QaComponentError("Checkpointed QA turn is missing.")
             if result.status is AppServerTurnStatus.IN_PROGRESS:
@@ -220,9 +251,24 @@ def qa_component() -> tuple[ComponentManifest, QaComponentRunner]:
                     required=False,
                 ),
             ),
+            approval_policy=ApprovalPolicy.read_only(
+                QA_COMPONENT_ID.value,
+                focused_tests=True,
+            ),
+            execution_profiles=QA_EXECUTION_PROFILES,
+            default_execution_profile="FULL",
         ),
         QaComponentRunner(),
     )
+
+
+def _execution_profile(profile: ExecutionProfile | None) -> ExecutionProfile:
+    selected = QA_EXECUTION_PROFILES[0] if profile is None else profile
+    if selected.component_id != QA_COMPONENT_ID.value:
+        raise QaComponentError("Execution profile belongs to another component.")
+    if selected not in QA_EXECUTION_PROFILES:
+        raise QaComponentError("Execution profile is not supported by QA.")
+    return selected
 
 
 def _output_from_result(result: AppServerTurnResult) -> QaAgentOutput:

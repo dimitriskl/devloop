@@ -13,7 +13,17 @@ for required_command in uv pipx codex; do
   fi
 done
 
-if [ "${1:-}" = "--real-backend" ]; then
+real_backend=0
+use_existing_artifacts=0
+for option in "$@"; do
+  case "$option" in
+    --real-backend) real_backend=1 ;;
+    --use-existing-artifacts) use_existing_artifacts=1 ;;
+    *) printf '%s\n' "Unknown release gate option: $option" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$real_backend" -eq 1 ]; then
   codex login status
 fi
 
@@ -21,21 +31,27 @@ uv sync --locked
 uv run ruff check --no-cache .
 uv run mypy --cache-dir "$release_temp/mypy"
 uv run pytest -q -m 'not integration' --basetemp="$base_temp"
-rm -f dist/devloop_codexcli-*.whl dist/devloop_codexcli-*.tar.gz
-uv build --sdist --wheel --out-dir dist
+if [ "$use_existing_artifacts" -eq 0 ]; then
+  rm -f dist/devloop_codexcli-*.whl dist/devloop_codexcli-*.tar.gz
+  export SOURCE_DATE_EPOCH
+  SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+  uv build --sdist --wheel --out-dir dist
+fi
 uv run python install/verify-release.py --dist dist
 wheel=$(find dist -maxdepth 1 -type f -name 'devloop_codexcli-0.1.0-*.whl' -print)
 uv tool install --force "$wheel"
 codexcli --help
 codexcli doctor --help
 codexcli run --help
+codexcli-gate --help
 uv tool uninstall devloop-codexcli
 pipx install --force "$wheel"
 pipx runpip devloop-codexcli show devloop-codexcli
 codexcli doctor --help
 codexcli run --help
+codexcli-gate --help
 
-if [ "${1:-}" = "--real-backend" ]; then
+if [ "$real_backend" -eq 1 ]; then
   export DEVLOOP_REAL_APP_SERVER=1
   export DEVLOOP_REAL_ANALYSIS=1
   export DEVLOOP_REAL_DEVELOPMENT=1
@@ -44,6 +60,7 @@ if [ "${1:-}" = "--real-backend" ]; then
   export DEVLOOP_REAL_SCHEDULER=1
   export DEVLOOP_REAL_RECOVERY=1
   export DEVLOOP_REAL_UI=1
+  export DEVLOOP_REAL_VERTICAL=1
   codexcli doctor --repo "$root"
   uv run pytest -q -m integration --basetemp="$release_temp/pytest-real"
 fi
