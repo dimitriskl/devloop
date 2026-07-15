@@ -141,6 +141,9 @@ class RunStreamingTests(unittest.TestCase):
         self.assertEqual(returncode, 127)
         self.assertIn("not found", output)
 
+    def test_waiting_duration_keeps_hours_visible(self) -> None:
+        self.assertEqual(chat_loop._format_duration(7384.9), "02:03:04")
+
     def test_resolves_executable_before_starting_process(self) -> None:
         with tempfile.TemporaryDirectory() as raw, \
              mock.patch.object(
@@ -256,7 +259,13 @@ class RunStreamingTests(unittest.TestCase):
 
         self.assertEqual(
             indicator.method_calls,
-            [mock.call.start(), mock.call.stop(), mock.call.start(), mock.call.stop()],
+            [
+                mock.call.start(),
+                mock.call.notify_activity(),
+                mock.call.stop(),
+                mock.call.start(),
+                mock.call.stop(),
+            ],
         )
 
     def test_waiting_indicator_animates_multiple_frames(self) -> None:
@@ -279,8 +288,43 @@ class RunStreamingTests(unittest.TestCase):
         indicator._animate()
 
         rendered = output.getvalue()
-        self.assertIn("Codex is working |", rendered)
-        self.assertIn("Codex is working /", rendered)
+        self.assertIn("Codex is working [|]", rendered)
+        self.assertIn("Codex is working [/]", rendered)
+
+    def test_waiting_indicator_reports_stage_elapsed_activity_and_stall(self) -> None:
+        class InteractiveOutput(StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = Clock()
+        indicator = chat_loop.WaitingIndicator(
+            InteractiveOutput(),
+            clock=clock,
+            stalled_after_seconds=120.0,
+        )
+
+        clock.value = 65.0
+        starting = indicator._status_line("|")
+        indicator.notify_activity()
+        clock.value = 80.0
+        active = indicator._status_line("/")
+        clock.value = 200.0
+        stalled = indicator._status_line("-")
+
+        self.assertIn("[analysis]", starting)
+        self.assertIn("elapsed 00:01:05", starting)
+        self.assertIn("waiting for first event", starting)
+        self.assertIn("last event 00:00:15 ago", active)
+        self.assertIn("POSSIBLY STALLED", stalled)
+        self.assertIn("silent 00:02:15", stalled)
+        self.assertIn("Ctrl+C", stalled)
+        self.assertLessEqual(len(stalled), 79)
 
 
 class FakeEditor:
@@ -331,6 +375,9 @@ class RunPlanningChatTests(unittest.TestCase):
         def turn_runner(command, cwd):
             turn_started["value"] = True
             self.assertIn("Submitted to Codex", printed.getvalue())
+            self.assertIn("ANALYSIS active", printed.getvalue())
+            self.assertIn("PRD + ISSUES not detected", printed.getvalue())
+            self.assertIn("DEVELOPMENT waits", printed.getvalue())
             return 0, "session id: 0198c0de-1111-2222-3333-444455556666\nok\n"
 
         callbacks = ChatCallbacks(
@@ -565,6 +612,9 @@ class RunPlanningChatTests(unittest.TestCase):
     def test_failed_resume_falls_back_to_fresh_exec(self) -> None:
         turns: list[list[str]] = []
         state = {"count": 0}
+        planning_contract = (
+            "PLAN\nDo not start implementation.\nCreate the PRD and issue pack."
+        )
 
         def turn_runner(command, cwd):
             turns.append(list(command))
@@ -588,15 +638,16 @@ class RunPlanningChatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             result = chat_loop.run_planning_chat(
                 config=self.make_config(Path(raw)),
-                initial_prompt="PLAN",
+                initial_prompt=planning_contract,
                 callbacks=callbacks,
                 turn_runner=turn_runner,
                 editor=FakeEditor(["first message", "second message", "third message"]),
             )
         self.assertEqual(result, "DONE")
         # turn 3 (index 2): fresh exec fallback, not a resume; prompt carries the
-        # continuation note plus the user's message text.
+        # original planning contract, continuation note, and user's message text.
         self.assertNotIn("resume", turns[2])
+        self.assertIn(planning_contract, turns[2][-1])
         self.assertIn("Continuing an interrupted Dev Loop planning session", turns[2][-1])
         self.assertIn("second message", turns[2][-1])
         # turn 4 (index 3): resumes the NEW session id captured from turn 3.
@@ -681,6 +732,8 @@ class RunPlanningChatTests(unittest.TestCase):
                 editor=FakeEditor(["/status"]),
             )
         self.assertIn("Artifacts: none detected yet", buf.getvalue())
+        self.assertIn("ANALYSIS active", buf.getvalue())
+        self.assertIn("PRD + ISSUES not detected", buf.getvalue())
 
 
 if __name__ == "__main__":

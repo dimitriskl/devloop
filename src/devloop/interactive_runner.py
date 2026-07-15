@@ -593,14 +593,16 @@ Read the Dev Loop self-improvement wiki index and apply relevant lessons to this
 - {wiki_index}
 
 Required workflow:
-1. Use $grill-with-docs first. Interview the user until the requested change is sharp enough to build.
-2. Use domain-modeling during the grill. Update glossary or ADR files only when the skill rules justify it.
-3. After the user confirms the design, use $to-prd. Save the canonical PRD as {repo_root / "prd" / "<prd-name>" / "<prd-name>.md"}.
-4. Then use $to-issues. Save the issue pack inside the same PRD folder at {repo_root / "prd" / "<prd-name>" / "issues" / "README.md"}.
-5. Keep PRD-specific execution information inside {repo_root / "prd" / "<prd-name>"} unless a repository-wide glossary or ADR update is genuinely required.
-6. The issue README must contain real Markdown links to numbered issue files.
-7. Do not start implementation and do not run Dev Loop yourself from inside Codex.
-8. The Dev Loop wrapper watches the repository and continues automatically once the PRD and issue README exist. Never ask the user to exit or close anything. When the artifacts are ready, report only the exact PRD path and issue README path.
+1. Inspect the existing analysis, glossary, ADRs, PRDs, and issue packs before asking a question.
+2. If the existing analysis is already settled, do not repeat the interview. Move directly to $to-prd and then $to-issues.
+3. Otherwise use $grill-with-docs. Interview the user until the requested change is sharp enough to build.
+4. Use domain-modeling during the grill. Update glossary or ADR files only when the skill rules justify it.
+5. After the user confirms the design, use $to-prd. Save the canonical PRD as {repo_root / "prd" / "<prd-name>" / "<prd-name>.md"}.
+6. Then use $to-issues. Save the issue pack inside the same PRD folder at {repo_root / "prd" / "<prd-name>" / "issues" / "README.md"}.
+7. Keep PRD-specific execution information inside {repo_root / "prd" / "<prd-name>"} unless a repository-wide glossary or ADR update is genuinely required.
+8. The issue README must contain real Markdown links to numbered issue files.
+9. Do not start implementation and do not run Dev Loop yourself from inside Codex.
+10. The Dev Loop wrapper watches the repository and continues automatically once the PRD and issue README exist. Never ask the user to exit or close anything. When the artifacts are ready, report only the exact PRD path and issue README path.
 
 Issue self-containment rules (critical):
 - Each issue is later executed by a fresh Codex session with no memory of this conversation, so the full context window is preserved for development.

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
@@ -53,8 +54,12 @@ CODEX_NOISE_PREFIXES = (
 )
 CODEX_NOISE_LINES = {"--------", "user"}
 WAITING_FRAMES = ("|", "/", "-", "\\")
-WAITING_MESSAGE = "Codex is working"
 WAITING_FRAME_SECONDS = 0.12
+WAITING_STALL_SECONDS = 120.0
+PLANNING_STAGE_STATUS = (
+    "Pipeline: ANALYSIS active | PRD + ISSUES not detected | DEVELOPMENT waits"
+)
+PLANNING_SUBMISSION_STATUS = "Submitted to Codex; waiting for the planning response..."
 
 
 class WaitingIndicator:
@@ -62,13 +67,21 @@ class WaitingIndicator:
         self,
         stream: TextIO | None = None,
         frame_seconds: float = WAITING_FRAME_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        stalled_after_seconds: float = WAITING_STALL_SECONDS,
     ) -> None:
         self._stream = sys.stdout if stream is None else stream
         self._frame_seconds = frame_seconds
+        self._clock = clock
+        self._stalled_after_seconds = stalled_after_seconds
         isatty = getattr(self._stream, "isatty", None)
         self._enabled = bool(callable(isatty) and isatty())
         self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
+        self._activity_lock = threading.Lock()
+        self._started_at = self._clock()
+        self._last_activity_at: float | None = None
+        self._rendered_width = 0
 
     def start(self) -> None:
         if not self._enabled or self._thread is not None:
@@ -85,25 +98,68 @@ class WaitingIndicator:
         self._thread = None
         self._clear()
 
+    def notify_activity(self) -> None:
+        with self._activity_lock:
+            self._last_activity_at = self._clock()
+
     def _animate(self) -> None:
         frame_index = 0
         while True:
             frame = WAITING_FRAMES[frame_index % len(WAITING_FRAMES)]
+            status_line = self._status_line(frame)
+            padding = " " * max(0, self._rendered_width - len(status_line))
             try:
-                self._stream.write(f"\r{WAITING_MESSAGE} {frame}")
+                self._stream.write(f"\r{status_line}{padding}")
                 self._stream.flush()
             except (OSError, ValueError):
                 return
+            self._rendered_width = max(self._rendered_width, len(status_line))
             if self._stop_requested.wait(self._frame_seconds):
                 return
             frame_index += 1
 
+    def _status_line(self, frame: str) -> str:
+        now = self._clock()
+        with self._activity_lock:
+            last_activity_at = self._last_activity_at
+
+        elapsed_seconds = max(0.0, now - self._started_at)
+        inactivity_seconds = (
+            elapsed_seconds
+            if last_activity_at is None
+            else max(0.0, now - last_activity_at)
+        )
+        elapsed = _format_duration(elapsed_seconds)
+        inactivity = _format_duration(inactivity_seconds)
+
+        if inactivity_seconds >= self._stalled_after_seconds:
+            return (
+                f"[analysis] POSSIBLY STALLED [{frame}] elapsed {elapsed} | "
+                f"silent {inactivity} | Ctrl+C"
+            )
+        if last_activity_at is None:
+            return (
+                f"[analysis] Codex is working [{frame}] elapsed {elapsed} | "
+                "waiting for first event"
+            )
+        return (
+            f"[analysis] Codex is working [{frame}] elapsed {elapsed} | "
+            f"last event {inactivity} ago"
+        )
+
     def _clear(self) -> None:
         try:
-            self._stream.write(f"\r{' ' * (len(WAITING_MESSAGE) + 2)}\r")
+            self._stream.write(f"\r{' ' * self._rendered_width}\r")
             self._stream.flush()
         except (OSError, ValueError):
             pass
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    return f"{hours:02}:{minutes:02}:{remaining_seconds:02}"
 
 
 @dataclass
@@ -245,6 +301,7 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
     waiting_indicator.start()
     try:
         for line in process.stdout:
+            waiting_indicator.notify_activity()
             captured.append(line)
             rendered = _render_codex_stream_line(line) if json_mode else line
             if rendered:
@@ -393,7 +450,10 @@ def run_planning_chat(
             editor = LineEditor(on_paste_image=paste_hook)
 
         print(statusui.render_banner(Stage.ANALYSIS))
-        print("Describe the change. Type /help for commands; Alt+V pastes a screenshot.")
+        print(
+            "Describe the change. Type /status for the current phase, "
+            "/help for commands; Alt+V pastes a screenshot."
+        )
 
         if collect_initial_message:
             collected = _collect_initial_message(session, callbacks, editor, paste_hook)
@@ -459,13 +519,9 @@ def run_planning_chat(
                     returncode, output = _run_turn(session, turn_runner, message=text)
                 elif session.consecutive_failures >= 1:
                     # The previous resume turn failed. Rather than resuming the same
-                    # failing session again, start a fresh `codex exec` session whose
-                    # prompt carries a one-line continuation note; the repository files
-                    # hold the real context.
-                    continuation = (
-                        "Continuing an interrupted Dev Loop planning session; prior "
-                        f"context is in the repository files.\n\n{text}"
-                    )
+                    # failing session again, start a fresh `codex exec` session with
+                    # the complete planning contract plus the continuation message.
+                    continuation = build_recovery_prompt(initial_prompt, text)
                     returncode, output = _run_fresh_turn(session, turn_runner, continuation)
                 else:
                     returncode, output = _run_turn(session, turn_runner, message=text)
@@ -534,6 +590,18 @@ def append_initial_message(initial_prompt: str, message: str) -> str:
     return f"{initial_prompt.rstrip()}\n\nInitial user goal:\n{message}"
 
 
+def build_recovery_prompt(initial_prompt: str, message: str) -> str:
+    return (
+        f"{initial_prompt.rstrip()}\n\n"
+        "Recovery note:\n"
+        "Continuing an interrupted Dev Loop planning session because the previous "
+        "Codex session could not be resumed. The complete planning contract above "
+        "still applies: remain in analysis, create the PRD and issue pack, and do "
+        "not start implementation.\n\n"
+        f"Current user message:\n{message}"
+    )
+
+
 def _run_turn(
     session: ChatSession,
     turn_runner: TurnRunner,
@@ -542,7 +610,7 @@ def _run_turn(
     first_prompt: str | None = None,
 ) -> tuple[int, str]:
     command = session.build_turn_command(message, first_prompt=first_prompt)
-    print("\nSubmitted to Codex; waiting for the planning response...")
+    _print_planning_submission()
     returncode, output = turn_runner(command, session.config.repo_root)
     if returncode == 0 and session.session_id is None:
         session.session_id = parse_session_id(output)
@@ -561,12 +629,17 @@ def _run_fresh_turn(
     resume the new session.
     """
     command = session.build_turn_command("", first_prompt=prompt)
-    print("\nSubmitted to Codex; waiting for the planning response...")
+    _print_planning_submission()
     returncode, output = turn_runner(command, session.config.repo_root)
     if returncode == 0:
         session.session_id = parse_session_id(output)
         session.started = True
     return returncode, output
+
+
+def _print_planning_submission() -> None:
+    print(f"\n{PLANNING_STAGE_STATUS}")
+    print(PLANNING_SUBMISSION_STATUS)
 
 
 def _handle_command(
@@ -583,6 +656,7 @@ def _handle_command(
         return True, None, False
     if command == "/status":
         print(statusui.render_banner(Stage.ANALYSIS))
+        print(PLANNING_STAGE_STATUS)
         print(callbacks.status_summary())
         # Detection exits the chat loop the moment a probe succeeds, so mid-chat
         # the probe is always None here; report that honestly.

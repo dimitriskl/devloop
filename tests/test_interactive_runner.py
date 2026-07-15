@@ -50,6 +50,12 @@ class BuildPlanningPromptTests(unittest.TestCase):
     def test_includes_goal(self) -> None:
         self.assertIn("add login", self.make_prompt())
 
+    def test_settled_existing_analysis_advances_to_prd_and_issues(self) -> None:
+        prompt = self.make_prompt().lower()
+        self.assertIn("existing analysis is already settled", prompt)
+        self.assertIn("move directly to $to-prd and then $to-issues", prompt)
+        self.assertIn("do not repeat the interview", prompt)
+
 
 class BuildDevloopArgsTests(unittest.TestCase):
     def make_artifacts(self, root: Path) -> PlanningArtifacts:
