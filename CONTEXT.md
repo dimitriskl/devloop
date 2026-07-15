@@ -44,6 +44,14 @@ _Avoid_: Workflow Run, shared cross-step transcript
 A fresh Workflow Step attempt offered when an interrupted attempt's Execution Thread is unavailable, created from locked structured context without transcript replay.
 _Avoid_: Resumed thread, automatic retry
 
+**Step Attempt Record**:
+The immutable history entry for one execution of a Workflow Step, keyed by Step Instance ID and recording its Issue when applicable, pass, backend thread, Step Outcome, typed output Artifacts, and timing.
+_Avoid_: Component-wide result, fixed development/review/QA fields
+
+**Step Runtime State**:
+The resumable current state of one Workflow Step instance, keyed by Step Instance ID and also by Issue ID when the step is issue-scoped.
+_Avoid_: Analysis cursor, review cursor, component-specific top-level snapshot field
+
 **Context Manifest**:
 The persisted inventory of the exact instructions, capabilities, Artifacts, and repository scope supplied to an Execution Thread.
 _Avoid_: Prompt transcript, raw log bundle
@@ -53,8 +61,12 @@ A declarative description of a workflow's steps and its outcome-driven transitio
 _Avoid_: Pipeline file, step list
 
 **Workflow Step**:
-A named unit of work with declared inputs and outputs that produces one Step Outcome.
-_Avoid_: Phase, stage
+A distinct named instance of a Workflow Step Component within a Workflow Definition. It has its own identity, inputs, outputs, transitions, display name, and Codex Execution Settings.
+_Avoid_: Phase, stage, component class
+
+**Workflow Step Type**:
+The installed Workflow Step Component selected as the reusable class of a Workflow Step. Available types form an extensible catalog rather than a closed phase enum.
+_Avoid_: Step ID, display name, fixed analysis/development/review/QA enum
 
 **Issue**:
 A development work item produced by a Workflow Step and processed by later Workflow Steps.
@@ -172,6 +184,14 @@ _Avoid_: Latest installed version, implicit upgrade
 A stable, validated identifier that registers and resolves a Workflow Step Component. The set of IDs is open to installed extensions.
 _Avoid_: Step enum
 
+**Step Instance ID**:
+The stable canonical lowercase UUIDv4 assigned once when a Workflow Step is created and retained through rename, movement, type changes, export, and Run Snapshotting.
+_Avoid_: Step Component ID, display name, list position
+
+**Step Display Name**:
+The non-empty, user-editable name that identifies a Workflow Step in `/options`, transition selectors, and the dashboard; it is unique within its Workflow Definition.
+_Avoid_: Step Instance ID, component type
+
 **Step Contract**:
 The declaration of a Workflow Step's required inputs, produced outputs, and allowed Step Outcomes.
 _Avoid_: Step configuration, implicit convention
@@ -188,6 +208,10 @@ _Avoid_: Return dictionary, temporary result
 A validated connection from a Workflow Run input or upstream Output Port to a compatible downstream Input Port.
 _Avoid_: Shared context lookup, copied schema
 
+**Automatic Port Binding**:
+A Port Binding Dev Loop may create when exactly one compatible upstream source satisfies an Input Port; zero or multiple candidates require explicit user resolution.
+_Avoid_: Best guess, ambiguous connection
+
 **Data Contract ID**:
 A stable, versioned identifier for the shape and meaning of values carried through ports. The set is open to contracts registered by installed components.
 _Avoid_: Port type enum, unversioned type name
@@ -200,9 +224,29 @@ _Avoid_: Active prompt, selected capabilities
 The focused set of Skills and Agent References selected for one Workflow Step, initially supplied by the component and optionally overridden by the user.
 _Avoid_: Entire catalog, global prompt
 
+**Step Guidance**:
+The optional bounded user-authored instructions attached to one Workflow Step and supplied in every attempt's Context Manifest beneath the component contract and execution policy.
+_Avoid_: Component instructions, Skill, permission override
+
 **Step Execution Policy**:
 The component-declared execution permissions and mutation constraints enforced for a Workflow Step attempt.
 _Avoid_: Prompt-only instruction, user capability preference
+
+**Codex Execution Settings**:
+The authoritative Codex model, reasoning effort, and Fast service-tier preference selected independently for one agent-backed Workflow Step and used by every one of its attempts in a Workflow Run.
+_Avoid_: Strength, role model, global Codex default
+
+**Component Execution Defaults**:
+The Codex Execution Settings initially supplied by a Workflow Step Component when a new Workflow Step of that component is added.
+_Avoid_: Locked component settings, shared settings for every instance
+
+**Execution Budget**:
+The timeout and checkpoint limits governing a Workflow Step attempt independently of its Codex Execution Settings.
+_Avoid_: Model profile, reasoning-effort preset
+
+**Codex Model Catalog**:
+The live account-aware catalog exposed by the installed Codex backend that defines selectable models, supported reasoning efforts, and Fast availability.
+_Avoid_: Hard-coded model list, cached authorization
 
 **Required Capability**:
 A Skill or Agent Reference that a Workflow Step Component depends on and that cannot be removed from its Step Capability Profile.
@@ -212,9 +256,9 @@ _Avoid_: Default selection, hidden dependency
 A Skill or Agent Reference initially selected by a Workflow Step Component but replaceable or removable through `/options`.
 _Avoid_: Required dependency, entire catalog
 
-**User Capability Defaults**:
-The permanent user-wide Step Capability Profiles keyed by Step Component ID and applied across projects.
-_Avoid_: Run-only override, project workflow configuration
+**User Workflow Default**:
+The permanent user-wide editable Workflow Definition used as the starting template for future Workflow Runs across projects.
+_Avoid_: Active Run Snapshot, installed component manifest
 
 **User Configuration Directory**:
 The platform-native per-user location for permanent Dev Loop preferences, separate from project files and run data.
@@ -249,8 +293,16 @@ The reusable terminal layout that surrounds every Step View with workflow identi
 _Avoid_: Step-specific layout, duplicated screen chrome
 
 **Hybrid Console Dashboard**:
-The legacy runner presentation that combines one bounded live Current Issue and activity region separated only by width-aware horizontal rules. Each delivery Workflow Step shows a live or frozen elapsed duration; sequential Issues reuse the same terminal region and retain only one compact Last Result. It preserves the Composer, command surface, and durable file-based history without becoming a full-screen interface.
+The non-full-screen presentation of the shared Workflow Progress Dashboard, combining one bounded live Current Issue and activity region separated only by width-aware horizontal rules. It renders every relevant Workflow Step instance with live or frozen elapsed time, reuses the same terminal region across Issues, and preserves the Composer, command surface, and durable file-based history.
 _Avoid_: Vertical or corner borders, appended event spam, dashboard-only interface
+
+**Step Progress**:
+The GUID-keyed projection of one Workflow Step instance's display name, status, pass, accumulated duration, and active Codex settings for dashboard rendering.
+_Avoid_: Component-type status, hard-coded phase row
+
+**Workflow Progress Dashboard**:
+The shared dynamic projection of workflow-scoped and issue-scoped Step Progress used by the Textual shell, Hybrid Console Dashboard, PowerShell, Bash, and redirected output.
+_Avoid_: Fixed analysis/development/review/QA list, backend log
 
 **Step View**:
 The component-specific main presentation that receives a typed view model and emits typed user intents inside the Application Shell.
@@ -261,7 +313,7 @@ A reusable presentation component such as an Artifact Viewer, Issue Brief, Diff 
 _Avoid_: Workflow Step Component, duplicated widget group
 
 **Workflow Status Bar**:
-The fixed one-row shared projection of Workflow Run status, active Workflow Step, current Issue progress, attempt, backend activity, and elapsed time.
+The fixed one-row active-step summary within the Workflow Progress Dashboard, containing Workflow Run status, active Workflow Step, current Issue progress, attempt, backend activity, and elapsed time.
 _Avoid_: Component footer, free-form status message
 
 **Status Bar Model**:
@@ -313,7 +365,7 @@ A renewable ownership record used to distinguish a live Dev Loop process from an
 _Avoid_: Workflow lock, permanent process ID
 
 **Run Snapshot**:
-The current resumable state of a Workflow Run derived from its recorded changes.
+The current resumable state of a Workflow Run, including its immutable resolved Workflow Definition and per-step settings, derived from its recorded changes.
 _Avoid_: Event history, display cache
 
 **Durable Checkpoint**:
@@ -333,7 +385,7 @@ The lifecycle of an App Server tool operation: `PENDING`, `RUNNING`, `SUCCEEDED`
 _Avoid_: Step Run Status, command output string
 
 **Step Scope**:
-The level at which a Workflow Step runs: `WORKFLOW` once for the whole Workflow, or `ISSUE` once for each selected Issue.
+The level at which a Workflow Step runs, declared by its selected component's Step Contract: `WORKFLOW` once for the whole Workflow, or `ISSUE` once for each selected Issue.
 _Avoid_: Global flag, per-issue flag
 
 **Step Outcome**:
@@ -343,6 +395,14 @@ _Avoid_: Status string, result string
 **Transition**:
 A rule that maps a Step Outcome to another Workflow Step or to the end of the workflow.
 _Avoid_: Next step
+
+**Primary Path**:
+The ordered `/options` projection obtained by following `SUCCEEDED` Transitions through a Workflow Definition. Other Step Outcomes remain explicit branches of the underlying workflow graph.
+_Avoid_: Entire workflow graph, execution history
+
+**Primary Path Position**:
+The editable one-based position of a Workflow Step on the Primary Path; moving a step renumbers the path without gaps and never changes its Step Instance ID.
+_Avoid_: Step identity, component priority
 
 **Retry Policy**:
 The bounded rules that distinguish transient Execution Backend retries, requested-change cycles, and explicit user retries of blocked work.
