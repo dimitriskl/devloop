@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -225,6 +226,97 @@ class RunStreamingTests(unittest.TestCase):
 
         self.assertEqual(returncode, 0)
         self.assertEqual(stdout.getvalue(), "Planning response.\n")
+
+    def test_turn_completed_stops_reading_and_reaps_lingering_process(self) -> None:
+        class OpenAfterCompletion:
+            def __init__(self) -> None:
+                self._lines = iter(
+                    [
+                        (
+                            '{"type":"item.completed","item":'
+                            '{"type":"agent_message","text":"Plan complete."}}\n'
+                        ),
+                        '{"type":"turn.completed","usage":{}}\n',
+                    ]
+                )
+
+            def __iter__(self):
+                return self
+
+            def __next__(self) -> str:
+                try:
+                    return next(self._lines)
+                except StopIteration as error:
+                    raise AssertionError(
+                        "Devloop read past turn.completed and would wait for pipe EOF"
+                    ) from error
+
+        class LingeringProcess:
+            def __init__(self) -> None:
+                self.stdout = OpenAfterCompletion()
+                self.returncode = None
+                self.terminated = False
+
+            def wait(self, timeout=None):
+                if not self.terminated:
+                    if timeout is None:
+                        raise AssertionError("Devloop used an unbounded process wait")
+                    raise subprocess.TimeoutExpired(["codex"], timeout)
+                self.returncode = -15
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.terminated = True
+
+        process = LingeringProcess()
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(
+                 chat_loop,
+                 "resolve_codex_executable",
+                 return_value="codex",
+             ), \
+             mock.patch.object(
+                 chat_loop.subprocess,
+                 "Popen",
+                 return_value=process,
+             ), \
+             redirect_stdout(StringIO()) as stdout:
+            returncode, output = chat_loop.run_streaming(
+                ["codex", "exec", "--json", "PROMPT TEXT"], Path(raw)
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertTrue(process.terminated)
+        self.assertIn('"type":"turn.completed"', output)
+        self.assertEqual(stdout.getvalue(), "Plan complete.\n")
+
+    def test_turn_failed_is_terminal_and_returns_failure(self) -> None:
+        process = self.FakeProcess()
+        process.stdout = [
+            '{"type":"turn.failed","error":{"message":"Planning failed."}}\n'
+        ]
+        with tempfile.TemporaryDirectory() as raw, \
+             mock.patch.object(
+                 chat_loop,
+                 "resolve_codex_executable",
+                 return_value="codex",
+             ), \
+             mock.patch.object(
+                 chat_loop.subprocess,
+                 "Popen",
+                 return_value=process,
+             ), \
+             redirect_stdout(StringIO()) as stdout:
+            returncode, output = chat_loop.run_streaming(
+                ["codex", "exec", "--json", "PROMPT TEXT"], Path(raw)
+            )
+
+        self.assertEqual(returncode, 1)
+        self.assertIn('"type":"turn.failed"', output)
+        self.assertEqual(stdout.getvalue(), "ERROR: Planning failed.\n")
 
     def test_waiting_indicator_runs_between_visible_output(self) -> None:
         process = self.FakeProcess()

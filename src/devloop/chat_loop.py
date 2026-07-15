@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
 
@@ -56,10 +57,17 @@ CODEX_NOISE_LINES = {"--------", "user"}
 WAITING_FRAMES = ("|", "/", "-", "\\")
 WAITING_FRAME_SECONDS = 0.12
 WAITING_STALL_SECONDS = 120.0
+CODEX_EXIT_GRACE_SECONDS = 1.0
+CODEX_TERMINATE_GRACE_SECONDS = 5.0
 PLANNING_STAGE_STATUS = (
     "Pipeline: ANALYSIS active | PRD + ISSUES not detected | DEVELOPMENT waits"
 )
 PLANNING_SUBMISSION_STATUS = "Submitted to Codex; waiting for the planning response..."
+
+
+class CodexTurnOutcome(Enum):
+    COMPLETED = "turn.completed"
+    FAILED = "turn.failed"
 
 
 class WaitingIndicator:
@@ -299,6 +307,7 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
     assert process.stdout is not None
     waiting_indicator = WaitingIndicator()
     waiting_indicator.start()
+    turn_outcome: CodexTurnOutcome | None = None
     try:
         for line in process.stdout:
             waiting_indicator.notify_activity()
@@ -309,7 +318,14 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
                 sys.stdout.write(rendered)
                 sys.stdout.flush()
                 waiting_indicator.start()
-        process.wait()
+            if json_mode:
+                turn_outcome = _parse_codex_turn_outcome(line)
+                if turn_outcome is not None:
+                    break
+        if turn_outcome is None:
+            process.wait()
+        else:
+            _reap_process_after_terminal_event(process)
     except KeyboardInterrupt:
         # Do not let the child linger: terminate it, drain any buffered output,
         # then report the conventional 130 exit code with the partial output.
@@ -327,7 +343,53 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
         return 130, "".join(captured)
     finally:
         waiting_indicator.stop()
+    if turn_outcome is CodexTurnOutcome.COMPLETED:
+        return 0, "".join(captured)
+    if turn_outcome is CodexTurnOutcome.FAILED:
+        returncode = process.returncode
+        if isinstance(returncode, int) and returncode != 0:
+            return returncode, "".join(captured)
+        return 1, "".join(captured)
     return process.returncode, "".join(captured)
+
+
+def _parse_codex_turn_outcome(line: str) -> CodexTurnOutcome | None:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    event_type = payload.get("type")
+    if not isinstance(event_type, str):
+        return None
+    try:
+        return CodexTurnOutcome(event_type)
+    except ValueError:
+        return None
+
+
+def _reap_process_after_terminal_event(process: subprocess.Popen[str]) -> None:
+    try:
+        process.wait(timeout=CODEX_EXIT_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    process.terminate()
+    try:
+        process.wait(timeout=CODEX_TERMINATE_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    process.kill()
+    try:
+        process.wait(timeout=CODEX_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # The protocol turn is already terminal. Never hold the Dev Loop handoff
+        # indefinitely because an OS process refuses to be reaped.
+        pass
 
 
 def _render_codex_stream_line(line: str) -> str | None:
