@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import unittest
 from unittest import mock
 
 from devloop import statusui
 from devloop.statusui import Stage
+from devloop.terminal_editor import display_width
 
 
 class FakeStream(io.StringIO):
@@ -68,6 +70,170 @@ class RenderBannerTests(unittest.TestCase):
         self.assertNotIn("\x1b[", plain)
 
 
+class IssueDashboardRenderingTests(unittest.TestCase):
+    def test_narrow_dashboard_has_only_horizontal_rules_and_semantic_colors(self) -> None:
+        snapshot = statusui.IssueDashboardSnapshot(
+            issue_number="0002",
+            issue_title=(
+                "Publish a validated sample Level Catalog with a deliberately "
+                "long title 中文"
+            ),
+            position=2,
+            total=26,
+            pass_number=1,
+            active_stage=Stage.REVIEW,
+            statuses={
+                Stage.DEVELOPMENT: statusui.DashboardStatus.PASS,
+                Stage.REVIEW: statusui.DashboardStatus.WORKING,
+                Stage.QA: statusui.DashboardStatus.FAIL,
+            },
+            stage_durations={
+                Stage.DEVELOPMENT: 125,
+                Stage.QA: 7,
+            },
+            elapsed_seconds=42,
+            inactivity_seconds=2,
+            activity=(
+                "Checking catalog validation and malformed input cases with "
+                "a deliberately long activity message."
+            ),
+        )
+
+        rendered = statusui.render_issue_dashboard(
+            snapshot,
+            width=39,
+            color=True,
+            unicode=True,
+            frame="⠋",
+        )
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", rendered)
+
+        self.assertTrue(
+            all(display_width(line) <= 39 for line in plain.splitlines())
+        )
+        self.assertFalse(set("│╭╮╰╯┌┐└┘").intersection(plain))
+        self.assertIn("─", plain)
+        self.assertIn("\x1b[1;32mPASS", rendered)
+        self.assertIn("\x1b[1;31mFAIL", rendered)
+        self.assertIn("\x1b[1;33mWORKING", rendered)
+
+    def test_completed_step_duration_stays_visible_while_next_step_counts(self) -> None:
+        snapshot = statusui.IssueDashboardSnapshot(
+            issue_number="0002",
+            issue_title="Publish a validated sample Level Catalog",
+            position=2,
+            total=26,
+            pass_number=1,
+            active_stage=Stage.REVIEW,
+            statuses={
+                Stage.DEVELOPMENT: statusui.DashboardStatus.PASS,
+                Stage.REVIEW: statusui.DashboardStatus.WORKING,
+                Stage.QA: statusui.DashboardStatus.WAITING,
+            },
+            stage_durations={Stage.DEVELOPMENT: 125},
+            elapsed_seconds=42,
+        )
+
+        rendered = statusui.render_issue_dashboard(
+            snapshot,
+            width=79,
+            color=False,
+            unicode=True,
+            frame="⠋",
+        )
+
+        self.assertIn("PASS      DEVELOPMENT · pass 1 · 00:02:05", rendered)
+        self.assertIn("WORKING   REVIEW      · pass 1 · 00:00:42", rendered)
+        self.assertIn("WAITING   QA          · pass 1 · 00:00:00", rendered)
+
+    def test_dashboard_freezes_each_step_clock_on_transition(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = Clock()
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0002",
+            issue_title="Publish a validated sample Level Catalog",
+            position=2,
+            total=26,
+            stream=output,
+            clock=clock,
+            frame_seconds=60,
+            terminal_size=lambda **_: os.terminal_size((100, 24)),
+        )
+
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        clock.value = 12
+        dashboard.finish_role(Stage.DEVELOPMENT, "PASS")
+        dashboard.begin_role(Stage.REVIEW, 1)
+        clock.value = 20
+        dashboard.finish_role(Stage.REVIEW, "PASS")
+        dashboard.begin_role(Stage.QA, 1)
+        clock.value = 23
+        dashboard.notify_activity("Running acceptance checks.")
+        clock.value = 25
+        dashboard.finish_role(Stage.QA, "FAIL")
+        dashboard.begin_role(Stage.DEVELOPMENT, 2)
+        clock.value = 30
+        dashboard.notify_activity("Applying review and QA fixes.")
+        dashboard.close()
+
+        rendered = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.getvalue())
+        self.assertIn("PASS      DEVELOPMENT · pass 1 · 00:00:12", rendered)
+        self.assertIn("PASS      REVIEW      · pass 1 · 00:00:08", rendered)
+        self.assertIn("WORKING   QA          · pass 1 · 00:00:03", rendered)
+        self.assertIn("WORKING   DEVELOPMENT · pass 2 · 00:00:17", rendered)
+        self.assertIn("WAITING   REVIEW      · pass 2 · 00:00:08", rendered)
+        self.assertIn("WAITING   QA          · pass 2 · 00:00:05", rendered)
+
+    def test_next_issue_reuses_card_region_and_shows_only_last_result(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = Clock()
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0002",
+            issue_title="Publish a validated sample Level Catalog",
+            position=2,
+            total=26,
+            stream=output,
+            clock=clock,
+            frame_seconds=60,
+            terminal_size=lambda **_: os.terminal_size((100, 24)),
+        )
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        clock.value = 5
+        dashboard.finish_role(Stage.DEVELOPMENT, "PASS")
+        dashboard.finish_issue("PASS", "Issue completed.")
+        transition_start = len(output.getvalue())
+
+        dashboard.show_issue(
+            issue_number="0003",
+            issue_title="Add durable local save data",
+            position=3,
+            total=26,
+        )
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        dashboard.close()
+
+        transition = output.getvalue()[transition_start:]
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transition)
+        self.assertIn("\x1b[10A", transition)
+        self.assertIn(
+            "LAST RESULT · 0002 · PASS · pass 1 · total 00:00:05",
+            plain,
+        )
+        self.assertIn("CURRENT ISSUE · 0003 · 3/26 · 23 remaining", plain)
+
+
 class StagePromptTests(unittest.TestCase):
     def test_prompt_names_stage(self) -> None:
         self.assertEqual(statusui.stage_prompt(Stage.ANALYSIS), "[analysis] > ")
@@ -96,7 +262,7 @@ class WaitingIndicatorTests(unittest.TestCase):
 
         self.assertIn("[review]", line)
         self.assertIn("0001 1/26 +25 p1", line)
-        self.assertIn("working [/] 00:00:15", line)
+        self.assertIn("WORKING [/] 00:00:15", line)
         self.assertIn("evt 00:00:03 ago", line)
         self.assertLessEqual(len(line), 79)
 

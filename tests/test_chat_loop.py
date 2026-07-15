@@ -380,8 +380,8 @@ class RunStreamingTests(unittest.TestCase):
         indicator._animate()
 
         rendered = output.getvalue()
-        self.assertIn("Codex is working [|]", rendered)
-        self.assertIn("Codex is working [/]", rendered)
+        self.assertIn("Codex is WORKING [|]", rendered)
+        self.assertIn("Codex is WORKING [/]", rendered)
 
     def test_waiting_indicator_reports_stage_elapsed_activity_and_stall(self) -> None:
         class InteractiveOutput(StringIO):

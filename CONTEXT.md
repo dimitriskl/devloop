@@ -248,6 +248,10 @@ _Avoid_: Agent completion, implicit approval
 The reusable terminal layout that surrounds every Step View with workflow identity, navigation, Issue state, output, the Composer, and current status.
 _Avoid_: Step-specific layout, duplicated screen chrome
 
+**Hybrid Console Dashboard**:
+The legacy runner presentation that combines one bounded live Current Issue and activity region separated only by width-aware horizontal rules. Each delivery Workflow Step shows a live or frozen elapsed duration; sequential Issues reuse the same terminal region and retain only one compact Last Result. It preserves the Composer, command surface, and durable file-based history without becoming a full-screen interface.
+_Avoid_: Vertical or corner borders, appended event spam, dashboard-only interface
+
 **Step View**:
 The component-specific main presentation that receives a typed view model and emits typed user intents inside the Application Shell.
 _Avoid_: Workflow runner, Textual domain model

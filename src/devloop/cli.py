@@ -131,6 +131,16 @@ def main(argv: list[str] | None = None) -> int:
 
     overall_status = 0
     blocked_issues: dict[str, Issue] = {}
+    delivery_dashboard = (
+        None
+        if args.dry_run
+        else statusui.IssueDashboard(
+            issue_number=issues[0].number,
+            issue_title=issues[0].title,
+            position=1,
+            total=len(issues),
+        )
+    )
     for position, issue in enumerate(issues, start=1):
         issue_result = run_issue(
             issue=issue,
@@ -143,6 +153,9 @@ def main(argv: list[str] | None = None) -> int:
                 len(issues),
                 issue.number,
             ),
+            dashboard_position=position,
+            dashboard_total=len(issues),
+            dashboard=delivery_dashboard,
         )
 
         if issue_result.status in {"BLOCKED", "FAIL"}:
@@ -152,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
                 break
         else:
             blocked_issues.pop(issue.number, None)
+
+    if delivery_dashboard is not None:
+        delivery_dashboard.close()
 
     if (
         blocked_issues
@@ -274,6 +290,9 @@ def run_issue(
     *,
     progress: str = "",
     activity_progress: str = "",
+    dashboard_position: int = 1,
+    dashboard_total: int = 1,
+    dashboard: statusui.IssueDashboard | None = None,
 ) -> RoleResult:
     resume_cursor = IssueResumeCursor()
     fix_list = list(initial_fix_list or [])
@@ -287,20 +306,47 @@ def run_issue(
 
     state_writer.record_issue_start(issue, attempt_label=attempt_label, retry_round=retry_round)
     title = f"{issue.title} ({attempt_label})" if attempt_label else issue.title
-    print(f"\n[{issue.number}] {title}")
 
     if runner.dry_run:
+        print(f"\n[{issue.number}] {title}")
         runner.render_dry_run_prompts(issue)
         state_writer.record_issue_dry_run(issue)
         print(f"[{issue.number}] Dry run prompts rendered.")
         return RoleResult(status="PASS", summary="Dry run prompts rendered.")
+
+    owns_dashboard = dashboard is None
+    if dashboard is None:
+        dashboard = statusui.IssueDashboard(
+            issue_number=issue.number,
+            issue_title=title,
+            position=dashboard_position,
+            total=dashboard_total,
+        )
+    dashboard.show_issue(
+        issue_number=issue.number,
+        issue_title=title,
+        position=dashboard_position,
+        total=dashboard_total,
+    )
+    if last_coder is not None:
+        dashboard.restore_role(Stage.DEVELOPMENT, last_coder.status)
+    if last_review is not None:
+        dashboard.restore_role(Stage.REVIEW, last_review.status)
+    if last_qa is not None:
+        dashboard.restore_role(Stage.QA, last_qa.status)
+    if not dashboard.enabled:
+        print(f"\n[{issue.number}] {title}")
 
     if resume_cursor.next_role == ResumeRole.COMPLETE:
         if last_coder is None or last_review is None or last_qa is None:
             raise RuntimeError(f"Issue {issue.number} cannot resume completion without all gate results.")
         mark_issue_completed(issue.path, last_coder, last_review, last_qa)
         state_writer.record_issue_completed(issue, last_coder, last_review, last_qa)
-        print(f"[{issue.number}] Completed from the persisted QA result.")
+        dashboard.finish_issue("PASS", "Completed from the persisted QA result.")
+        if owns_dashboard:
+            dashboard.close()
+        if not dashboard.enabled:
+            print(f"[{issue.number}] Completed from the persisted QA result.")
         return RoleResult(status="PASS", summary=f"Issue {issue.number} completed.")
 
     for pass_number in range(start_pass, max_passes + 1):
@@ -309,16 +355,29 @@ def run_issue(
         next_role = resume_cursor.next_role if pass_number == start_pass else ResumeRole.CODER
 
         if next_role == ResumeRole.CODER:
-            print(statusui.render_banner(Stage.DEVELOPMENT, context))
-            print(f"[{issue.number}] Pass {pass_number}: coder")
-            last_coder = runner.run_role(
-                role="coder",
-                issue=issue,
-                pass_number=pass_number,
-                fix_list=fix_list,
-                attempt_label=attempt_label,
-                progress=role_progress,
+            begin_role_output(
+                dashboard,
+                Stage.DEVELOPMENT,
+                context,
+                issue.number,
+                pass_number,
+                "coder",
             )
+            try:
+                last_coder = runner.run_role(
+                    role="coder",
+                    issue=issue,
+                    pass_number=pass_number,
+                    fix_list=fix_list,
+                    attempt_label=attempt_label,
+                    progress=role_progress,
+                    activity_callback=(
+                        dashboard.notify_activity if dashboard.enabled else None
+                    ),
+                )
+            except BaseException:
+                dashboard.close("Development interrupted.")
+                raise
             state_writer.record_role_result(
                 issue,
                 "coder",
@@ -327,7 +386,13 @@ def run_issue(
                 attempt_label=attempt_label,
                 retry_round=retry_round,
             )
-            report_role_result(issue.number, "coder", last_coder)
+            finish_role_output(
+                dashboard,
+                Stage.DEVELOPMENT,
+                issue.number,
+                "coder",
+                last_coder,
+            )
 
             if last_coder.status != "PASS":
                 state_writer.record_issue_blocked(
@@ -337,22 +402,38 @@ def run_issue(
                     attempt_label=attempt_label,
                     retry_round=retry_round,
                 )
+                dashboard.finish_issue(last_coder.status, last_coder.summary)
+                if owns_dashboard:
+                    dashboard.close()
                 return last_coder
 
         if last_coder is None:
             raise RuntimeError(f"Issue {issue.number} cannot resume review without a coder result.")
 
         if next_role in {ResumeRole.CODER, ResumeRole.REVIEWER}:
-            print(statusui.render_banner(Stage.REVIEW, context))
-            print(f"[{issue.number}] Pass {pass_number}: reviewer")
-            last_review = runner.run_role(
-                role="reviewer",
-                issue=issue,
-                pass_number=pass_number,
-                coder_result=last_coder,
-                attempt_label=attempt_label,
-                progress=role_progress,
+            begin_role_output(
+                dashboard,
+                Stage.REVIEW,
+                context,
+                issue.number,
+                pass_number,
+                "reviewer",
             )
+            try:
+                last_review = runner.run_role(
+                    role="reviewer",
+                    issue=issue,
+                    pass_number=pass_number,
+                    coder_result=last_coder,
+                    attempt_label=attempt_label,
+                    progress=role_progress,
+                    activity_callback=(
+                        dashboard.notify_activity if dashboard.enabled else None
+                    ),
+                )
+            except BaseException:
+                dashboard.close("Review interrupted.")
+                raise
             state_writer.record_role_result(
                 issue,
                 "reviewer",
@@ -361,7 +442,13 @@ def run_issue(
                 attempt_label=attempt_label,
                 retry_round=retry_round,
             )
-            report_role_result(issue.number, "reviewer", last_review)
+            finish_role_output(
+                dashboard,
+                Stage.REVIEW,
+                issue.number,
+                "reviewer",
+                last_review,
+            )
 
             if last_review.status != "PASS":
                 fix_list = last_review.fix_list or last_review.findings
@@ -370,17 +457,30 @@ def run_issue(
         if last_review is None:
             raise RuntimeError(f"Issue {issue.number} cannot resume QA without a reviewer result.")
 
-        print(statusui.render_banner(Stage.QA, context))
-        print(f"[{issue.number}] Pass {pass_number}: qa")
-        last_qa = runner.run_role(
-            role="qa",
-            issue=issue,
-            pass_number=pass_number,
-            coder_result=last_coder,
-            review_result=last_review,
-            attempt_label=attempt_label,
-            progress=role_progress,
+        begin_role_output(
+            dashboard,
+            Stage.QA,
+            context,
+            issue.number,
+            pass_number,
+            "qa",
         )
+        try:
+            last_qa = runner.run_role(
+                role="qa",
+                issue=issue,
+                pass_number=pass_number,
+                coder_result=last_coder,
+                review_result=last_review,
+                attempt_label=attempt_label,
+                progress=role_progress,
+                activity_callback=(
+                    dashboard.notify_activity if dashboard.enabled else None
+                ),
+            )
+        except BaseException:
+            dashboard.close("QA interrupted.")
+            raise
         state_writer.record_role_result(
             issue,
             "qa",
@@ -389,7 +489,13 @@ def run_issue(
             attempt_label=attempt_label,
             retry_round=retry_round,
         )
-        report_role_result(issue.number, "qa", last_qa)
+        finish_role_output(
+            dashboard,
+            Stage.QA,
+            issue.number,
+            "qa",
+            last_qa,
+        )
 
         if last_qa.status != "PASS":
             fix_list = last_qa.fix_list or last_qa.findings
@@ -404,7 +510,11 @@ def run_issue(
             attempt_label=attempt_label,
             retry_round=retry_round,
         )
-        print(f"[{issue.number}] Completed.")
+        dashboard.finish_issue("PASS", "Issue completed.")
+        if owns_dashboard:
+            dashboard.close()
+        if not dashboard.enabled:
+            print(f"[{issue.number}] Completed.")
         return RoleResult(status="PASS", summary=f"Issue {issue.number} completed.")
 
     blocked_summary = f"Issue {issue.number} reached max passes ({max_passes})."
@@ -422,7 +532,11 @@ def run_issue(
         attempt_label=attempt_label,
         retry_round=retry_round,
     )
-    report_role_result(issue.number, "max-passes", blocked)
+    dashboard.finish_issue(blocked.status, blocked.summary)
+    if owns_dashboard:
+        dashboard.close()
+    if not dashboard.enabled:
+        report_role_result(issue.number, "max-passes", blocked)
     return blocked
 
 
@@ -447,6 +561,12 @@ def retry_blocked_issues(
         )
 
         next_remaining: list[Issue] = []
+        retry_dashboard = statusui.IssueDashboard(
+            issue_number=remaining[0].number,
+            issue_title=remaining[0].title,
+            position=1,
+            total=len(remaining),
+        )
         for position, issue in enumerate(remaining, start=1):
             attempt_label = f"clean-retry-{retry_round}"
             retry_fix_list = build_clean_retry_fix_list(state_writer, issue, retry_round)
@@ -466,9 +586,14 @@ def retry_blocked_issues(
                     f"r{retry_round} "
                     f"{issue_activity_label(position, len(remaining), issue.number)}"
                 ),
+                dashboard_position=position,
+                dashboard_total=len(remaining),
+                dashboard=retry_dashboard,
             )
             if issue_result.status in {"BLOCKED", "FAIL"}:
                 next_remaining.append(issue)
+
+        retry_dashboard.close()
 
         remaining = next_remaining
 
@@ -553,15 +678,45 @@ def compact_line(value: Any, max_length: int = 300) -> str:
     return f"{text[: max_length - 3]}..."
 
 
+def begin_role_output(
+    dashboard: statusui.IssueDashboard,
+    stage: Stage,
+    context: str,
+    issue_number: str,
+    pass_number: int,
+    role: str,
+) -> None:
+    if dashboard.enabled:
+        dashboard.begin_role(stage, pass_number)
+        return
+    print(statusui.render_banner(stage, context))
+    print(f"[{issue_number}] Pass {pass_number}: {role}")
+
+
+def finish_role_output(
+    dashboard: statusui.IssueDashboard,
+    stage: Stage,
+    issue_number: str,
+    role: str,
+    result: RoleResult,
+) -> None:
+    if dashboard.enabled:
+        dashboard.finish_role(stage, result.status, result.summary)
+        return
+    report_role_result(issue_number, role, result)
+
+
 def report_role_result(issue_number: str, role: str, result: RoleResult) -> None:
     if result.status == "PASS":
+        rendered_status = statusui.render_status(result.status, sys.stdout)
         if result.summary:
-            print(f"[{issue_number}] {role}: PASS - {result.summary}")
+            print(f"[{issue_number}] {role}: {rendered_status} - {result.summary}")
         else:
-            print(f"[{issue_number}] {role}: PASS")
+            print(f"[{issue_number}] {role}: {rendered_status}")
         return
 
-    message = f"[{issue_number}] {role}: {result.status}"
+    rendered_status = statusui.render_status(result.status, sys.stderr)
+    message = f"[{issue_number}] {role}: {rendered_status}"
     if result.summary:
         message = f"{message} - {result.summary}"
     print(message, file=sys.stderr)

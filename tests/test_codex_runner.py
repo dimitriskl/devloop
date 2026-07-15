@@ -149,6 +149,51 @@ class StreamingCodexRunnerTests(unittest.TestCase):
         self.assertIn("[development] Running a repository command.", rendered)
         self.assertNotIn("secret command", rendered)
 
+    def test_live_dashboard_callback_receives_activity_without_printing_log_lines(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = StringIO()
+                self.stdout = iter(
+                    [
+                        (
+                            '{"type":"item.completed","item":'
+                            '{"type":"agent_message",'
+                            '"text":"Checking the catalog."}}\n'
+                        ),
+                        '{"type":"turn.completed","usage":{}}\n',
+                    ]
+                )
+                self.stderr: list[str] = []
+                self.returncode: int | None = None
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = -15
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        activities: list[str | None] = []
+        with mock.patch.object(
+            codex_runner.subprocess,
+            "Popen",
+            return_value=FakeProcess(),
+        ), redirect_stdout(StringIO()) as stdout:
+            result = codex_runner.run_streaming_codex_command(
+                ["codex", "exec", "--json", "-"],
+                input_text="Implement the issue.",
+                cwd=Path("/tmp/repository"),
+                stage=Stage.REVIEW,
+                activity_callback=activities.append,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Codex update: Checking the catalog.", activities)
+        self.assertEqual(stdout.getvalue(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

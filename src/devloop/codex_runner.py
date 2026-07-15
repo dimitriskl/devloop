@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 
 from .codex_events import (
     CodexTurnOutcome,
@@ -42,6 +42,7 @@ DEVLOOP_RUN_GOAL = (
     "All selected issues from the issue pack must be developed, reviewed, "
     "and tested so the finished product has as few bugs and deficiencies as practical."
 )
+ActivityCallback = Callable[[str | None], None]
 
 
 def resolve_codex_executable(codex: str) -> str:
@@ -137,6 +138,7 @@ def run_streaming_codex_command(
     cwd: Path,
     stage: Stage,
     activity_context: str = "",
+    activity_callback: ActivityCallback | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -155,7 +157,18 @@ def run_streaming_codex_command(
 
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
-    indicator = WaitingIndicator(stage=stage, context=activity_context)
+    indicator = (
+        WaitingIndicator(stage=stage, context=activity_context)
+        if activity_callback is None
+        else None
+    )
+    if activity_callback is not None:
+        stderr_activity_callback = activity_callback
+    else:
+        assert indicator is not None
+
+        def stderr_activity_callback(_activity: str | None) -> None:
+            indicator.notify_activity()
     input_thread = threading.Thread(
         target=_write_process_input,
         args=(process.stdin, input_text),
@@ -163,21 +176,29 @@ def run_streaming_codex_command(
     )
     stderr_thread = threading.Thread(
         target=_drain_process_stream,
-        args=(process.stderr, stderr_parts, indicator),
+        args=(
+            process.stderr,
+            stderr_parts,
+            stderr_activity_callback,
+        ),
         daemon=True,
     )
     turn_outcome: CodexTurnOutcome | None = None
 
-    indicator.start()
+    if indicator is not None:
+        indicator.start()
     input_thread.start()
     stderr_thread.start()
     try:
         for line in process.stdout:
-            indicator.notify_activity()
             stdout_parts.append(line)
             event = parse_codex_event(line)
             activity = render_safe_codex_activity(event)
-            if activity:
+            if activity_callback is not None:
+                activity_callback(activity)
+            elif indicator is not None:
+                indicator.notify_activity()
+            if activity and indicator is not None:
                 indicator.stop()
                 _print_codex_activity(stage, activity_context, activity)
                 indicator.start()
@@ -194,7 +215,8 @@ def run_streaming_codex_command(
         terminate_process(process)
         raise
     finally:
-        indicator.stop()
+        if indicator is not None:
+            indicator.stop()
         input_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
         stderr_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
 
@@ -222,12 +244,12 @@ def _write_process_input(stream: TextIO, input_text: str) -> None:
 def _drain_process_stream(
     stream: TextIO,
     captured: list[str],
-    indicator: WaitingIndicator,
+    notify_activity: ActivityCallback,
 ) -> None:
     try:
         for line in stream:
             captured.append(line)
-            indicator.notify_activity()
+            notify_activity(None)
     except (OSError, ValueError):
         pass
 
@@ -336,6 +358,7 @@ class CodexRunner:
         review_result: RoleResult | None = None,
         attempt_label: str | None = None,
         progress: str = "",
+        activity_callback: ActivityCallback | None = None,
     ) -> RoleResult:
         prompt = self.build_prompt(
             role=role,
@@ -378,6 +401,7 @@ class CodexRunner:
                 progress=progress,
                 pass_number=pass_number,
             ),
+            activity_callback=activity_callback,
         )
         self.write_log_text(stdout_path, result.stdout)
         self.write_log_text(stderr_path, result.stderr)
@@ -400,6 +424,7 @@ class CodexRunner:
         stderr_path: Path,
         stage: Stage = Stage.DEVELOPMENT,
         activity_context: str = "",
+        activity_callback: ActivityCallback | None = None,
     ) -> subprocess.CompletedProcess[str]:
         attempt = 1
         stdout_parts: list[str] = []
@@ -412,6 +437,7 @@ class CodexRunner:
                 cwd=self.repo_root,
                 stage=stage,
                 activity_context=activity_context,
+                activity_callback=activity_callback,
             )
             current_stdout = output_text(result.stdout)
             current_stderr = output_text(result.stderr)
@@ -427,7 +453,10 @@ class CodexRunner:
                 f"codex exec connection failed on attempt {attempt}; "
                 f"retrying in {CODEX_CONNECTION_RETRY_DELAY_SECONDS} seconds.\n"
             )
-            print(retry_message.strip())
+            if activity_callback is None:
+                print(retry_message.strip())
+            else:
+                activity_callback(retry_message.strip())
             stderr_parts.append(retry_message)
             result.stderr = "".join(stderr_parts)
             self.write_log_text(stdout_path, result.stdout)
