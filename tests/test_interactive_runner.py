@@ -222,6 +222,90 @@ class WorktreePromptTests(unittest.TestCase):
         run_git.assert_called_once_with(command[1:], cwd=root)
 
 
+class BranchStrategyTests(unittest.TestCase):
+    def test_existing_current_branch_is_reused(self) -> None:
+        repo_root = Path("C:/repo")
+        with mock.patch.object(
+            interactive_runner,
+            "current_branch",
+            return_value="Basic-analysis",
+        ), mock.patch.object(
+            interactive_runner,
+            "ask_choice",
+            return_value="2",
+        ), mock.patch.object(
+            interactive_runner,
+            "ask_branch_name",
+            return_value="Basic-analysis",
+        ), mock.patch.object(
+            interactive_runner,
+            "run_git",
+        ) as run_git, redirect_stdout(StringIO()) as output:
+            result = interactive_runner.apply_branch_strategy(repo_root)
+
+        self.assertEqual(result, repo_root)
+        run_git.assert_not_called()
+        self.assertIn("Using existing branch: Basic-analysis", output.getvalue())
+
+    def test_existing_other_branch_is_checked_out_without_create_flag(self) -> None:
+        repo_root = Path("C:/repo")
+        with mock.patch.object(
+            interactive_runner,
+            "current_branch",
+            return_value="main",
+        ), mock.patch.object(
+            interactive_runner,
+            "ask_choice",
+            return_value="2",
+        ), mock.patch.object(
+            interactive_runner,
+            "ask_branch_name",
+            return_value="Basic-analysis",
+        ), mock.patch.object(
+            interactive_runner,
+            "branch_exists",
+            return_value=True,
+        ), mock.patch.object(
+            interactive_runner,
+            "run_git",
+        ) as run_git, redirect_stdout(StringIO()) as output:
+            result = interactive_runner.apply_branch_strategy(repo_root)
+
+        self.assertEqual(result, repo_root)
+        run_git.assert_called_once_with(["checkout", "Basic-analysis"], cwd=repo_root)
+        self.assertIn("Using existing branch: Basic-analysis", output.getvalue())
+
+    def test_missing_branch_is_created(self) -> None:
+        repo_root = Path("C:/repo")
+        with mock.patch.object(
+            interactive_runner,
+            "current_branch",
+            return_value="main",
+        ), mock.patch.object(
+            interactive_runner,
+            "ask_choice",
+            return_value="2",
+        ), mock.patch.object(
+            interactive_runner,
+            "ask_branch_name",
+            return_value="New-analysis",
+        ), mock.patch.object(
+            interactive_runner,
+            "branch_exists",
+            return_value=False,
+        ), mock.patch.object(
+            interactive_runner,
+            "run_git",
+        ) as run_git:
+            result = interactive_runner.apply_branch_strategy(repo_root)
+
+        self.assertEqual(result, repo_root)
+        run_git.assert_called_once_with(
+            ["checkout", "-b", "New-analysis"],
+            cwd=repo_root,
+        )
+
+
 class PlanStateTests(unittest.TestCase):
     def test_save_last_target_repo_preserves_selection_and_worktree_parent(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

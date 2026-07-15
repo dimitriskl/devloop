@@ -20,7 +20,11 @@ from .lineeditor import LineEditor
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage
 from .templates import BundleContext
-from .worktree import build_worktree_add_command, resolve_existing_worktree
+from .worktree import (
+    branch_exists,
+    build_worktree_add_command,
+    resolve_existing_worktree,
+)
 
 PLAN_STATE_FILE = "devloop-plan.json"
 TARGET_REPO_STATE_KEY = "target_repo"
@@ -524,7 +528,7 @@ def apply_branch_strategy(repo_root: Path) -> Path:
     print()
     print("Where should the planning artifacts be created?")
     print("  1. Current branch")
-    print("  2. New branch in this checkout")
+    print("  2. Branch in this checkout (create or reuse)")
     print("  3. New worktree")
 
     choice = ask_choice("Select 1, 2, or 3", {"1", "2", "3"}, default="1")
@@ -532,7 +536,14 @@ def apply_branch_strategy(repo_root: Path) -> Path:
         return repo_root
 
     if choice == "2":
-        branch_name = ask_branch_name("New branch name")
+        branch_name = ask_branch_name("Branch name")
+        if branch_name == branch:
+            print(f"Using existing branch: {branch_name}")
+            return repo_root
+        if branch_exists(repo_root, branch_name):
+            print(f"Using existing branch: {branch_name}")
+            run_git(["checkout", branch_name], cwd=repo_root)
+            return repo_root
         run_git(["checkout", "-b", branch_name], cwd=repo_root)
         return repo_root
 
