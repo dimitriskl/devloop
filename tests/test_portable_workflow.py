@@ -397,6 +397,26 @@ class PortableWorkflowDefinitionTests(unittest.TestCase):
             for fragment in secret_fragments:
                 self.assertNotIn(fragment, persisted)
 
+    def test_concatenated_quoted_secret_cannot_reach_configuration_or_context(
+        self,
+    ) -> None:
+        secret_fragments = (
+            "concat-secret-alpha",
+            "concat-secret-omega",
+        )
+        persisted_surfaces = _persist_guidance_surfaces(
+            "Inspect login handling.\n"
+            'password: "concat-secret-alpha" + "concat-secret-omega"\n'
+            "Keep this safe instruction.",
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect login handling.", persisted)
+            self.assertIn("Keep this safe instruction.", persisted)
+            self.assertIn("[redacted]", persisted)
+            for fragment in secret_fragments:
+                self.assertNotIn(fragment, persisted)
+
     def test_unterminated_quoted_secret_cannot_reach_persisted_configuration_or_context(
         self,
     ) -> None:

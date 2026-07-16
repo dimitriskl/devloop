@@ -23,18 +23,39 @@ Covers parent PRD user stories 26-39.
 
 ## Acceptance criteria
 
-- [ ] Every supported outcome can target an existing step, a newly created step, an inserted step, or an explicit terminal.
-- [ ] The editor supports loops and branch-local ordering without assigning misleading global positions to branch-only steps.
-- [ ] A live graph preview updates as structured transition controls change.
-- [ ] All graph operations are fully keyboard accessible.
-- [ ] Advanced Port Bindings shows typed requirements, compatible producers, current bindings, and validation errors.
-- [ ] Exactly one compatible producer may auto-bind; ambiguous producers require an explicit user choice.
-- [ ] Apply is blocked when there is no valid start, no successful terminal path, an unreachable required step, an unsupported outcome, an invalid scope relationship, or a missing/incompatible binding.
-- [ ] Validation errors identify the affected Step Instance and the transition or port that needs repair.
-- [ ] Automated tests execute a successful branch and a changes-requested loop configured through the editor.
-- [ ] Tests use the portable issue runner and fake editor; CodexCLI workflow/UI modules are untouched.
+- [x] Every supported outcome can target an existing step, a newly created step, an inserted step, or an explicit terminal.
+- [x] The editor supports loops and branch-local ordering without assigning misleading global positions to branch-only steps.
+- [x] A live graph preview updates as structured transition controls change.
+- [x] All graph operations are fully keyboard accessible.
+- [x] Advanced Port Bindings shows typed requirements, compatible producers, current bindings, and validation errors.
+- [x] Exactly one compatible producer may auto-bind; ambiguous producers require an explicit user choice.
+- [x] Apply is blocked when there is no valid start, no successful terminal path, an unreachable required step, an unsupported outcome, an invalid scope relationship, or a missing/incompatible binding.
+- [x] Validation errors identify the affected Step Instance and the transition or port that needs repair.
+- [x] Automated tests execute a successful branch and a changes-requested loop configured through the editor.
+- [x] Tests use the portable issue runner and fake editor; CodexCLI workflow/UI modules are untouched.
 
 ## Blocked by
 
 - [Issue 0002: Resume and Rework Arbitrary Step Instances](./0002-resume-and-rework-arbitrary-step-instances.md)
 - [Issue 0004: Build and Reorder the Primary Path](./0004-build-and-reorder-the-primary-path.md)
+
+## Implementation Notes
+
+Completed: 2026-07-16T22:12:47+03:00
+
+The keyboard-driven route editor supports existing, created, inserted, and
+terminal destinations for every declared outcome. Branch steps stay outside
+global Primary Path numbering, while graph previews, typed producer choices,
+and apply-time validation expose every route and binding repair explicitly.
+
+### Verification
+
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_workflow_editor.py' -v`
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_portable_workflow.py' -v`
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -q`
+- `git diff --check`
+
+### Review
+
+Senior review found no blocking graph, binding, scope, execution, or regression
+issues. The integrated fake-runner branch and rework scenarios pass.

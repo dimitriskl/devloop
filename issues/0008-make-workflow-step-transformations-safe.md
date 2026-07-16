@@ -23,17 +23,17 @@ Covers parent PRD user stories 6-7, 40-45, and 75-78.
 
 ## Acceptance criteria
 
-- [ ] Duplicate creates a new UUIDv4 and unique display name while copying appropriate instance configuration and input bindings.
-- [ ] Duplicate does not copy successful runtime state, attempts, or evidence.
-- [ ] Duplicated guidance is marked `NEEDS_REVIEW`, and unused outputs are reported as warnings.
-- [ ] A Primary Path duplicate is inserted with explicit success-transition rewiring and no silent consumer redirection.
-- [ ] Delete previews impacted transitions and bindings, requires confirmation, and never cascades into downstream step deletion.
-- [ ] Delete repairs only one unambiguous Primary Path success link; all other broken bindings remain explicit validation errors.
-- [ ] Type Change preserves UUID, display name, and position while resetting type-dependent model settings, capabilities, ports, and outcomes to the new component contract.
-- [ ] Preserved guidance after Type Change is marked `NEEDS_REVIEW` and must be resolved before Apply.
-- [ ] Duplicate, Delete, and Type Change can each be undone without persistence side effects.
-- [ ] Apply is blocked for every invalid transformed graph, and a valid transformed workflow executes end to end in automated coverage.
-- [ ] Transformations round-trip through portable planner configuration and `*.loop.state.json`; no CodexCLI state is read or written.
+- [x] Duplicate creates a new UUIDv4 and unique display name while copying appropriate instance configuration and input bindings.
+- [x] Duplicate does not copy successful runtime state, attempts, or evidence.
+- [x] Duplicated guidance is marked `NEEDS_REVIEW`, and unused outputs are reported as warnings.
+- [x] A Primary Path duplicate is inserted with explicit success-transition rewiring and no silent consumer redirection.
+- [x] Delete previews impacted transitions and bindings, requires confirmation, and never cascades into downstream step deletion.
+- [x] Delete repairs only one unambiguous Primary Path success link; all other broken bindings remain explicit validation errors.
+- [x] Type Change preserves UUID, display name, and position while resetting type-dependent model settings, capabilities, ports, and outcomes to the new component contract.
+- [x] Preserved guidance after Type Change is marked `NEEDS_REVIEW` and must be resolved before Apply.
+- [x] Duplicate, Delete, and Type Change can each be undone without persistence side effects.
+- [x] Apply is blocked for every invalid transformed graph, and a valid transformed workflow executes end to end in automated coverage.
+- [x] Transformations round-trip through portable planner configuration and `*.loop.state.json`; no CodexCLI state is read or written.
 
 ## Blocked by
 
@@ -41,3 +41,24 @@ Covers parent PRD user stories 6-7, 40-45, and 75-78.
 - [Issue 0005: Edit Outcome Routes and Typed Port Bindings](./0005-edit-outcome-routes-and-typed-port-bindings.md)
 - [Issue 0006: Choose Per-Step Codex Execution Settings](./0006-choose-per-step-codex-execution-settings.md)
 - [Issue 0007: Give Each Step Its Own Capabilities and Guidance](./0007-give-each-step-its-own-capabilities-and-guidance.md)
+
+## Implementation Notes
+
+Completed: 2026-07-16T22:12:47+03:00
+
+Duplicate, Delete, and Type Change are transactional workflow-draft operations
+with preview/confirmation, undo, stable identity rules, conservative Primary
+Path repair, explicit broken-reference validation, and `NEEDS_REVIEW` guidance
+handling. Runtime attempts and evidence remain outside configuration copies.
+
+### Verification
+
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest -v tests.test_workflow_editor.WorkflowDraftTransformationTests`
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_workflow_editor.py' -v`
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -q`
+- `git diff --check`
+
+### Review
+
+Senior review found no blocking transformation, persistence, or validation
+issues. Duplicate execution and state round-trip coverage pass.

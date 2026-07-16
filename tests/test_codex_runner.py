@@ -346,6 +346,75 @@ class RolePromptIdentityTests(unittest.TestCase):
         for secret in secret_fragments:
             self.assertNotIn(secret, persisted_prompt)
 
+    def test_concatenated_quoted_secret_is_redacted_from_persisted_role_prompt(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).parents[1]
+        secret_fragments = (
+            "concat-prompt-secret-alpha",
+            "concat-prompt-secret-omega",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"reviewer": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                return_value=["codex"],
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=codex_runner.subprocess.CompletedProcess(
+                    ["codex"],
+                    0,
+                    stdout='{"status":"PASS"}',
+                    stderr="",
+                ),
+            ):
+                runner.run_role(
+                    role="reviewer",
+                    issue=Issue("0001", "Security review", issue_path, False),
+                    pass_number=1,
+                    step_guidance=(
+                        "Inspect login handling.\n"
+                        'password: "concat-prompt-secret-alpha" + '
+                        '"concat-prompt-secret-omega"\n'
+                        "Keep this safe instruction."
+                    ),
+                )
+
+            persisted_prompt = next(
+                runner.log_root.glob("*.prompt.md")
+            ).read_text(encoding="utf-8")
+
+        self.assertIn("Inspect login handling.", persisted_prompt)
+        self.assertIn("Keep this safe instruction.", persisted_prompt)
+        self.assertIn("[redacted]", persisted_prompt)
+        for secret in secret_fragments:
+            self.assertNotIn(secret, persisted_prompt)
+
     def test_placeholder_like_step_guidance_remains_literal_and_bounded(self) -> None:
         repository_root = Path(__file__).parents[1]
         literal_guidance = (

@@ -91,11 +91,12 @@ scope, ports, and outcomes. For example:
 }
 ```
 
-The portable adapters are `coder`, `reviewer`, and `qa`. Referenced skill and
-agent files must already be installed in the bundle. A custom component then
-appears in the Workflow Editor Type picker, persists in future-run defaults and
-snapshots, and executes with its configured role instructions through the
-selected adapter.
+The portable adapters are `analysis`, `coder`, `reviewer`, and `qa`. The
+`analysis` adapter is the WORKFLOW-scoped planning adapter; the other adapters
+are ISSUE-scoped. Referenced skill and agent files must already be installed in
+the bundle. A custom component then appears in the Workflow Editor Type picker,
+persists in future-run defaults and snapshots, and executes with its configured
+role instructions through the selected adapter.
 
 ## Install From GitHub
 

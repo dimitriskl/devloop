@@ -317,6 +317,13 @@ def _is_secret_key_name(value: str) -> bool:
 
 
 def _redact_quoted_secret_value(value: str, start: int) -> tuple[str, int]:
+    """Redact a quoted assignment through its complete logical line.
+
+    A closing quote is not a safe boundary for a secret assignment because the
+    value may continue through concatenation or another expression.  Preserve
+    the quote style for readable diagnostics, but resume copying only at the
+    next line.
+    """
     delimiter = value[start : start + 3]
     if delimiter not in {"'''", '\"\"\"'}:
         delimiter = value[start]
@@ -331,9 +338,10 @@ def _redact_quoted_secret_value(value: str, start: int) -> tuple[str, int]:
             if len(delimiter) > 1 or following == len(value) or value[following] in (
                 " \t\r\n,.;:)]}"
             ):
+                line_end = value.find("\n", following)
                 return (
                     f"{delimiter}[redacted]{delimiter}",
-                    following,
+                    len(value) if line_end == -1 else line_end,
                 )
         if value[cursor] == "\\" and cursor + 1 < len(value):
             cursor += 2
