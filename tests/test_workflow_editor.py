@@ -341,38 +341,41 @@ class WorkflowDraftTransformationTests(unittest.TestCase):
         self.assertTrue(draft.undo())
         self.assertEqual(draft.workflow, before_duplicate)
 
-    def test_apply_blocks_analysis_transformations_the_planner_cannot_execute(
+    def test_apply_accepts_an_installed_workflow_scoped_analysis_replacement(
         self,
     ) -> None:
-        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            catalog = build_portable_component_catalog(
+                Path(raw),
+                {
+                    "custom-planner": {
+                        "step_adapter": "analysis",
+                        "component_id": "example.custom-planner",
+                        "display_name": "Custom Planner",
+                        "skills": [],
+                        "agents": [],
+                    }
+                },
+            )
+            draft = WorkflowDraft(default_portable_workflow(), catalog)
+            draft.change_type(
+                ANALYSIS_STEP_ID,
+                StepComponentId("example.custom-planner"),
+            )
 
-        for transformation in ("duplicate", "delete", "type-change"):
-            with self.subTest(transformation=transformation):
-                draft = WorkflowDraft(default_portable_workflow(), catalog)
-                if transformation == "duplicate":
-                    draft.duplicate(ANALYSIS_STEP_ID)
-                    expected_count = 2
-                elif transformation == "delete":
-                    draft.delete(draft.preview_delete(ANALYSIS_STEP_ID))
-                    expected_count = 0
-                else:
-                    draft.change_type(
-                        ANALYSIS_STEP_ID,
-                        DEVELOPMENT_COMPONENT_ID,
-                    )
-                    expected_count = 0
+            applied = validate_portable_workflow_for_apply(
+                draft.workflow,
+                catalog,
+            )
 
-                with self.assertRaisesRegex(
-                    ValueError,
-                    (
-                        "exactly one WORKFLOW-scoped Workflow Step; "
-                        rf"found {expected_count}"
-                    ),
-                ):
-                    validate_portable_workflow_for_apply(
-                        draft.workflow,
-                        catalog,
-                    )
+        self.assertEqual(
+            applied.step(ANALYSIS_STEP_ID).component_id,
+            StepComponentId("example.custom-planner"),
+        )
+        self.assertEqual(
+            catalog.resolve(StepComponentId("example.custom-planner")).scope,
+            StepScope.WORKFLOW,
+        )
 
     def test_delete_previews_all_impacts_and_repairs_only_primary_success(self) -> None:
         catalog = default_portable_component_catalog()

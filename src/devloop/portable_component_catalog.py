@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from . import catalog as capability_catalog
 from .portable_workflow import (
+    ANALYSIS_COMPONENT_ID,
     DEVELOPMENT_COMPONENT_ID,
     QA_COMPONENT_ID,
     REVIEWER_COMPONENT_ID,
@@ -30,6 +31,7 @@ COMPONENT_ID_KEY = "component_id"
 DISPLAY_NAME_KEY = "display_name"
 
 _STEP_ADAPTER_COMPONENT_IDS = {
+    "analysis": ANALYSIS_COMPONENT_ID,
     "coder": DEVELOPMENT_COMPONENT_ID,
     "reviewer": REVIEWER_COMPONENT_ID,
     "qa": QA_COMPONENT_ID,

@@ -15,10 +15,10 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 ## Retry External Blockers Only After State Changes
 
 - Applies to: blocked retry rounds, coder scheduling and long-running issue packs
-- Lesson: A clean Codex attempt cannot fix a proven external prerequisite, so unchanged authentication, connectivity, platform, permission, or publication blockers should not consume another retry round.
-- Evidence: All eight issues entered three clean-retry rounds; Issues 0002 through 0007 repeatedly reported passing local gates with no code changes while the same missing Codex authentication or Responses API connectivity blocker remained.
-- Action: Fingerprint external blockers and the relevant environment state, skip equivalent retries until that state changes, and leave one concise operator action on the loop board.
-- Last seen: 2026-07-13
+- Lesson: A clean Codex attempt cannot fix a proven external prerequisite, so unchanged quota, authentication, connectivity, platform, permission, or publication blockers should not consume another retry round.
+- Evidence: On July 16, Issues 0004 through 0010 each made an initial attempt plus three clean retries that failed with the same Codex usage-limit response; the July 13 run likewise repeated unchanged authentication and connectivity blockers across retry rounds.
+- Action: Fingerprint external blockers and the relevant environment or account state, skip equivalent retries until that state changes, and leave one concise operator action on the loop board.
+- Last seen: 2026-07-16
 
 ## Keep Completion Markers Behind Acceptance Gates
 
@@ -48,9 +48,33 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: Dev Loop runner, prompt assembly and coder/reviewer/QA startup
 - Lesson: Resolve prompt-required context paths before role execution so every role does not repeat the same search for an absent artifact.
-- Evidence: Issue 0003 reviewer and QA each reported that required `CONTEXT-MAP.md` was absent from both the target repository and bundle even though the available acceptance gates passed.
+- Evidence: Review and QA results throughout the July 16 configurable-workflow run repeatedly reported the same absent `CONTEXT-MAP.md`, `docs/TDD/README.md`, and `context/*.md` paths; the earlier Issue 0003 run showed the same repeated search for `CONTEXT-MAP.md`.
 - Action: Preflight declared context paths once, tell roles when an optional fallback is intentional, and fail before execution only when a missing artifact is indispensable.
-- Last seen: 2026-07-11
+- Last seen: 2026-07-16
+
+## Make Portable Recovery Step-Instance-Driven
+
+- Applies to: portable workflow persistence, crash recovery and role artifacts
+- Lesson: The authoritative recovery identity is the persisted Step Instance and Step Attempt, not a legacy role/pass tuple or a filename shape inferred from UUID placement.
+- Evidence: Issues 0001 and 0002 exposed lost checkpoints, triggering records, and interrupted-attempt context; Issues 0004 and 0006 then needed repeated fixes for artifact overwrites, stale selection, and portable/legacy filename misclassification.
+- Action: Persist attempt identity and context before launch, checkpoint every completed result, prefer the generic workflow cursor, and give fallback artifacts explicit version/type markers plus unique attempt IDs through one shared encoder/parser tested with production-emitted names.
+- Last seen: 2026-07-16
+
+## Persist Workflow Cycle Exhaustion Explicitly
+
+- Applies to: configurable workflow execution, retries and recovery
+- Lesson: Every executable cycle needs a durable budget, and exhausting it must preserve the pending destination as retry state rather than infer completion from the last step outcome.
+- Evidence: Issue 0005 reviews found an unbounded BLOCKED self-loop, a cycle-closing SUCCEEDED edge that falsely completed the issue, and an exhausted workflow that could not resume because its persisted issue status disagreed with the latest successful attempt.
+- Action: Validate or budget every outcome cycle, persist the cycle counter and next cursor independently of attempt outcome, and test mixed-outcome exhaustion plus resume after increasing the budget.
+- Last seen: 2026-07-16
+
+## Sanitize Free-Form Text For Its Destination
+
+- Applies to: workflow guidance, persisted attempt context, model metadata and terminal output
+- Lesson: Redact or reject secrets before persistence and prompts, then sanitize every dynamic terminal field at the final render boundary; one permissive regex or one upstream check is not a complete safety boundary.
+- Evidence: Issue 0007 repeatedly exposed escaped, multiline, unterminated, mismatched, and concatenated secret forms plus backtracking in guidance parsing; Issues 0009 and 0010 found terminal-control paths through summaries, issue titles, catalog errors, and successful catalog metadata, including a quadratic control-sequence regex.
+- Action: Use bounded linear parsers, enforce limits before and after transformation, fail closed on ambiguous secret assignments, preserve safe Unicode intentionally, and run adversarial persistence and terminal-sink tests for every dynamic source.
+- Last seen: 2026-07-16
 
 ## Default Multi-Outcome Results To Unknown, Not Success
 

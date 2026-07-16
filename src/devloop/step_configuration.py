@@ -17,41 +17,20 @@ STEP_GUIDANCE_PRECEDENCE = (
 )
 
 _BEARER_SECRET = re.compile(r"(?i)\bBearer\s+[^\s]+")
-_SECRET_NAME_PATTERN = (
-    r"(?:"
-    r"(?:[A-Za-z0-9]+[_-])*(?:secret|token|password|passwd|credential|credentials)"
-    r"(?:[_-][A-Za-z0-9]+)*"
-    r"|(?:[A-Za-z0-9]+[_-])*(?:api|access|private)[_-]?key"
-    r"(?:[_-][A-Za-z0-9]+)*"
-    r"|connection[_-]?string"
-    r")"
-)
-_MULTILINE_ASSIGNED_SECRET = re.compile(
-    rf"(?im)^(?P<indent>[ \t]*)(?P<key_quote>[\"']?)\b"
-    rf"(?P<name>{_SECRET_NAME_PATTERN})\b(?P=key_quote)"
-    r"(?P<before>[ \t]*):(?P<after>[ \t]*)[|>][^\r\n]*"
-    r"(?:\r?\n(?:(?P=indent)[ \t]+[^\r\n]*|[ \t]*(?=\r?$)))+"
-)
-_QUOTED_ASSIGNED_SECRET = re.compile(
-    rf"(?is)(?P<key_quote>[\"']?)\b(?P<name>{_SECRET_NAME_PATTERN})\b"
-    r"(?P=key_quote)(?P<before>[ \t]*)(?P<separator>[:=])"
-    r"(?P<after>[ \t]*)(?P<value_quote>\"\"\"|'''|[\"'])"
-    r"(?:(?:\\.)|(?!(?P=value_quote)).)*(?P=value_quote)"
-)
-_ASSIGNED_SECRET = re.compile(
-    rf"(?im)(?P<key_quote>[\"']?)\b(?P<name>{_SECRET_NAME_PATTERN})\b"
-    r"(?P=key_quote)(?P<before>[ \t]*)"
-    r"(?P<separator>[:=])(?!(?:[ \t]*[\"']))(?P<after>[ \t]*)"
-    r"(?P<plain>[^\r\n]+)"
-)
 _OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _GITHUB_TOKEN = re.compile(
     r"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b"
 )
 _PRIVATE_KEY = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
-    r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    r"-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----.*?"
+    r"(?:-----END \1-----|\Z)",
     re.DOTALL,
+)
+_SECRET_KEY_PARTS = frozenset(
+    {"secret", "token", "password", "passwd", "credential", "credentials"}
+)
+_KEY_CHARACTER_SET = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
 )
 
 
@@ -172,17 +151,23 @@ class StepGuidance:
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
             raise ValueError("Step Guidance must be text.")
+        if len(self.text) > MAX_STEP_GUIDANCE_CHARACTERS:
+            raise ValueError(
+                "Step Guidance cannot exceed "
+                f"{MAX_STEP_GUIDANCE_CHARACTERS} characters before redaction."
+            )
         normalized = self.text.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not normalized:
             raise ValueError("Empty Step Guidance must be stored as no guidance.")
-        if len(normalized) > MAX_STEP_GUIDANCE_CHARACTERS:
-            raise ValueError(
-                "Step Guidance cannot exceed "
-                f"{MAX_STEP_GUIDANCE_CHARACTERS} characters."
-            )
         if any(_unsafe_guidance_character(character) for character in normalized):
             raise ValueError("Step Guidance contains unsupported control characters.")
-        object.__setattr__(self, "text", redact_step_guidance(normalized))
+        sanitized = redact_step_guidance(normalized)
+        if len(sanitized) > MAX_STEP_GUIDANCE_CHARACTERS:
+            raise ValueError(
+                "Step Guidance cannot exceed "
+                f"{MAX_STEP_GUIDANCE_CHARACTERS} characters after redaction."
+            )
+        object.__setattr__(self, "text", sanitized)
 
     def to_dict(self) -> dict[str, str]:
         return {"text": self.text, "review_state": self.review_state.value}
@@ -241,42 +226,141 @@ def capability_profile_from_defaults(
 def redact_step_guidance(value: str) -> str:
     redacted = _PRIVATE_KEY.sub("[redacted-private-key]", value)
     redacted = _BEARER_SECRET.sub("Bearer [redacted]", redacted)
-    redacted = _MULTILINE_ASSIGNED_SECRET.sub(
-        lambda match: (
-            f"{match.group('indent')}{match.group('key_quote')}"
-            f"{match.group('name')}{match.group('key_quote')}"
-            f"{match.group('before')}:{match.group('after')}[redacted]"
-        ),
-        redacted,
-    )
-    redacted = _QUOTED_ASSIGNED_SECRET.sub(
-        _redact_quoted_assigned_secret,
-        redacted,
-    )
-    redacted = _ASSIGNED_SECRET.sub(
-        _redact_assigned_secret,
-        redacted,
-    )
+    redacted = _redact_assigned_secrets(redacted)
     redacted = _OPENAI_KEY.sub("[redacted-key]", redacted)
     return _GITHUB_TOKEN.sub("[redacted-github-token]", redacted)
 
 
-def _redact_quoted_assigned_secret(match: re.Match[str]) -> str:
-    return (
-        f"{match.group('key_quote')}{match.group('name')}"
-        f"{match.group('key_quote')}{match.group('before')}"
-        f"{match.group('separator')}{match.group('after')}"
-        f"{match.group('value_quote')}[redacted]{match.group('value_quote')}"
+def _redact_assigned_secrets(value: str) -> str:
+    """Redact secret assignments with a monotonic, bounded scanner.
+
+    Quoted values are parsed explicitly so malformed input is redacted through
+    the end of the guidance instead of being left available to persistence.
+    """
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        assignment = _find_secret_assignment(value, cursor)
+        if assignment is None:
+            output.append(value[cursor:])
+            break
+
+        token_start, separator = assignment
+        value_start = separator + 1
+        while value_start < len(value) and value[value_start] in " \t\r\n":
+            value_start += 1
+        output.append(value[cursor:value_start])
+        if value_start >= len(value):
+            break
+        if value[value_start] in "|>":
+            output.append("[redacted]")
+            cursor = _skip_secret_block(value, value_start, token_start)
+            continue
+        if value[value_start] in "'\"":
+            replacement, cursor = _redact_quoted_secret_value(value, value_start)
+            output.append(replacement)
+            continue
+
+        output.append("[redacted]")
+        line_end = value.find("\n", value_start)
+        cursor = len(value) if line_end == -1 else line_end
+
+    return "".join(output)
+
+
+def _find_secret_assignment(value: str, start: int) -> tuple[int, int] | None:
+    """Find the next recognized assignment without backtracking or rescans."""
+    cursor = start
+    while cursor < len(value):
+        if value[cursor] not in _KEY_CHARACTER_SET or (
+            cursor > 0 and value[cursor - 1] in _KEY_CHARACTER_SET
+        ):
+            cursor += 1
+            continue
+
+        token_start = cursor
+        cursor += 1
+        while cursor < len(value) and value[cursor] in _KEY_CHARACTER_SET:
+            cursor += 1
+        if not _is_secret_key_name(value[token_start:cursor]):
+            continue
+
+        separator = cursor
+        while separator < len(value) and value[separator] in " \t'\"":
+            separator += 1
+        if separator < len(value) and value[separator] in ":=":
+            return token_start, separator
+
+    return None
+
+
+def _is_secret_key_name(value: str) -> bool:
+    parts = value.lower().replace("-", "_").split("_")
+    if not parts or any(not part for part in parts):
+        return False
+    if any(part in _SECRET_KEY_PARTS for part in parts):
+        return True
+    if any(
+        part == "connection" and index + 1 < len(parts)
+        and parts[index + 1] == "string"
+        for index, part in enumerate(parts)
+    ):
+        return True
+    if "connectionstring" in parts:
+        return True
+    return any(
+        part in {"api", "access", "private"} and index + 1 < len(parts)
+        and parts[index + 1] == "key"
+        or part in {"apikey", "accesskey", "privatekey"}
+        for index, part in enumerate(parts)
     )
 
 
-def _redact_assigned_secret(match: re.Match[str]) -> str:
-    return (
-        f"{match.group('key_quote')}{match.group('name')}"
-        f"{match.group('key_quote')}{match.group('before')}"
-        f"{match.group('separator')}{match.group('after')}"
-        "[redacted]"
-    )
+def _redact_quoted_secret_value(value: str, start: int) -> tuple[str, int]:
+    delimiter = value[start : start + 3]
+    if delimiter not in {"'''", '\"\"\"'}:
+        delimiter = value[start]
+    content_start = start + len(delimiter)
+    cursor = content_start
+    while cursor < len(value):
+        if value.startswith(delimiter, cursor):
+            if len(delimiter) == 1 and value.startswith(delimiter * 2, cursor):
+                cursor += 2
+                continue
+            following = cursor + len(delimiter)
+            if len(delimiter) > 1 or following == len(value) or value[following] in (
+                " \t\r\n,.;:)]}"
+            ):
+                return (
+                    f"{delimiter}[redacted]{delimiter}",
+                    following,
+                )
+        if value[cursor] == "\\" and cursor + 1 < len(value):
+            cursor += 2
+        else:
+            cursor += 1
+    return f"{delimiter}[redacted]", len(value)
+
+
+def _skip_secret_block(value: str, value_start: int, assignment_start: int) -> int:
+    line_start = value.rfind("\n", 0, assignment_start) + 1
+    line_prefix = value[line_start:assignment_start]
+    base_indent = len(line_prefix) if line_prefix.strip() == "" else 0
+    cursor = value.find("\n", value_start)
+    if cursor == -1:
+        return len(value)
+
+    while cursor < len(value):
+        next_line_start = cursor + 1
+        line_end = value.find("\n", next_line_start)
+        if line_end == -1:
+            line_end = len(value)
+        line = value[next_line_start:line_end]
+        indentation = len(line) - len(line.lstrip(" \t"))
+        if line.strip() and indentation <= base_indent:
+            return cursor
+        cursor = line_end
+    return cursor
 
 
 def _capability_references(

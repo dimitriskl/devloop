@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -110,6 +112,76 @@ class CodexCommandSettingsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 124)
         self.assertIn("Execution Budget", result.stderr)
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
+    def test_streaming_budget_kills_child_retaining_inherited_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            started_at = time.monotonic()
+            result = codex_runner.run_streaming_codex_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess, sys; "
+                        "subprocess.Popen([sys.executable, '-c', "
+                        "'import time; time.sleep(5)'], stdout=sys.stdout, "
+                        "stderr=sys.stderr)"
+                    ),
+                ],
+                input_text="",
+                cwd=Path(raw),
+                stage=Stage.DEVELOPMENT,
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=0.2,
+                    checkpoint_seconds=0.2,
+                ),
+            )
+
+        self.assertEqual(result.returncode, 124)
+        self.assertLess(time.monotonic() - started_at, 2.0)
+
+    def test_connection_retries_consume_one_attempt_execution_budget(self) -> None:
+        runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner.repo_root = root
+            runner.log_root = root / ".loop.logs"
+            runner.ensure_log_root()
+            retryable = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                1,
+                stdout="",
+                stderr="failed to connect to websocket\n",
+            )
+            successful = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout='{"status":"PASS"}\n',
+                stderr="",
+            )
+            with mock.patch.object(
+                codex_runner,
+                "CODEX_CONNECTION_RETRY_DELAY_SECONDS",
+                0.15,
+            ), mock.patch.object(
+                codex_runner,
+                "run_streaming_codex_command",
+                side_effect=(retryable, retryable, successful),
+            ) as execute:
+                result = runner.run_codex_exec_with_connection_retries(
+                    command=["codex"],
+                    prompt="Implement the issue.",
+                    stdout_path=runner.log_root / "stdout.jsonl",
+                    stderr_path=runner.log_root / "stderr.txt",
+                    execution_budget=ExecutionBudget(
+                        timeout_seconds=0.2,
+                        checkpoint_seconds=0.2,
+                    ),
+                )
+
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("Execution Budget", result.stderr)
+
 
 class RolePromptIdentityTests(unittest.TestCase):
     def test_step_capabilities_and_guidance_override_role_defaults_in_the_prompt(
@@ -148,14 +220,131 @@ class RolePromptIdentityTests(unittest.TestCase):
                 fix_list=[],
                 skill_paths=("skills/codex/security/SKILL.md",),
                 agent_paths=(),
-                step_guidance="Focus on authentication boundaries.",
+                step_guidance=(
+                    "Focus on authentication boundaries.\n"
+                    'password: "prompt-persistence-secret"\n'
+                    '"password":\n  "prompt-next-line-secret"\n'
+                    'password" : prompt-malformed-secret'
+                ),
             )
 
         self.assertIn("skills/codex/security/SKILL.md", prompt)
         self.assertNotIn("skills/codex/legacy/SKILL.md", prompt)
         self.assertNotIn("agents/codex/legacy.md", prompt)
         self.assertIn("Focus on authentication boundaries.", prompt)
+        self.assertIn("[redacted]", prompt)
+        self.assertNotIn("prompt-persistence-secret", prompt)
+        self.assertNotIn("prompt-next-line-secret", prompt)
+        self.assertNotIn("prompt-malformed-secret", prompt)
         self.assertIn("permissions, and safety boundaries", prompt)
+
+    def test_unterminated_private_key_is_redacted_from_the_role_prompt(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        private_key_secret = "unterminated-prompt-private-key-secret"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"reviewer": {"skills": [], "agents": []}},
+            )
+            runner.use_self_improvement_wiki = False
+
+            prompt = runner.build_prompt(
+                role="reviewer",
+                issue=Issue("0001", "Security review", issue_path, False),
+                pass_number=1,
+                fix_list=[],
+                step_guidance=(
+                    "Inspect key handling.\n"
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    f"{private_key_secret}"
+                ),
+            )
+
+        self.assertIn("Inspect key handling.", prompt)
+        self.assertIn("[redacted-private-key]", prompt)
+        self.assertNotIn(private_key_secret, prompt)
+
+    def test_mismatched_private_key_end_is_redacted_from_persisted_role_prompt(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).parents[1]
+        secret_fragments = (
+            "mismatched-prompt-private-key-secret",
+            "secret-after-mismatched-prompt-key-end",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"reviewer": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                return_value=["codex"],
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=codex_runner.subprocess.CompletedProcess(
+                    ["codex"],
+                    0,
+                    stdout='{"status":"PASS"}',
+                    stderr="",
+                ),
+            ):
+                runner.run_role(
+                    role="reviewer",
+                    issue=Issue("0001", "Security review", issue_path, False),
+                    pass_number=1,
+                    step_guidance=(
+                        "Inspect key handling.\n"
+                        "-----BEGIN RSA PRIVATE KEY-----\n"
+                        f"{secret_fragments[0]}\n"
+                        "-----END EC PRIVATE KEY-----\n"
+                        f"{secret_fragments[1]}"
+                    ),
+                )
+
+            persisted_prompt = next(
+                runner.log_root.glob("*.prompt.md")
+            ).read_text(encoding="utf-8")
+
+        self.assertIn("Inspect key handling.", persisted_prompt)
+        self.assertIn("[redacted-private-key]", persisted_prompt)
+        for secret in secret_fragments:
+            self.assertNotIn(secret, persisted_prompt)
 
     def test_placeholder_like_step_guidance_remains_literal_and_bounded(self) -> None:
         repository_root = Path(__file__).parents[1]
@@ -357,6 +546,119 @@ class RolePromptIdentityTests(unittest.TestCase):
             self.assertIn("Prompt session: `security-session`", prompt_text)
             self.assertIn("Workflow step: `Final Review`", prompt_text)
             self.assertIn("Prompt session: `final-session`", prompt_text)
+
+    def test_live_attempt_artifacts_remain_distinct_for_repeated_step_attempts(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Repeated review attempt\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"reviewer": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+            issue = Issue("0001", "Repeated review attempt", issue_path, False)
+            attempts = iter(("first", "second"))
+
+            def build_command(**arguments: object) -> list[str]:
+                return ["codex", "-o", str(arguments["message_path"])]
+
+            def execute(command: list[str], **_: object) -> codex_runner.subprocess.CompletedProcess[str]:
+                marker = next(attempts)
+                message_path = Path(command[command.index("-o") + 1])
+                message_path.write_text(
+                    json.dumps({"status": "PASS", "summary": marker}),
+                    encoding="utf-8",
+                )
+                return codex_runner.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=f"stdout-{marker}\n",
+                    stderr=f"stderr-{marker}\n",
+                )
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                side_effect=build_command,
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                side_effect=execute,
+            ):
+                for attempt_id, session_id in (
+                    ("attempt/one", "session-one"),
+                    ("attempt/two", "session-two"),
+                ):
+                    runner.run_role(
+                        role="reviewer",
+                        issue=issue,
+                        pass_number=1,
+                        step_instance_id=str(SECURITY_REVIEW_STEP_ID),
+                        step_display_name="Security Review",
+                        step_attempt_id=attempt_id,
+                        prompt_session_id=session_id,
+                    )
+
+            artifact_paths = {
+                "prompt": sorted(runner.log_root.glob("*.prompt.md")),
+                "stdout": sorted(runner.log_root.glob("*.stdout.jsonl")),
+                "stderr": sorted(runner.log_root.glob("*.stderr.txt")),
+                "last-message": sorted(runner.log_root.glob("*.last-message.json")),
+            }
+            for artifact_type, paths in artifact_paths.items():
+                with self.subTest(artifact_type=artifact_type):
+                    self.assertEqual(len(paths), 2)
+                    self.assertNotEqual(paths[0].name, paths[1].name)
+                    self.assertTrue(
+                        any("attempt-attempt-one" in path.name for path in paths)
+                    )
+                    self.assertTrue(
+                        any("attempt-attempt-two" in path.name for path in paths)
+                    )
+            stdout_contents = {
+                path.read_text(encoding="utf-8")
+                for path in artifact_paths["stdout"]
+            }
+            stderr_contents = {
+                path.read_text(encoding="utf-8")
+                for path in artifact_paths["stderr"]
+            }
+            last_message_summaries = {
+                json.loads(path.read_text(encoding="utf-8"))["summary"]
+                for path in artifact_paths["last-message"]
+            }
+            prompt_text = "\n".join(
+                path.read_text(encoding="utf-8") for path in artifact_paths["prompt"]
+            )
+
+            self.assertEqual(
+                stdout_contents,
+                {"stdout-first\n", "stdout-second\n"},
+            )
+            self.assertEqual(
+                stderr_contents,
+                {"stderr-first\n", "stderr-second\n"},
+            )
+            self.assertEqual(last_message_summaries, {"first", "second"})
+            self.assertIn("Prompt session: `session-one`", prompt_text)
+            self.assertIn("Prompt session: `session-two`", prompt_text)
 
     def test_custom_role_path_separators_are_sanitized_in_log_filenames(self) -> None:
         repository_root = Path(__file__).parents[1]

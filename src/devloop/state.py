@@ -10,7 +10,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
-from .codex_runner import RoleResult
+from .codex_runner import (
+    PORTABLE_LOG_MARKER,
+    PORTABLE_LOG_TOKEN_PATTERN,
+    PORTABLE_STEP_INSTANCE_ID_PATTERN,
+    RoleResult,
+)
 from .codex_events import RunWideBlocker, RunWideBlockerKind
 from .issue_pack import Issue
 from .issue_scheduler import SchedulingPhase
@@ -50,7 +55,20 @@ RESUMABLE_ROLE_ORDER = {
     ResumeRole.QA.value: 2,
 }
 NORMAL_ROLE_LOG_PATTERN = re.compile(
-    r"^(?P<issue>\d+)-(?P<role>coder|reviewer|qa)-pass(?P<pass>\d+)\.last-message\.json$"
+    r"^(?P<issue>\d+)-(?:(?:.*)-)?(?P<role>coder|reviewer|qa)-pass(?P<pass>\d+)\.last-message\.json$"
+)
+# Portable artifacts include an explicit marker and their canonical Step
+# Instance ID before the role; they belong to the generic checkpoint recovery
+# path, not legacy role recovery. The role itself is intentionally open-ended:
+# a custom role such as ``security-reviewer`` must not be reduced to the legacy
+# ``reviewer`` role by the fallback pattern below.
+PORTABLE_ROLE_LOG_PATTERN = re.compile(
+    rf"^(?P<issue>\d+)-attempt-{PORTABLE_LOG_TOKEN_PATTERN}"
+    rf"(?:-{PORTABLE_LOG_TOKEN_PATTERN})?-"
+    rf"{re.escape(PORTABLE_LOG_MARKER)}-"
+    rf"{PORTABLE_LOG_TOKEN_PATTERN}-"
+    rf"{PORTABLE_STEP_INSTANCE_ID_PATTERN}-"
+    rf"{PORTABLE_LOG_TOKEN_PATTERN}-pass\d+\.last-message\.json$"
 )
 
 
@@ -72,6 +90,12 @@ class LoopStateWriter:
         self.prd_state_path: Path | None = None
         self.prd_board_path: Path | None = None
         self.state = load_existing_state(self.state_path, issues_index)
+
+    def has_resolved_workflow(self) -> bool:
+        return (
+            "resolved_workflow" in self.state
+            or "resolved_workflow_hash" in self.state
+        )
 
     def record_resolved_workflow(
         self,
@@ -1384,26 +1408,43 @@ def recover_role_passes(log_root: Path, issue: Issue) -> list[dict[str, Any]]:
     if not log_root.is_dir():
         return []
 
-    recovered: list[dict[str, Any]] = []
+    recovered_by_role_pass: dict[
+        tuple[int, str], tuple[tuple[int, str], dict[str, Any]]
+    ] = {}
     for path in log_root.glob(f"{issue.number}-*-pass*.last-message.json"):
+        if PORTABLE_ROLE_LOG_PATTERN.fullmatch(path.name):
+            continue
         match = NORMAL_ROLE_LOG_PATTERN.fullmatch(path.name)
         if not match or match.group("issue") != issue.number:
             continue
         try:
+            file_stat = path.stat()
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict):
             continue
-        recovered.append(
-            {
-                "role": match.group("role"),
-                "pass": int(match.group("pass")),
-                "result": result_summary(role_result_from_state(data)),
-                "timestamp": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
-                "recovered_from": str(path),
-            }
-        )
+        role = match.group("role")
+        pass_number = int(match.group("pass"))
+        candidate = {
+            "role": role,
+            "pass": pass_number,
+            "result": result_summary(role_result_from_state(data)),
+            "timestamp": datetime.fromtimestamp(file_stat.st_mtime).isoformat(
+                timespec="seconds"
+            ),
+            "recovered_from": str(path),
+        }
+        chronology = (file_stat.st_mtime_ns, path.name)
+        role_pass = (pass_number, role)
+        previous = recovered_by_role_pass.get(role_pass)
+        if previous is None or chronology > previous[0]:
+            recovered_by_role_pass[role_pass] = (chronology, candidate)
+
+    recovered = [
+        candidate
+        for _, candidate in recovered_by_role_pass.values()
+    ]
 
     recovered.sort(
         key=lambda entry: (

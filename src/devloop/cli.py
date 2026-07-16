@@ -705,9 +705,6 @@ def run_issue(
     display_issue_title = _terminal_issue_title(issue.title)
     resume_cursor = IssueResumeCursor()
     fix_list = list(initial_fix_list or [])
-    if attempt_label is None and initial_fix_list is None:
-        resume_cursor = state_writer.resume_issue(issue)
-        fix_list = list(resume_cursor.fix_list)
     start_pass = resume_cursor.pass_number
     last_coder = resume_cursor.coder_result
     last_review = resume_cursor.reviewer_result
@@ -715,7 +712,44 @@ def run_issue(
     portable_recovery: PortableWorkflowCheckpoint | None = None
     completed_execution = None
     portable_workflow: WorkflowDefinition | None = None
-    if not runner.dry_run and resume_cursor == IssueResumeCursor():
+    if (
+        not runner.dry_run
+        and resume_cursor == IssueResumeCursor()
+        and state_writer.has_resolved_workflow()
+    ):
+        portable_workflow = resolve_run_workflow(state_writer, catalog)
+        completed_execution = state_writer.completed_portable_workflow(
+            issue,
+            portable_workflow,
+        )
+        portable_recovery = state_writer.resume_portable_workflow(
+            issue,
+            portable_workflow,
+        )
+        if portable_recovery is None:
+            portable_recovery = state_writer.retry_portable_workflow(
+                issue,
+                portable_workflow,
+                pass_number=start_pass,
+            )
+    if (
+        attempt_label is None
+        and initial_fix_list is None
+        and resume_cursor == IssueResumeCursor()
+        and completed_execution is None
+        and portable_recovery is None
+    ):
+        resume_cursor = state_writer.resume_issue(issue)
+        start_pass = resume_cursor.pass_number
+        last_coder = resume_cursor.coder_result
+        last_review = resume_cursor.reviewer_result
+        last_qa = resume_cursor.qa_result
+        fix_list = list(resume_cursor.fix_list)
+    if (
+        not runner.dry_run
+        and resume_cursor == IssueResumeCursor()
+        and portable_workflow is None
+    ):
         portable_workflow = resolve_run_workflow(state_writer, catalog)
         completed_execution = state_writer.completed_portable_workflow(
             issue,

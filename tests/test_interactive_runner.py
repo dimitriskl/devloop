@@ -25,10 +25,12 @@ from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FastPreference,
     SECURITY_REVIEW_STEP_ID,
+    StepComponentId,
     canonical_workflow_hash,
     default_portable_component_catalog,
     default_portable_workflow,
     load_portable_workflow,
+    validate_portable_workflow_for_apply,
 )
 from devloop.state import LoopStateWriter
 from devloop.templates import BundleContext, load_preset
@@ -376,27 +378,45 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                     output.getvalue(),
                 )
 
-    def test_new_run_executes_a_replacement_analysis_step_with_a_new_id(
+    def test_new_run_executes_an_installed_replacement_analysis_step(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             state_path = root / "devloop-plan.json"
-            component_catalog = default_portable_component_catalog()
+            replacement_component_id = "example.custom-planner"
+            component_catalog = build_portable_component_catalog(
+                root,
+                {
+                    "custom-planner": {
+                        "step_adapter": "analysis",
+                        "component_id": replacement_component_id,
+                        "display_name": "Custom Planner",
+                        "skills": [],
+                        "agents": [],
+                    }
+                },
+            )
             draft = WorkflowDraft(
                 default_portable_workflow(),
                 component_catalog,
             )
-            duplicate = draft.duplicate(ANALYSIS_STEP_ID)
+            draft.change_type(
+                ANALYSIS_STEP_ID,
+                StepComponentId(replacement_component_id),
+            )
             draft.set_guidance(
-                duplicate.step_instance_id,
+                ANALYSIS_STEP_ID,
                 "Replacement planning guidance.",
             )
-            draft.delete(draft.preview_delete(ANALYSIS_STEP_ID))
+            applied = validate_portable_workflow_for_apply(
+                draft.workflow,
+                component_catalog,
+            )
             replacement = WorkflowDefaultStore(
                 state_path,
                 component_catalog,
-            ).replace(draft.workflow)
+            ).replace(applied)
             live_catalog = CodexModelCatalog(
                 models=(
                     CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
@@ -447,10 +467,13 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 result = interactive_runner._run_planning(parser, args)
 
         self.assertEqual(result, 0)
-        self.assertNotEqual(replacement.start_step_id, ANALYSIS_STEP_ID)
         self.assertEqual(
             replacement.start_step_id,
-            duplicate.step_instance_id,
+            ANALYSIS_STEP_ID,
+        )
+        self.assertEqual(
+            replacement.step(ANALYSIS_STEP_ID).component_id,
+            StepComponentId(replacement_component_id),
         )
         run_chat.assert_called_once()
         self.assertIn(

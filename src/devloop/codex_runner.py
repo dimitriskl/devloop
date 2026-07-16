@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,10 +26,13 @@ from .issue_pack import Issue
 from .portable_text import normalize_single_line_display_name
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage, WaitingIndicator
-from .step_configuration import STEP_GUIDANCE_PRECEDENCE
+from .step_configuration import STEP_GUIDANCE_PRECEDENCE, StepGuidance
 from .subprocess_utils import (
+    AttemptExecutionBudget,
     ProcessExecutionBudget,
     output_text,
+    process_tree_creation_kwargs,
+    register_process_tree,
     reap_process_after_terminal_event,
     run_captured_text,
     terminate_process,
@@ -42,6 +46,12 @@ if TYPE_CHECKING:
 _LEGACY_APPROVAL_FLAG: bool | None = None
 CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
 STREAM_THREAD_JOIN_SECONDS = 1.0
+PORTABLE_LOG_MARKER = "portable-step"
+PORTABLE_LOG_TOKEN_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+PORTABLE_STEP_INSTANCE_ID_PATTERN = (
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 FAST_CLI_SERVICE_TIER = "fast"
 STANDARD_CLI_SERVICE_TIER = "default"
 ROLE_STAGES = {
@@ -179,6 +189,7 @@ def run_streaming_codex_command(
     activity_context: str = "",
     activity_callback: ActivityCallback | None = None,
     execution_budget: ExecutionBudget | None = None,
+    attempt_budget: AttemptExecutionBudget | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -190,7 +201,9 @@ def run_streaming_codex_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **process_tree_creation_kwargs(),
     )
+    register_process_tree(process)
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
@@ -214,6 +227,7 @@ def run_streaming_codex_command(
             process,
             timeout_seconds=execution_budget.timeout_seconds,
             checkpoint_seconds=execution_budget.checkpoint_seconds,
+            attempt_budget=attempt_budget,
         )
         if execution_budget is not None
         else None
@@ -469,13 +483,17 @@ class CodexRunner:
             step_guidance=step_guidance,
         )
 
-        attempt_slug = slugify_log_token(attempt_label)
         prefix_parts = [slugify_log_token(issue.number) or "issue"]
-        if attempt_slug:
-            prefix_parts.append(attempt_slug)
+        attempt_identity = step_attempt_id or prompt_session_id or str(uuid.uuid4())
+        attempt_slug = slugify_log_token(attempt_identity)
+        prefix_parts.append(f"attempt-{attempt_slug or uuid.uuid4()}")
+        attempt_label_slug = slugify_log_token(attempt_label)
+        if attempt_label_slug:
+            prefix_parts.append(attempt_label_slug)
         if step_instance_id:
             prefix_parts.extend(
                 [
+                    PORTABLE_LOG_MARKER,
                     slugify_log_token(step_display_name) or "step",
                     slugify_log_token(step_instance_id) or "instance",
                 ]
@@ -561,6 +579,14 @@ class CodexRunner:
         attempt = 1
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        attempt_budget = (
+            AttemptExecutionBudget(
+                timeout_seconds=execution_budget.timeout_seconds,
+                checkpoint_seconds=execution_budget.checkpoint_seconds,
+            )
+            if execution_budget is not None
+            else None
+        )
 
         while True:
             result = run_streaming_codex_command(
@@ -571,13 +597,24 @@ class CodexRunner:
                 activity_context=activity_context,
                 activity_callback=activity_callback,
                 execution_budget=execution_budget,
+                attempt_budget=attempt_budget,
             )
             current_stdout = output_text(result.stdout)
             current_stderr = output_text(result.stderr)
+            if attempt_budget is not None and (current_stdout or current_stderr):
+                attempt_budget.notify_activity()
             stdout_parts.append(current_stdout)
             stderr_parts.append(current_stderr)
             result.stdout = "".join(stdout_parts)
             result.stderr = "".join(stderr_parts)
+
+            if attempt_budget is not None:
+                expiration = attempt_budget.expiration()
+                if expiration is not None:
+                    result.returncode = 124
+                    if expiration not in result.stderr:
+                        result.stderr += f"{expiration}\n"
+                    return result
 
             if classify_run_wide_blocker(current_stdout, current_stderr) is not None:
                 return result
@@ -597,7 +634,17 @@ class CodexRunner:
             result.stderr = "".join(stderr_parts)
             self.write_log_text(stdout_path, result.stdout, log_root=log_root)
             self.write_log_text(stderr_path, result.stderr, log_root=log_root)
-            time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
+            if attempt_budget is None:
+                time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
+            else:
+                expiration = attempt_budget.wait_for_retry(
+                    CODEX_CONNECTION_RETRY_DELAY_SECONDS
+                )
+                if expiration is not None:
+                    result.returncode = 124
+                    if expiration not in result.stderr:
+                        result.stderr += f"{expiration}\n"
+                    return result
             attempt += 1
 
     def render_dry_run_prompts(
@@ -780,7 +827,11 @@ class CodexRunner:
                 if agent_paths is not None
                 else role_config.get("agents", [])
             ),
-            "STEP_GUIDANCE": step_guidance or "No additional Step Guidance.",
+            "STEP_GUIDANCE": (
+                StepGuidance(step_guidance).text
+                if step_guidance
+                else "No additional Step Guidance."
+            ),
             "STEP_GUIDANCE_PRECEDENCE": STEP_GUIDANCE_PRECEDENCE,
             "FIX_LIST": fix_list or ["None"],
             "CODER_RESULT": json.dumps(result_to_dict(coder_result), indent=2),
@@ -849,7 +900,9 @@ def slugify_log_token(value: str | None) -> str:
     if not value:
         return ""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug[:48]
+    # Truncation can expose the separator that was previously followed by
+    # characters outside the length limit, so normalize the boundary again.
+    return slug[:48].strip("-")
 
 
 def _confined_log_path(path: Path, log_root: Path) -> Path:

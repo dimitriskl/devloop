@@ -55,6 +55,17 @@ class TerminalUnicodeSafetyTests(unittest.TestCase):
 
         self.assertEqual(sanitized, multilingual_text)
 
+    def test_sanitizer_discards_unterminated_control_strings(self) -> None:
+        unterminated_osc = "prefix " + ("\x1b]unterminated " * 2_048)
+        unterminated_dcs = "prefix " + ("\x1bPunterminated " * 2_048)
+
+        self.assertEqual(
+            sanitize_terminal_text("Planning response."),
+            "Planning response.",
+        )
+        self.assertEqual(sanitize_terminal_text(unterminated_osc), "prefix ")
+        self.assertEqual(sanitize_terminal_text(unterminated_dcs), "prefix ")
+
     def test_progress_surface_preserves_rtl_joining_and_joined_emoji(self) -> None:
         multilingual_text = "بررسی می\u200cروم 👩\u200d💻"
         progress = statusui.project_workflow_progress(
