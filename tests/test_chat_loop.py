@@ -1,15 +1,40 @@
 from __future__ import annotations
 
+import io
+import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
 from devloop import chat_loop
 from devloop.chat_loop import ChatCallbacks, ChatConfig, ChatSession
+from devloop.portable_workflow import (
+    ANALYSIS_STEP_ID,
+    CodexExecutionSettings,
+    ExecutionBudget,
+    FastPreference,
+    StepRuntimeState,
+    StepRuntimeStatus,
+    default_codex_execution_settings,
+    default_portable_component_catalog,
+    default_portable_workflow,
+)
+from devloop.statusui import (
+    DashboardStatus,
+    IssueResultSummary,
+    project_workflow_progress,
+)
+from tests.terminal_safety import (
+    HOSTILE_TERMINAL_TEXT,
+    assert_terminal_text_is_safe,
+)
 
 
 class ParseSessionIdTests(unittest.TestCase):
@@ -51,6 +76,19 @@ class DetectImagePathsTests(unittest.TestCase):
         self.assertEqual(chat_loop.detect_image_paths("read docs/readme.md now"), [])
 
 
+class AnalysisExecutionBudgetTests(unittest.TestCase):
+    def test_streaming_analysis_enforces_its_snapshotted_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, redirect_stdout(StringIO()):
+            returncode, output = chat_loop.run_streaming(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                Path(raw),
+                execution_budget=ExecutionBudget(0.2, 0.2),
+            )
+
+        self.assertEqual(returncode, 124)
+        self.assertIn("Execution Budget", output)
+
+
 class ResumeCommandTests(unittest.TestCase):
     def test_resume_at_first_prompt_does_not_start_codex(self) -> None:
         turns: list[list[str]] = []
@@ -72,6 +110,7 @@ class ResumeCommandTests(unittest.TestCase):
                     codex="codex",
                     repo_root=Path(raw),
                     bundle_root=Path(raw),
+                    codex_settings=default_codex_execution_settings("analysis"),
                 ),
                 initial_prompt="PLAN",
                 callbacks=callbacks,
@@ -103,6 +142,7 @@ class ResumeCommandTests(unittest.TestCase):
                     codex="codex",
                     repo_root=Path(raw),
                     bundle_root=Path(raw),
+                    codex_settings=default_codex_execution_settings("analysis"),
                 ),
                 initial_prompt="PLAN",
                 callbacks=callbacks,
@@ -116,6 +156,33 @@ class ResumeCommandTests(unittest.TestCase):
     def test_help_lists_resume(self) -> None:
         self.assertIn("/resume", chat_loop.HELP_TEXT)
 
+    def test_help_describes_options_as_the_workflow_editor(self) -> None:
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        with tempfile.TemporaryDirectory() as raw, redirect_stdout(
+            StringIO()
+        ) as output:
+            result = chat_loop.run_planning_chat(
+                config=ChatConfig(
+                    codex="codex",
+                    repo_root=Path(raw),
+                    bundle_root=Path(raw),
+                    codex_settings=default_codex_execution_settings("analysis"),
+                ),
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                collect_initial_message=True,
+                editor=FakeEditor(["/help", "/quit"]),
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("/options open the Workflow Editor", output.getvalue())
+        self.assertNotIn("development options", output.getvalue())
+
 
 class BuildTurnCommandTests(unittest.TestCase):
     def make_session(self) -> ChatSession:
@@ -123,6 +190,7 @@ class BuildTurnCommandTests(unittest.TestCase):
             codex="codex",
             repo_root=Path("C:/repo"),
             bundle_root=Path("F:/devloop"),
+            codex_settings=default_codex_execution_settings("analysis"),
         )
         return ChatSession(config=config)
 
@@ -157,6 +225,31 @@ class BuildTurnCommandTests(unittest.TestCase):
         command = session.build_turn_command("with images")
         self.assertEqual(command.count("-i"), 2)
         self.assertIn("C:/tmp/a.png", [part.replace("\\", "/") for part in command])
+
+    def test_fresh_and_resumed_analysis_turns_keep_exact_snapshotted_settings(self) -> None:
+        session = ChatSession(
+            config=ChatConfig(
+                codex="codex",
+                repo_root=Path("C:/repo"),
+                bundle_root=Path("F:/devloop"),
+                codex_settings=CodexExecutionSettings(
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    FastPreference.OFF,
+                ),
+            )
+        )
+
+        first = session.build_turn_command("", first_prompt="PLAN")
+        resumed = session.build_turn_command("CONTINUE")
+
+        for command in (first, resumed):
+            self.assertIn("-m", command)
+            self.assertEqual(command[command.index("-m") + 1], "gpt-5.6-sol")
+            self.assertIn('model_reasoning_effort="xhigh"', command)
+            self.assertIn('service_tier="default"', command)
+            self.assertIn("--disable", command)
+            self.assertEqual(command[command.index("--disable") + 1], "fast_mode")
 
     # --- Added beyond the brief: lock down the real `codex exec resume --help`
     # contract (Codex CLI 0.143.0). Verified live: resume does NOT accept
@@ -293,6 +386,69 @@ class RunStreamingTests(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertEqual(stdout.getvalue(), "Planning response.\n")
 
+    def test_agent_messages_cannot_inject_terminal_controls(self) -> None:
+        class OutputStream(io.StringIO):
+            def __init__(self, *, tty: bool) -> None:
+                super().__init__()
+                self._tty = tty
+
+            @property
+            def encoding(self) -> str:
+                return "utf-8"
+
+            def isatty(self) -> bool:
+                return self._tty
+
+        event = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": HOSTILE_TERMINAL_TEXT,
+                },
+            },
+            ensure_ascii=False,
+        )
+        for tty in (True, False):
+            for json_mode in (True, False):
+                with self.subTest(
+                    tty=tty,
+                    json_mode=json_mode,
+                ), tempfile.TemporaryDirectory() as raw:
+                    process = self.FakeProcess()
+                    process.stdout = [
+                        f"{event if json_mode else HOSTILE_TERMINAL_TEXT}\n"
+                    ]
+                    output = OutputStream(tty=tty)
+                    command = ["codex", "exec"]
+                    if json_mode:
+                        command.append("--json")
+                    command.append("PROMPT TEXT")
+                    with mock.patch.object(
+                        chat_loop,
+                        "resolve_codex_executable",
+                        return_value="codex",
+                    ), mock.patch.object(
+                        chat_loop.subprocess,
+                        "Popen",
+                        return_value=process,
+                    ), mock.patch.object(
+                        chat_loop,
+                        "WaitingIndicator",
+                        return_value=mock.Mock(),
+                    ), redirect_stdout(output):
+                        returncode, _ = chat_loop.run_streaming(
+                            command,
+                            Path(raw),
+                        )
+
+                    self.assertEqual(returncode, 0)
+                    assert_terminal_text_is_safe(
+                        self,
+                        output.getvalue(),
+                        redirected=not tty,
+                    )
+
     def test_turn_completed_stops_reading_and_reaps_lingering_process(self) -> None:
         class OpenAfterCompletion:
             def __init__(self) -> None:
@@ -426,6 +582,59 @@ class RunStreamingTests(unittest.TestCase):
             ],
         )
 
+    def test_streaming_analysis_uses_the_shared_progress_projection(self) -> None:
+        process = self.FakeProcess()
+        process.stdout = [
+            (
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"Planning response."}}\n'
+            ),
+        ]
+        workflow = default_portable_workflow()
+        progress = project_workflow_progress(
+            workflow,
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=ANALYSIS_STEP_ID,
+                    issue_id=None,
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id=None,
+        )
+        indicator = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            chat_loop,
+            "resolve_codex_executable",
+            return_value="codex",
+        ), mock.patch.object(
+            chat_loop.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            chat_loop,
+            "WaitingIndicator",
+            return_value=indicator,
+        ) as indicator_type, redirect_stdout(StringIO()):
+            chat_loop.run_streaming(
+                ["codex", "exec", "--json", "PROMPT TEXT"],
+                Path(raw),
+                workflow_progress=progress,
+            )
+
+        self.assertIs(
+            indicator_type.call_args.kwargs["workflow_progress"],
+            progress,
+        )
+        self.assertIn(
+            mock.call.notify_activity("Planning response."),
+            indicator.method_calls,
+        )
+
     def test_waiting_indicator_animates_multiple_frames(self) -> None:
         class InteractiveOutput(StringIO):
             def isatty(self) -> bool:
@@ -497,7 +706,126 @@ class FakeEditor:
 
 class RunPlanningChatTests(unittest.TestCase):
     def make_config(self, repo: Path) -> ChatConfig:
-        return ChatConfig(codex="codex", repo_root=repo, bundle_root=repo / "bundle")
+        return ChatConfig(
+            codex="codex",
+            repo_root=repo,
+            bundle_root=repo / "bundle",
+            codex_settings=default_codex_execution_settings("analysis"),
+        )
+
+    def test_planning_surface_renders_the_shared_workflow_projection(self) -> None:
+        workflow = default_portable_workflow()
+        progress = project_workflow_progress(
+            workflow,
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=ANALYSIS_STEP_ID,
+                    issue_id=None,
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id=None,
+            activity="Planning the PRD and issue pack.",
+        )
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "ARTIFACTS",
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+
+        with tempfile.TemporaryDirectory() as raw, redirect_stdout(StringIO()) as output:
+            config = self.make_config(Path(raw))
+            config.workflow_progress = progress
+            result = chat_loop.run_planning_chat(
+                config=config,
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=lambda *_: (0, "ok"),
+                editor=FakeEditor([]),
+            )
+
+        self.assertEqual(result, "ARTIFACTS")
+        self.assertIn("WORKFLOW", output.getvalue())
+        self.assertIn("ISSUE STEPS", output.getvalue())
+        self.assertIn(
+            "ACTIVE Analysis · model gpt-5.6-sol · effort xhigh · Fast OFF",
+            output.getvalue(),
+        )
+
+    def test_planning_surface_sanitizes_every_dynamic_progress_field(self) -> None:
+        progress = project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=ANALYSIS_STEP_ID,
+                    issue_id=None,
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id=None,
+        )
+        active = replace(
+            progress.workflow_steps[0],
+            display_name=f"{HOSTILE_TERMINAL_TEXT} {'x' * 500}",
+            model=HOSTILE_TERMINAL_TEXT,
+            reasoning_effort=HOSTILE_TERMINAL_TEXT,
+            fast=HOSTILE_TERMINAL_TEXT,
+        )
+        issue_step = replace(
+            progress.issue_steps[0],
+            display_name=HOSTILE_TERMINAL_TEXT,
+        )
+        progress = replace(
+            progress,
+            workflow_steps=(active,),
+            issue_steps=(issue_step, *progress.issue_steps[1:]),
+            activity=replace(progress.activity, safe_text=HOSTILE_TERMINAL_TEXT),
+            issue_title=HOSTILE_TERMINAL_TEXT,
+            last_result=IssueResultSummary(
+                issue_number=HOSTILE_TERMINAL_TEXT,
+                status=DashboardStatus.PASS,
+                pass_number=1,
+                elapsed_seconds=1,
+            ),
+        )
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "ARTIFACTS",
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            redirect_stdout(StringIO()) as output,
+            mock.patch(
+                "devloop.statusui.shutil.get_terminal_size",
+                return_value=os.terminal_size((1200, 40)),
+            ),
+        ):
+            config = self.make_config(Path(raw))
+            config.workflow_progress = progress
+            chat_loop.run_planning_chat(
+                config=config,
+                initial_prompt="PLAN",
+                callbacks=callbacks,
+                turn_runner=lambda *_: (0, "ok"),
+                editor=FakeEditor([]),
+            )
+
+        rendered = output.getvalue()
+        assert_terminal_text_is_safe(self, rendered, redirected=True)
+        self.assertNotIn("x" * 500, rendered)
+        self.assertIn("model Καλημέρα 世界 ESC-CSI C1-CSI BIDI", rendered)
+        self.assertIn("effort Καλημέρα 世界 ESC-CSI C1-CSI BIDI", rendered)
+        self.assertIn("Fast Καλημέρα 世界 E...", rendered)
 
     def test_returns_artifacts_when_probe_finds_them(self) -> None:
         turns: list[list[str]] = []

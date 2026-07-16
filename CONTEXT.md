@@ -444,5 +444,49 @@ The lifecycle state of one Workflow Step execution: `PENDING`, `READY`, `RUNNING
 _Avoid_: Workflow status, Step Outcome
 
 **Issue Status**:
-The lifecycle state of one Issue as it is processed by Workflow Steps: `PENDING`, `READY`, `IN_PROGRESS`, `WAITING_FOR_INPUT`, `CHANGES_REQUESTED`, `BLOCKED`, `COMPLETED`, `FAILED`, `CANCELLED`, or `SKIPPED`. The Issue's current Workflow Step is tracked separately rather than encoded in this status.
+The lifecycle state of one Issue as it is processed by Workflow Steps: `PENDING`, `READY`, `WAITING_ON_DEPENDENCY`, `IN_PROGRESS`, `WAITING_FOR_INPUT`, `CHANGES_REQUESTED`, `BLOCKED`, `COMPLETED`, `FAILED`, `CANCELLED`, or `SKIPPED`. The Issue's current Workflow Step is tracked separately rather than encoded in this status.
 _Avoid_: Step status, workflow status
+
+**Dependency-Ready Issue**:
+An unfinished Issue whose declared dependencies have all reached `COMPLETED` after their full configured workflows and which is therefore eligible for an execution attempt.
+_Avoid_: Next Issue, next index entry
+
+**Ready Issue Order**:
+The deterministic order of Dependency-Ready Issues inherited from the authored Issue Index. Dependencies decide eligibility; index position breaks ties between eligible Issues.
+_Avoid_: Dependency order, automatic priority score
+
+**Declared Issue Dependency**:
+An explicit Issue-to-Issue prerequisite linked under the dependent Issue's `Blocked by` section. Issue Index order never creates an implicit dependency.
+_Avoid_: Earlier Issue, preceding index entry, inferred dependency
+
+**Valid Issue Dependency Graph**:
+A set of Declared Issue Dependencies with only known Issue references, no self-dependencies, and no cycles. An invalid graph is not eligible to start a Dev Loop run.
+_Avoid_: Best-effort dependency graph, partially schedulable graph
+
+**Dependency-Waiting Issue**:
+An unfinished Issue in `WAITING_ON_DEPENDENCY` because at least one declared dependency is incomplete. It has not failed itself and receives no execution attempt or retry while waiting.
+_Avoid_: Blocked Issue, failed Issue
+
+**Execution-Blocked Issue**:
+An Issue whose own execution attempt ended `BLOCKED`; this is distinct from an Issue merely waiting on an incomplete dependency.
+_Avoid_: Dependency-Waiting Issue, skipped Issue
+
+**Normal Scheduling Phase**:
+The run phase that executes Dependency-Ready Issues with unused normal attempt budget in Ready Issue Order while leaving dependent Issues waiting.
+_Avoid_: Initial index pass, sequential issue loop
+
+**Blocker Resolution Phase**:
+The fallback run phase entered only when no Dependency-Ready Issue has unused normal attempt budget. It spends additional attempts on Execution-Blocked Issues so their completion can unlock waiting work.
+_Avoid_: Retry every unfinished Issue, blocked retry sweep
+
+**Blocker Resolution Budget**:
+The bounded allowance of five additional workflow passes for an unresolved Dependency-Ready Issue after its normal attempt budget is exhausted. Each additional pass is accounted independently rather than multiplying the normal budget.
+_Avoid_: Five retry rounds, unlimited retries
+
+**Blocker Resolution Round**:
+One additional pass for each unresolved Dependency-Ready Issue in Ready Issue Order. Dependency readiness is recomputed after every pass, and newly unlocked Normal Scheduling work takes priority over the rest of the round.
+_Avoid_: Exhaust one blocker before the next, retry sweep
+
+**Run-Wide Blocker**:
+A backend condition such as exhausted usage, invalid authentication, or service unavailability that prevents every Issue from executing. It pauses the run without changing Issue outcomes or consuming Issue attempt budgets.
+_Avoid_: Issue blocker, failed Issue attempt

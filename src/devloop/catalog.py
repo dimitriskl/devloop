@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .workflow_defaults import atomic_write_planner_configuration
+
 DEFAULT_PLANNING_SKILLS = ("grill-with-docs", "domain-modeling", "to-prd", "to-issues")
 
 
@@ -120,8 +122,7 @@ def save_selection(state_path: Path, selection: Selection) -> None:
         pass
     data["selection"] = selection.to_dict()
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        atomic_write_planner_configuration(state_path, data)
     except OSError as exc:
         print(f"Could not save selection: {exc}", file=sys.stderr)
 

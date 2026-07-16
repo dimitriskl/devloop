@@ -4,12 +4,13 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from . import catalog as catalog_module
 from . import statusui
@@ -18,17 +19,46 @@ from .gitrefs import sanitize_branch_name
 from .github_install import install_from_github
 from .issue_pack import parse_issue_index, select_issues
 from .lineeditor import LineEditor
+from .model_catalog import (
+    CatalogDiscoveryError,
+    CodexModelCatalog,
+    CodexModelCatalogAdapter,
+)
+from .portable_workflow import (
+    IssueStatus,
+    PortableStepComponentCatalog,
+    StepInstanceId,
+    StepRuntimeState,
+    StepRuntimeStatus,
+    WorkflowDefinition,
+    default_portable_component_catalog,
+    parse_issue_status,
+    planning_workflow_step,
+    preflight_codex_execution_settings,
+)
+from .portable_component_catalog import build_portable_component_catalog
 from .product_scope import TargetProduct, detect_target_product
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage
+from .step_configuration import STEP_GUIDANCE_PRECEDENCE
+from .step_configuration import CapabilityKind, CapabilityReference
+from .state import LoopStateWriter
+from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext
 from .worktree import (
     branch_exists,
     build_worktree_add_command,
     resolve_existing_worktree,
 )
+from .workflow_editor import EditorResult, WorkflowDraft, run_workflow_editor
+from .workflow_defaults import (
+    PORTABLE_PLANNER_CONFIGURATION_FILE,
+    WorkflowDefaultStore,
+    atomic_write_planner_configuration,
+    portable_planner_configuration_path,
+)
 
-PLAN_STATE_FILE = "devloop-plan.json"
+PLAN_STATE_FILE = PORTABLE_PLANNER_CONFIGURATION_FILE
 TARGET_REPO_STATE_KEY = "target_repo"
 LAST_WORKTREE_PARENT_STATE_KEY = "last_worktree_parent"
 _PROMPT_EDITOR: LineEditor | None = None
@@ -89,7 +119,14 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         print(f"PRD: {artifacts.prd_path}")
         print(f"Issue index: {artifacts.issues_index}")
         print_prd_status(artifacts)
-        return run_handoff(bundle.root, repo_root, artifacts, selection, state_path)
+        return run_handoff(
+            bundle.root,
+            repo_root,
+            artifacts,
+            selection,
+            state_path,
+            codex=args.codex,
+        )
 
     repo_root = choose_target_repo(args.repo)
     if not args.goal:
@@ -107,6 +144,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
                 resumed_artifacts,
                 selection,
                 state_path,
+                codex=args.codex,
             )
     repo_root = apply_branch_strategy(repo_root)
 
@@ -119,16 +157,41 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     # modified past their snapshotted mtime.
     baseline = snapshot_artifacts(repo_root)
 
-    found_catalog = catalog_module.discover(bundle.root)
-    skill_paths = catalog_module.planning_skill_paths(selection, found_catalog)
     wiki_index = bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"
+    component_catalog = build_portable_component_catalog(bundle.root)
+    model_catalog_adapter = CodexModelCatalogAdapter(
+        args.codex,
+        cwd=repo_root,
+    )
+    workflow_snapshot = preflight_analysis_workflow(
+        bundle_root=bundle.root,
+        state_path=state_path,
+        selection=selection,
+        component_catalog=component_catalog,
+        model_catalog_loader=model_catalog_adapter.discover,
+    )
+    if workflow_snapshot is None:
+        print("Planning aborted before Analysis execution.")
+        return 0
+    planning_step = planning_workflow_step(workflow_snapshot, component_catalog)
     initial_prompt = build_planning_prompt(
         repo_root=repo_root,
         bundle_root=bundle.root,
         goal=goal,
-        skill_paths=skill_paths,
+        skill_paths=[
+            bundle.root / path for path in planning_step.capability_profile.skills
+        ],
+        agent_paths=[
+            bundle.root / path
+            for path in planning_step.capability_profile.agent_references
+        ],
+        step_guidance=(
+            planning_step.guidance.text if planning_step.guidance is not None else None
+        ),
         wiki_index=wiki_index,
     )
+    planning_settings = planning_step.codex_settings
+    assert planning_settings is not None
 
     config = ChatConfig(
         codex=args.codex,
@@ -136,11 +199,35 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         bundle_root=bundle.root,
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
+        codex_settings=planning_settings,
+        execution_budget=planning_step.execution_budget,
+        workflow_progress=statusui.project_workflow_progress(
+            workflow_snapshot,
+            component_catalog,
+            (
+                StepRuntimeState(
+                    step_instance_id=planning_step.instance_id,
+                    issue_id=None,
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id=None,
+            activity="Planning the PRD and issue pack.",
+        ),
     )
     callbacks = ChatCallbacks(
         probe_artifacts=lambda: _first_or_none(find_new_artifacts(repo_root, started_at, baseline)),
         manual_artifacts=lambda: _manual_artifacts(),
-        open_options=lambda: run_options_menu(bundle.root, selection, state_path),
+        open_options=lambda: run_options_menu(
+            bundle.root,
+            selection,
+            state_path,
+            current_workflow=workflow_snapshot,
+            component_catalog=component_catalog,
+            model_catalog_loader=model_catalog_adapter.discover,
+        ),
         status_summary=lambda: _status_summary(repo_root, selection),
         resume_artifacts=lambda: choose_resume_artifacts(repo_root),
     )
@@ -161,7 +248,69 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     print()
     print(f"PRD: {artifacts.prd_path}")
     print(f"Issue index: {artifacts.issues_index}")
-    return run_handoff(bundle.root, repo_root, artifacts, selection, state_path)
+    return run_handoff(
+        bundle.root,
+        repo_root,
+        artifacts,
+        selection,
+        state_path,
+        codex=args.codex,
+        workflow_snapshot=workflow_snapshot,
+    )
+
+
+def preflight_analysis_workflow(
+    *,
+    bundle_root: Path,
+    state_path: Path,
+    selection: "catalog_module.Selection",
+    component_catalog: PortableStepComponentCatalog,
+    model_catalog_loader: Callable[[], CodexModelCatalog],
+) -> WorkflowDefinition | None:
+    """Return the exact workflow authorized for Analysis after interactive repair."""
+    while True:
+        try:
+            workflow = WorkflowDefaultStore(state_path, component_catalog).load()
+            planning_step = planning_workflow_step(workflow, component_catalog)
+            live_model_catalog = model_catalog_loader()
+            preflight_codex_execution_settings(
+                workflow,
+                component_catalog,
+                live_model_catalog,
+            )
+            if planning_step.codex_settings is None:
+                raise ValueError(
+                    f"Planning step {planning_step.display_name!r} has no Codex "
+                    "Execution Settings."
+                )
+            return workflow
+        except (CatalogDiscoveryError, KeyError, ValueError) as error:
+            safe_error = sanitize_terminal_text(error, preserve_newlines=False)
+            print(
+                "Codex Execution Settings preflight failed before Analysis: "
+                f"{safe_error}"
+            )
+            print(
+                "Recovery: /options opens the Workflow Editor; retry-catalog "
+                "retries live discovery; /quit stops planning."
+            )
+        action = read_prompt(
+            "Preflight action [/options/retry-catalog/quit]: "
+        ).strip().casefold()
+        if action == "/options":
+            run_options_menu(
+                bundle_root,
+                selection,
+                state_path,
+                component_catalog=component_catalog,
+                model_catalog_loader=model_catalog_loader,
+            )
+        elif action in {"retry-catalog", "/retry-catalog"}:
+            continue
+        elif action in {"quit", "/quit"}:
+            return None
+        else:
+            print("Choose /options, retry-catalog, or /quit.")
 
 
 def _first_or_none(candidates: list[PlanningArtifacts]) -> "PlanningArtifacts | list[PlanningArtifacts] | None":
@@ -384,8 +533,7 @@ def save_plan_state_value(key: str, value: object, description: str) -> None:
     data = load_plan_state()
     data[key] = value
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        atomic_write_planner_configuration(state_path, data)
     except OSError as exc:
         print(f"Could not save {description}: {exc}", file=sys.stderr)
 
@@ -399,32 +547,197 @@ class HandoffParams:
     branch_name: str
 
 
-def run_options_menu(bundle_root: Path, selection: "catalog_module.Selection", state_path: Path) -> None:
+def run_options_menu(
+    bundle_root: Path,
+    selection: "catalog_module.Selection",
+    state_path: Path,
+    *,
+    current_workflow: WorkflowDefinition | None = None,
+    component_catalog: PortableStepComponentCatalog | None = None,
+    model_catalog_loader: Callable[[], CodexModelCatalog] | None = None,
+) -> None:
+    draft_selection = catalog_module.Selection.from_dict(selection.to_dict())
+    installed_components = component_catalog or build_portable_component_catalog(
+        bundle_root
+    )
+    result = run_workflow_editor(
+        state_path,
+        read_line=read_prompt,
+        write=print,
+        terminal_width=terminal_width(),
+        current_workflow=current_workflow,
+        catalog=installed_components,
+        open_capabilities=lambda draft, step_id: run_capability_options_menu(
+            bundle_root,
+            draft_selection,
+            draft,
+            step_id,
+            installed_components,
+        ),
+        configuration_updates=lambda: {"selection": draft_selection.to_dict()},
+        model_catalog_loader=model_catalog_loader,
+    )
+    if result is EditorResult.APPLIED:
+        selection.planning_skills = list(draft_selection.planning_skills)
+        selection.role_skills = {
+            role: list(paths) for role, paths in draft_selection.role_skills.items()
+        }
+        selection.role_agents = {
+            role: list(paths) for role, paths in draft_selection.role_agents.items()
+        }
+
+
+def terminal_width() -> int:
+    return max(40, shutil.get_terminal_size(fallback=(100, 24)).columns)
+
+
+def load_current_run_workflow(
+    issues_index: Path,
+    *,
+    component_catalog: PortableStepComponentCatalog | None = None,
+) -> WorkflowDefinition | None:
+    state_writer = LoopStateWriter(issues_index)
+    if (
+        "resolved_workflow" not in state_writer.state
+        and "resolved_workflow_hash" not in state_writer.state
+    ):
+        return None
+    return state_writer.resolved_workflow(
+        component_catalog or default_portable_component_catalog()
+    )
+
+
+def load_handoff_current_workflow(
+    repo_root: Path,
+    artifacts: PlanningArtifacts,
+    params: HandoffParams,
+    *,
+    component_catalog: PortableStepComponentCatalog | None = None,
+) -> WorkflowDefinition | None:
+    issues_index = artifacts.issues_index
+    if params.use_worktree and params.worktree_path.exists():
+        existing_worktree = resolve_existing_worktree(
+            repo_root,
+            params.worktree_path,
+            params.branch_name,
+        )
+        if existing_worktree is not None:
+            try:
+                relative_index = issues_index.resolve().relative_to(
+                    repo_root.resolve()
+                )
+            except ValueError:
+                pass
+            else:
+                issues_index = existing_worktree / relative_index
+    return load_current_run_workflow(
+        issues_index,
+        component_catalog=component_catalog,
+    )
+
+
+def run_capability_options_menu(
+    bundle_root: Path,
+    selection: "catalog_module.Selection",
+    draft: WorkflowDraft,
+    step_id: StepInstanceId,
+    component_catalog: PortableStepComponentCatalog,
+) -> None:
     found = catalog_module.discover(bundle_root)
     while True:
+        step = draft.workflow.step(step_id)
         print()
-        print("Options")
-        print(f"  1. Planning skills (current: {', '.join(selection.planning_skills)})")
-        print("  2. Default agents & skills per role (coder / reviewer / qa)")
+        print(f"Capability Options — {step.display_name}")
+        print("  1. Search and toggle this Step Instance's capabilities")
+        print("  2. Reset this Step Instance to component capability defaults")
         print("  3. Add skill or agent from GitHub")
-        print("  4. Back")
+        print("  4. Back to Workflow Editor")
         choice = ask_choice("Select", {"1", "2", "3", "4"}, default="4")
         if choice == "4":
-            catalog_module.save_selection(state_path, selection)
             return
         if choice == "1":
-            edit_planning_skills(found, selection)
+            edit_step_capabilities(
+                bundle_root,
+                found,
+                draft,
+                step_id,
+                component_catalog,
+            )
         elif choice == "2":
-            edit_role_defaults(found, selection)
+            draft.reset_capabilities(step_id)
+            print("Step capability defaults restored in the workflow draft.")
         elif choice == "3":
             url = ask_required("GitHub URL (optionally #subpath)")
             result = install_from_github(
                 url,
                 bundle_root,
-                confirm=lambda message: ask_yes_no(f"{message}\nProceed?", default=False),
+                confirm=lambda message: ask_yes_no(
+                    f"{message}\nProceed?",
+                    default=False,
+                ),
             )
             print(result.message)
             found = catalog_module.discover(bundle_root)
+
+
+def edit_step_capabilities(
+    bundle_root: Path,
+    found: "catalog_module.Catalog",
+    draft: WorkflowDraft,
+    step_id: StepInstanceId,
+    component_catalog: PortableStepComponentCatalog,
+) -> None:
+    query = read_prompt("Search skills and agent references []: ").strip().casefold()
+    entries = [
+        entry
+        for entry in (*found.skills, *found.agents)
+        if not query
+        or query in entry.name.casefold()
+        or query in str(entry.path).casefold()
+    ]
+    step = draft.workflow.step(step_id)
+    component = component_catalog.resolve(step.component_id)
+    references = [
+        _catalog_capability_reference(bundle_root, entry)
+        for entry in entries
+    ]
+    print()
+    print(f"Capabilities for {step.display_name}")
+    for index, (entry, reference) in enumerate(zip(entries, references), start=1):
+        reason = component.required_capability_reason(reference)
+        if reason is not None:
+            marker = "required, locked"
+            explanation = f" — {reason}"
+        elif step.capability_profile.contains(reference):
+            marker = "enabled"
+            explanation = ""
+        else:
+            marker = "disabled"
+            explanation = ""
+        print(f"  {index}. [{marker}] {entry.kind}: {entry.name}{explanation}")
+    raw = read_prompt("Capability number to toggle (or cancel): ").strip()
+    if raw.casefold() == "cancel":
+        return
+    if not raw.isdecimal() or not 1 <= int(raw) <= len(references):
+        print("Choose a listed capability number, or cancel.")
+        return
+    try:
+        draft.toggle_capability(step_id, references[int(raw) - 1])
+    except ValueError as error:
+        print(f"Cannot toggle capability: {error}")
+
+
+def _catalog_capability_reference(
+    bundle_root: Path,
+    entry: "catalog_module.CatalogEntry",
+) -> CapabilityReference:
+    relative_path = entry.path.resolve().relative_to(bundle_root.resolve()).as_posix()
+    kind = (
+        CapabilityKind.SKILL
+        if entry.kind == "skill"
+        else CapabilityKind.AGENT_REFERENCE
+    )
+    return CapabilityReference(kind, relative_path)
 
 
 def edit_planning_skills(found: "catalog_module.Catalog", selection: "catalog_module.Selection") -> None:
@@ -478,6 +791,7 @@ def build_devloop_args(
     params: HandoffParams,
     artifacts: PlanningArtifacts,
     preset_path: Path | None,
+    codex: str = "codex",
 ) -> list[str]:
     args = [
         "--prd",
@@ -485,6 +799,8 @@ def build_devloop_args(
         "--issues",
         str(artifacts.issues_index),
         "--self-improvement-wiki",
+        "--codex",
+        codex,
     ]
     if preset_path is not None:
         args.extend(["--preset", str(preset_path)])
@@ -534,7 +850,11 @@ def run_handoff(
     artifacts: PlanningArtifacts,
     selection: "catalog_module.Selection",
     state_path: Path,
+    *,
+    codex: str = "codex",
+    workflow_snapshot: WorkflowDefinition | None = None,
 ) -> int:
+    component_catalog = build_portable_component_catalog(bundle_root)
     slug = artifact_slug(artifacts)
     params = HandoffParams(
         start_issue=None,
@@ -559,7 +879,8 @@ def run_handoff(
         else:
             print("Preset:         embedded defaults")
         raw = read_prompt(
-            "Press Enter to start development, /options to adjust, "
+            "Press Enter to start development, /options for workflow defaults, "
+            "/run-options to adjust this launch, "
             "/reset-roles to clear role overrides, /quit to stop: "
         ).strip().lower()
         if raw == "":
@@ -567,6 +888,31 @@ def run_handoff(
         if raw == "/quit":
             return 0
         if raw == "/options":
+            current_workflow = load_handoff_current_workflow(
+                repo_root,
+                artifacts,
+                params,
+                component_catalog=component_catalog,
+            )
+            if current_workflow is None:
+                current_workflow = workflow_snapshot
+            run_options_menu(
+                bundle_root,
+                selection,
+                state_path,
+                current_workflow=current_workflow,
+                component_catalog=component_catalog,
+                model_catalog_loader=CodexModelCatalogAdapter(
+                    codex,
+                    cwd=(
+                        params.worktree_path
+                        if params.use_worktree and params.worktree_path.is_dir()
+                        else repo_root
+                    ),
+                ).discover,
+            )
+            continue
+        if raw == "/run-options":
             adjust_handoff_params(params)
             continue
         if raw == "/reset-roles":
@@ -575,20 +921,23 @@ def run_handoff(
             catalog_module.save_selection(state_path, selection)
             print("Role overrides cleared; using embedded defaults.")
             continue
-        print("Unrecognized input. Press Enter, or type /options, /reset-roles, or /quit.")
+        print(
+            "Unrecognized input. Press Enter, or type /options, /run-options, "
+            "/reset-roles, or /quit."
+        )
 
     preset_path = catalog_module.write_session_preset(
         bundle_root,
         selection,
         artifacts.prd_path.parent / "devloop.session.preset.json",
     )
-    args = build_devloop_args(params, artifacts, preset_path)
+    args = build_devloop_args(params, artifacts, preset_path, codex)
 
     from .cli import main as devloop_main
 
     print()
     print("Starting Dev Loop development.")
-    return devloop_main(args)
+    return devloop_main(args, workflow_snapshot=workflow_snapshot)
 
 
 def adjust_handoff_params(params: HandoffParams) -> None:
@@ -608,16 +957,7 @@ def adjust_handoff_params(params: HandoffParams) -> None:
 
 
 def plan_state_path() -> Path:
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "DevLoop" / PLAN_STATE_FILE
-
-    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config_home:
-        return Path(xdg_config_home) / "devloop" / PLAN_STATE_FILE
-
-    return Path.home() / ".config" / "devloop" / PLAN_STATE_FILE
+    return portable_planner_configuration_path()
 
 
 def apply_branch_strategy(repo_root: Path) -> Path:
@@ -678,9 +1018,12 @@ def build_planning_prompt(
     bundle_root: Path,
     goal: str,
     skill_paths: list[Path],
+    agent_paths: list[Path] | None = None,
+    step_guidance: str | None = None,
     wiki_index: Path,
 ) -> str:
     skills_block = "\n".join(f"- {path}" for path in skill_paths)
+    agents_block = "\n".join(f"- {path}" for path in (agent_paths or []))
     return f"""You are running the Dev Loop interactive planning intake for this repository.
 
 Repository root: {repo_root}
@@ -698,6 +1041,14 @@ Target product: devloop-plan + devloop
 
 Use these bundled Codex skill instructions:
 {skills_block}
+
+Read these bundled Codex agent-reference instructions:
+{agents_block or '- None'}
+
+Step Guidance:
+Precedence: {STEP_GUIDANCE_PRECEDENCE}
+
+{step_guidance or 'No additional Step Guidance.'}
 
 Read the Dev Loop self-improvement wiki index and apply relevant lessons to this planning session:
 - {wiki_index}
@@ -806,17 +1157,20 @@ def print_prd_status(artifacts: PlanningArtifacts) -> None:
     completed = sorted(
         number
         for number, details in issues.items()
-        if isinstance(details, dict) and details.get("status") == "Completed"
+        if isinstance(details, dict)
+        and parse_issue_status(details.get("status")) is IssueStatus.COMPLETED
     )
     blocked = sorted(
         number
         for number, details in issues.items()
-        if isinstance(details, dict) and details.get("status") == "Blocked"
+        if isinstance(details, dict)
+        and parse_issue_status(details.get("status")) is IssueStatus.BLOCKED
     )
     in_progress = sorted(
         number
         for number, details in issues.items()
-        if isinstance(details, dict) and str(details.get("status", "")).startswith("In Progress")
+        if isinstance(details, dict)
+        and parse_issue_status(details.get("status")) is IssueStatus.IN_PROGRESS
     )
 
     print(f"Status file: {state_path}")
@@ -918,13 +1272,13 @@ def resume_activity(artifacts: PlanningArtifacts) -> tuple[str | None, str | Non
     issues = state.get("issues")
     if not isinstance(issues, dict):
         return None, None
-    priorities = ("In Progress", "Blocked")
-    for prefix in priorities:
+    priorities = (IssueStatus.IN_PROGRESS, IssueStatus.BLOCKED)
+    for expected_status in priorities:
         for number, details in issues.items():
             if not isinstance(details, dict):
                 continue
             status = str(details.get("status", ""))
-            if status.startswith(prefix):
+            if parse_issue_status(status) is expected_status:
                 return str(number), status
     return None, None
 

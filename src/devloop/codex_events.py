@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import re
 from enum import Enum
 from typing import Any
 
+from .terminal_text import compact_terminal_text
+
 
 MAX_ACTIVITY_TEXT_LENGTH = 240
-ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class CodexTurnOutcome(Enum):
@@ -127,15 +127,7 @@ def extract_text(value: Any) -> str:
 
 
 def compact_activity_text(text: str) -> str:
-    without_ansi = ANSI_ESCAPE_PATTERN.sub("", text)
-    printable = "".join(
-        character if character.isprintable() else " "
-        for character in without_ansi
-    )
-    compact = " ".join(printable.split())
-    if len(compact) <= MAX_ACTIVITY_TEXT_LENGTH:
-        return compact
-    return f"{compact[: MAX_ACTIVITY_TEXT_LENGTH - 3]}..."
+    return compact_terminal_text(text, max_length=MAX_ACTIVITY_TEXT_LENGTH)
 
 
 def looks_like_structured_result(text: str) -> bool:

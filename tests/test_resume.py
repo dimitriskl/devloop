@@ -12,6 +12,72 @@ from devloop.issue_pack import Issue
 from devloop.state import LoopStateWriter, ResumeRole, write_text_creating_parent
 
 
+class LoopStateLoadingTests(unittest.TestCase):
+    def test_malformed_existing_state_fails_without_replacing_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issues_index = root / "README.md"
+            issues_index.write_text("# Issues\n", encoding="utf-8")
+            state_path = root / "README.loop.state.json"
+            malformed_state = '{"events": ['
+            state_path.write_text(malformed_state, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"existing loop state.*valid JSON",
+            ):
+                LoopStateWriter(issues_index)
+
+            self.assertEqual(
+                state_path.read_text(encoding="utf-8"),
+                malformed_state,
+            )
+
+    def test_non_object_existing_state_fails_without_replacing_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issues_index = root / "README.md"
+            issues_index.write_text("# Issues\n", encoding="utf-8")
+            state_path = root / "README.loop.state.json"
+            non_object_state = '[{"unexpected": "array"}]'
+            state_path.write_text(non_object_state, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"existing loop state.*JSON object",
+            ):
+                LoopStateWriter(issues_index)
+
+            self.assertEqual(
+                state_path.read_text(encoding="utf-8"),
+                non_object_state,
+            )
+
+    def test_unreadable_existing_state_fails_without_replacing_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issues_index = root / "README.md"
+            issues_index.write_text("# Issues\n", encoding="utf-8")
+            state_path = root / "README.loop.state.json"
+            original_state = '{"events": [], "issues": {}}'
+            state_path.write_text(original_state, encoding="utf-8")
+
+            with patch.object(
+                Path,
+                "read_text",
+                side_effect=OSError("permission denied"),
+            ), self.assertRaisesRegex(
+                ValueError,
+                r"existing loop state.*could not be read: permission denied",
+            ):
+                LoopStateWriter(issues_index)
+
+            self.assertEqual(
+                state_path.read_text(encoding="utf-8"),
+                original_state,
+            )
+
+
 class LoopStateResumeTests(unittest.TestCase):
     def test_new_writer_preserves_existing_workflow_history(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -106,6 +172,41 @@ class LoopStateResumeTests(unittest.TestCase):
             cli.run_issue(issue, runner, resumed_run, max_passes=3)
 
             self.assertEqual(runner.calls[0], ("reviewer", 1, []))
+
+    def test_canonical_in_progress_status_restores_the_legacy_role_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001-example.md"
+            issue_path.write_text("# Issue 0001\n", encoding="utf-8")
+            issues_index = root / "README.md"
+            issues_index.write_text("[Issue 0001](./0001-example.md)\n", encoding="utf-8")
+            issue = Issue("0001", "Issue 0001", issue_path, completed=False)
+            state_path = root / "README.loop.state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "events": [],
+                        "issues": {
+                            issue.number: {
+                                "status": "IN_PROGRESS",
+                                "passes": [
+                                    {
+                                        "role": "coder",
+                                        "pass": 1,
+                                        "result": {"status": "PASS"},
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cursor = LoopStateWriter(issues_index).resume_issue(issue)
+
+        self.assertEqual(cursor.next_role, ResumeRole.REVIEWER)
+        self.assertEqual(cursor.pass_number, 1)
 
     def test_reviewer_pass_resumes_at_qa_without_repeating_prior_roles(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

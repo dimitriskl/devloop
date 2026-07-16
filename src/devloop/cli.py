@@ -5,29 +5,66 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from .codex_runner import CodexRunner, RoleResult
 from .issue_pack import Issue, find_repo_root, parse_issue_index, select_issues
 from .lineeditor import LineEditor
+from .model_catalog import (
+    CatalogDiscoveryError,
+    CodexModelCatalog,
+    CodexModelCatalogAdapter,
+)
 from .product_scope import require_portable_target
+from .portable_component_catalog import build_portable_component_catalog
+from .portable_workflow import (
+    IssueStatus,
+    PortableStepComponentCatalog,
+    PortableWorkflowCheckpoint,
+    PortableWorkflowExecutor,
+    StepScope,
+    WorkflowDefinition,
+    default_portable_component_catalog,
+    default_portable_workflow,
+    load_portable_workflow,
+    preflight_codex_execution_settings,
+)
 from .self_improvement_wiki import (
     DEFAULT_SELF_IMPROVEMENT_WIKI_PATH,
     ensure_self_improvement_wiki,
     resolve_self_improvement_wiki_path,
     write_self_improvement_context,
 )
-from .state import IssueResumeCursor, LoopStateWriter, ResumeRole, mark_issue_completed
+from .state import (
+    IssueResumeCursor,
+    LoopStateWriter,
+    ResumeRole,
+    mark_issue_completed,
+    mark_portable_issue_completed,
+)
 from .subprocess_utils import run_captured_text
+from .terminal_text import compact_terminal_text, sanitize_terminal_text
 from .templates import BundleContext, load_preset
 from .worktree import resolve_worktree
+from .workflow_defaults import (
+    WorkflowDefaultStore,
+    portable_planner_configuration_path,
+)
+from .workflow_editor import run_workflow_editor
 from . import statusui
 from .statusui import Stage
 
 _PROMPT_EDITOR: LineEditor | None = None
+_MAX_ISSUE_IDENTIFIER_LENGTH = 64
+_MAX_ISSUE_TITLE_LENGTH = 160
+_MAX_ATTEMPT_LABEL_LENGTH = 80
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    workflow_snapshot: WorkflowDefinition | None = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -75,7 +112,10 @@ def main(argv: list[str] | None = None) -> int:
         print("No pending issues selected.")
         return 0
 
-    pending_numbers = ", ".join(issue.number for issue in selected_source_issues)
+    pending_numbers = ", ".join(
+        _terminal_issue_identifier(issue.number)
+        for issue in selected_source_issues
+    )
     print(f"Selected issues: {pending_numbers}")
 
     worktree = resolve_worktree(
@@ -119,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bundle = BundleContext.from_file(Path(__file__).resolve())
     preset = load_preset(resolve_bundle_path(bundle.root, args.preset))
+    component_catalog = build_portable_component_catalog(bundle.root, preset.roles)
     state_writer = LoopStateWriter(issues_index_in_repo)
     runner = CodexRunner(
         bundle=bundle,
@@ -133,6 +174,33 @@ def main(argv: list[str] | None = None) -> int:
         use_self_improvement_wiki=args.self_improvement_wiki,
     )
 
+    try:
+        if args.dry_run:
+            resolve_run_workflow(
+                state_writer,
+                component_catalog,
+                user_workflow_path=portable_planner_configuration_path(),
+                workflow_snapshot=workflow_snapshot,
+            )
+        else:
+            resolved_workflow = resolve_run_workflow_with_repair(
+                state_writer,
+                component_catalog,
+                user_workflow_path=portable_planner_configuration_path(),
+                model_catalog_loader=CodexModelCatalogAdapter(
+                    runner.codex,
+                    cwd=repo_root,
+                ).discover,
+                read_line=read_prompt,
+                write=print,
+                workflow_snapshot=workflow_snapshot,
+                allow_interactive_repair=not args.non_interactive,
+            )
+            if resolved_workflow is None:
+                print("Run cancelled before Codex Execution Settings were authorized.")
+                return 0
+    except ValueError as exc:
+        parser.error(f"Codex Execution Settings preflight failed: {exc}")
     state_writer.record_run_start(
         repo_root=repo_root,
         prd_path=prd_in_repo,
@@ -168,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
             dashboard_position=position,
             dashboard_total=len(issues),
             dashboard=delivery_dashboard,
+            component_catalog=component_catalog,
         )
 
         if issue_result.status in {"BLOCKED", "FAIL"}:
@@ -193,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
             state_writer=state_writer,
             max_passes=args.blocked_retry_max_passes,
             max_rounds=args.blocked_retry_rounds,
+            component_catalog=component_catalog,
         )
         overall_status = 2 if remaining_blocked else 0
     elif blocked_issues and args.no_blocked_retry:
@@ -227,11 +297,19 @@ def main(argv: list[str] | None = None) -> int:
                 run_context_path=context_path,
             )
             state_writer.record_self_improvement_wiki_result(wiki_root, memory_result)
+            safe_summary = sanitize_terminal_text(
+                memory_result.summary,
+                preserve_newlines=False,
+            )
 
             if memory_result.status == "PASS":
-                print(f"Dev Loop self-improvement wiki updated: {memory_result.summary}")
+                print(f"Dev Loop self-improvement wiki updated: {safe_summary}")
             else:
-                print(f"Dev Loop self-improvement wiki update {memory_result.status}: {memory_result.summary}", file=sys.stderr)
+                print(
+                    f"Dev Loop self-improvement wiki update "
+                    f"{memory_result.status}: {safe_summary}",
+                    file=sys.stderr,
+                )
 
     if overall_status == 0:
         print("Dev loop finished.")
@@ -289,14 +367,28 @@ def build_parser() -> argparse.ArgumentParser:
 def issue_progress_label(position: int, total: int, issue_number: str) -> str:
     after_current = max(0, total - position)
     return (
-        f"issue {issue_number} ({position}/{total}; "
+        f"issue {_terminal_issue_identifier(issue_number)} ({position}/{total}; "
         f"{after_current} after current)"
     )
 
 
 def issue_activity_label(position: int, total: int, issue_number: str) -> str:
     after_current = max(0, total - position)
-    return f"{issue_number} {position}/{total} +{after_current}"
+    return (
+        f"{_terminal_issue_identifier(issue_number)} "
+        f"{position}/{total} +{after_current}"
+    )
+
+
+def _terminal_issue_identifier(value: object) -> str:
+    return compact_terminal_text(
+        value,
+        max_length=_MAX_ISSUE_IDENTIFIER_LENGTH,
+    )
+
+
+def _terminal_issue_title(value: object) -> str:
+    return compact_terminal_text(value, max_length=_MAX_ISSUE_TITLE_LENGTH)
 
 
 def run_issue(
@@ -313,7 +405,11 @@ def run_issue(
     dashboard_position: int = 1,
     dashboard_total: int = 1,
     dashboard: statusui.IssueDashboard | None = None,
+    component_catalog: PortableStepComponentCatalog | None = None,
 ) -> RoleResult:
+    catalog = component_catalog or _portable_catalog_for_runner(runner)
+    display_issue_number = _terminal_issue_identifier(issue.number)
+    display_issue_title = _terminal_issue_title(issue.title)
     resume_cursor = IssueResumeCursor()
     fix_list = list(initial_fix_list or [])
     if attempt_label is None and initial_fix_list is None:
@@ -323,15 +419,73 @@ def run_issue(
     last_coder = resume_cursor.coder_result
     last_review = resume_cursor.reviewer_result
     last_qa = resume_cursor.qa_result
+    portable_recovery: PortableWorkflowCheckpoint | None = None
+    completed_execution = None
+    portable_workflow: WorkflowDefinition | None = None
+    if not runner.dry_run and resume_cursor == IssueResumeCursor():
+        portable_workflow = resolve_run_workflow(state_writer, catalog)
+        completed_execution = state_writer.completed_portable_workflow(
+            issue,
+            portable_workflow,
+        )
+        portable_recovery = state_writer.resume_portable_workflow(
+            issue,
+            portable_workflow,
+        )
+        if portable_recovery is None:
+            portable_recovery = state_writer.retry_portable_workflow(
+                issue,
+                portable_workflow,
+                pass_number=start_pass,
+            )
+    if completed_execution is not None:
+        assert portable_workflow is not None
+        mark_portable_issue_completed(
+            issue.path,
+            portable_workflow,
+            completed_execution,
+        )
+        state_writer.record_portable_execution_result(
+            issue,
+            completed_execution,
+            attempt_label=attempt_label,
+            retry_round=retry_round,
+        )
+        print(f"[{display_issue_number}] Completed from the persisted workflow result.")
+        return completed_execution.role_result
 
     state_writer.record_issue_start(issue, attempt_label=attempt_label, retry_round=retry_round)
-    title = f"{issue.title} ({attempt_label})" if attempt_label else issue.title
+    if attempt_label:
+        display_attempt_label = compact_terminal_text(
+            attempt_label,
+            max_length=_MAX_ATTEMPT_LABEL_LENGTH,
+        )
+        display_issue_title = _terminal_issue_title(
+            f"{display_issue_title} ({display_attempt_label})"
+        )
+    title = display_issue_title
 
     if runner.dry_run:
-        print(f"\n[{issue.number}] {title}")
-        runner.render_dry_run_prompts(issue)
+        print(f"\n[{display_issue_number}] {display_issue_title}")
+        workflow = resolve_run_workflow(state_writer, catalog)
+        runner.render_dry_run_prompts(
+            issue,
+            (
+                (
+                    catalog.resolve(step.component_id).adapter.role,
+                    catalog.resolve(step.component_id).adapter.execution_role,
+                    step.display_name,
+                    str(step.instance_id),
+                    step.capability_profile.skills,
+                    step.capability_profile.agent_references,
+                    step.guidance.text if step.guidance is not None else None,
+                )
+                for step in workflow.primary_path()
+                if catalog.resolve(step.component_id).scope is StepScope.ISSUE
+            ),
+        )
         state_writer.record_issue_dry_run(issue)
-        print(f"[{issue.number}] Dry run prompts rendered.")
+        print(f"[{display_issue_number}] Dry run prompts rendered.")
         return RoleResult(status="PASS", summary="Dry run prompts rendered.")
 
     owns_dashboard = dashboard is None
@@ -355,7 +509,7 @@ def run_issue(
     if last_qa is not None:
         dashboard.restore_role(Stage.QA, last_qa.status)
     if not dashboard.enabled:
-        print(f"\n[{issue.number}] {title}")
+        print(f"\n[{display_issue_number}] {title}")
 
     if resume_cursor.next_role == ResumeRole.COMPLETE:
         if last_coder is None or last_review is None or last_qa is None:
@@ -366,8 +520,26 @@ def run_issue(
         if owns_dashboard:
             dashboard.close()
         if not dashboard.enabled:
-            print(f"[{issue.number}] Completed from the persisted QA result.")
+            print(f"[{display_issue_number}] Completed from the persisted QA result.")
         return RoleResult(status="PASS", summary=f"Issue {issue.number} completed.")
+
+    if resume_cursor == IssueResumeCursor():
+        return run_fresh_portable_issue(
+            issue=issue,
+            runner=runner,
+            state_writer=state_writer,
+            pass_number=start_pass,
+            max_passes=max_passes,
+            initial_fix_list=fix_list,
+            attempt_label=attempt_label,
+            retry_round=retry_round,
+            progress=progress,
+            activity_progress=activity_progress,
+            dashboard=dashboard,
+            owns_dashboard=owns_dashboard,
+            recovery=portable_recovery,
+            catalog=catalog,
+        )
 
     for pass_number in range(start_pass, max_passes + 1):
         context = f"{progress or f'issue {issue.number}'} / pass {pass_number}"
@@ -534,7 +706,7 @@ def run_issue(
         if owns_dashboard:
             dashboard.close()
         if not dashboard.enabled:
-            print(f"[{issue.number}] Completed.")
+            print(f"[{display_issue_number}] Completed.")
         return RoleResult(status="PASS", summary=f"Issue {issue.number} completed.")
 
     blocked_summary = f"Issue {issue.number} reached max passes ({max_passes})."
@@ -560,12 +732,297 @@ def run_issue(
     return blocked
 
 
+def run_fresh_portable_issue(
+    *,
+    issue: Issue,
+    runner: CodexRunner,
+    state_writer: LoopStateWriter,
+    pass_number: int,
+    max_passes: int,
+    initial_fix_list: list[str],
+    attempt_label: str | None,
+    retry_round: int | None,
+    progress: str,
+    activity_progress: str,
+    dashboard: statusui.IssueDashboard,
+    owns_dashboard: bool,
+    recovery: PortableWorkflowCheckpoint | None,
+    catalog: PortableStepComponentCatalog,
+) -> RoleResult:
+    workflow = resolve_run_workflow(state_writer, catalog)
+    role_runner = _PortableConsoleRoleRunner(
+        runner=runner,
+        issue=issue,
+        dashboard=dashboard,
+        progress=progress,
+        activity_progress=activity_progress,
+        initial_fix_list=initial_fix_list,
+        attempt_label=attempt_label,
+    )
+
+    def record_checkpoint(checkpoint: PortableWorkflowCheckpoint) -> None:
+        state_writer.record_portable_checkpoint(issue, checkpoint)
+        dashboard.show_workflow_progress(
+            statusui.project_workflow_progress(
+                workflow,
+                catalog,
+                checkpoint.runtime_states,
+                checkpoint.attempts,
+                issue_id=issue.number,
+                issue_title=issue.title,
+            )
+        )
+
+    execution = PortableWorkflowExecutor(workflow, catalog, role_runner).run(
+        issue,
+        pass_number=pass_number,
+        max_passes=max_passes,
+        recovery=recovery,
+        checkpoint=record_checkpoint,
+    )
+    if execution.issue_status is IssueStatus.COMPLETED:
+        mark_portable_issue_completed(issue.path, workflow, execution)
+    state_writer.record_portable_execution_result(
+        issue,
+        execution,
+        attempt_label=attempt_label,
+        retry_round=retry_round,
+    )
+    step_progress = statusui.project_workflow_progress(
+        workflow,
+        catalog,
+        execution.runtime_states,
+        execution.attempts,
+        issue_id=issue.number,
+        issue_title=issue.title,
+    )
+    dashboard.show_workflow_progress(step_progress)
+
+    dashboard_status = {
+        IssueStatus.COMPLETED: "PASS",
+        IssueStatus.BLOCKED: "BLOCKED",
+        IssueStatus.FAILED: "FAIL",
+        IssueStatus.CANCELLED: "BLOCKED",
+        IssueStatus.CHANGES_REQUESTED: "FAIL",
+        IssueStatus.IN_PROGRESS: "FAIL",
+        IssueStatus.PENDING: "FAIL",
+        IssueStatus.READY: "FAIL",
+        IssueStatus.WAITING_FOR_INPUT: "BLOCKED",
+        IssueStatus.SKIPPED: "BLOCKED",
+    }[execution.issue_status]
+    if execution.issue_status is IssueStatus.COMPLETED:
+        dashboard.finish_issue(dashboard_status, "Issue completed.")
+        if not dashboard.enabled:
+            print(
+                f"[{_terminal_issue_identifier(issue.number)}] "
+                "Completed."
+            )
+    else:
+        dashboard.finish_issue(dashboard_status, execution.role_result.summary)
+
+    if owns_dashboard:
+        dashboard.close()
+    return execution.role_result
+
+
+def resolve_run_workflow(
+    state_writer: LoopStateWriter,
+    catalog: PortableStepComponentCatalog,
+    *,
+    user_workflow_path: Path | None = None,
+    live_model_catalog: CodexModelCatalog | None = None,
+    require_codex_preflight: bool = False,
+    workflow_snapshot: WorkflowDefinition | None = None,
+) -> WorkflowDefinition:
+    if (
+        "resolved_workflow" in state_writer.state
+        or "resolved_workflow_hash" in state_writer.state
+    ):
+        workflow = state_writer.resolved_workflow(catalog)
+        if workflow_snapshot is not None:
+            state_writer.record_resolved_workflow(workflow_snapshot, catalog)
+        if require_codex_preflight:
+            if live_model_catalog is None:
+                raise ValueError("A fresh live Codex Model Catalog is required.")
+            preflight_codex_execution_settings(
+                workflow,
+                catalog,
+                live_model_catalog,
+            )
+        return workflow
+    if workflow_snapshot is not None:
+        workflow = load_portable_workflow(workflow_snapshot.to_dict(), catalog)
+    else:
+        workflow = (
+            WorkflowDefaultStore(user_workflow_path, catalog).load()
+            if user_workflow_path is not None
+            else default_portable_workflow()
+        )
+    if require_codex_preflight:
+        if live_model_catalog is None:
+            raise ValueError("A fresh live Codex Model Catalog is required.")
+        preflight_codex_execution_settings(
+            workflow,
+            catalog,
+            live_model_catalog,
+        )
+    return state_writer.record_resolved_workflow(workflow, catalog)
+
+
+def resolve_run_workflow_with_repair(
+    state_writer: LoopStateWriter,
+    catalog: PortableStepComponentCatalog,
+    *,
+    user_workflow_path: Path,
+    model_catalog_loader: Callable[[], CodexModelCatalog],
+    read_line: Callable[[str], str] | None = None,
+    write: Callable[[str], None] | None = None,
+    workflow_snapshot: WorkflowDefinition | None = None,
+    allow_interactive_repair: bool = True,
+) -> WorkflowDefinition | None:
+    """Authorize and snapshot a run, with a reachable terminal repair loop."""
+    reader = read_line or input
+    writer = write or print
+    immutable_snapshot = workflow_snapshot is not None or (
+        "resolved_workflow" in state_writer.state
+        or "resolved_workflow_hash" in state_writer.state
+    )
+    while True:
+        try:
+            live_model_catalog = model_catalog_loader()
+            return resolve_run_workflow(
+                state_writer,
+                catalog,
+                user_workflow_path=user_workflow_path,
+                live_model_catalog=live_model_catalog,
+                require_codex_preflight=True,
+                workflow_snapshot=workflow_snapshot,
+            )
+        except (CatalogDiscoveryError, ValueError) as error:
+            safe_error = sanitize_terminal_text(error, preserve_newlines=False)
+            if not allow_interactive_repair:
+                raise ValueError(
+                    f"{safe_error} Retry after restoring live catalog availability or "
+                    "repair the User Workflow Default before starting the command."
+                ) from error
+            writer(f"Codex Execution Settings preflight failed: {safe_error}")
+            if immutable_snapshot:
+                writer(
+                    "The Current Run snapshot is immutable. retry-catalog retries "
+                    "live discovery; /quit leaves it unchanged."
+                )
+            else:
+                writer(
+                    "Recovery: /options opens the Workflow Editor; retry-catalog "
+                    "retries live discovery; /quit stops the run."
+                )
+        action = reader(
+            "Preflight action [/options/retry-catalog/quit]: "
+        ).strip().casefold()
+        if action == "/options" and not immutable_snapshot:
+            run_workflow_editor(
+                user_workflow_path,
+                read_line=reader,
+                write=writer,
+                terminal_width=max(
+                    40,
+                    shutil.get_terminal_size(fallback=(100, 24)).columns,
+                ),
+                catalog=catalog,
+                model_catalog_loader=model_catalog_loader,
+            )
+        elif action in {"retry-catalog", "/retry-catalog"}:
+            continue
+        elif action in {"quit", "/quit"}:
+            return None
+        elif action == "/options":
+            writer(
+                "Current Run settings cannot be edited; use retry-catalog or /quit."
+            )
+        else:
+            writer("Choose /options, retry-catalog, or /quit.")
+
+
+def _portable_catalog_for_runner(runner: CodexRunner) -> PortableStepComponentCatalog:
+    bundle = getattr(runner, "bundle", None)
+    preset = getattr(runner, "preset", None)
+    bundle_root = getattr(bundle, "root", None)
+    roles = getattr(preset, "roles", None)
+    if isinstance(bundle_root, Path) and isinstance(roles, Mapping):
+        return build_portable_component_catalog(bundle_root, roles)
+    return default_portable_component_catalog()
+
+
+class _PortableConsoleRoleRunner:
+    def __init__(
+        self,
+        *,
+        runner: CodexRunner,
+        issue: Issue,
+        dashboard: statusui.IssueDashboard,
+        progress: str,
+        activity_progress: str,
+        initial_fix_list: list[str],
+        attempt_label: str | None,
+    ) -> None:
+        self._runner = runner
+        self._issue = issue
+        self._dashboard = dashboard
+        self._progress = progress
+        self._activity_progress = activity_progress
+        self._initial_fix_list = list(initial_fix_list)
+        self._attempt_label = attempt_label
+        self._development_started = False
+
+    def run_role(self, **arguments: Any) -> RoleResult:
+        role = str(arguments["role"])
+        execution_role = str(arguments.get("role_adapter", role))
+        pass_number = int(arguments["pass_number"])
+        display_name = str(arguments["step_display_name"])
+        stage = {
+            "coder": Stage.DEVELOPMENT,
+            "reviewer": Stage.REVIEW,
+            "qa": Stage.QA,
+        }[execution_role]
+        context = f"{self._progress or f'issue {self._issue.number}'} / pass {pass_number}"
+        begin_role_output(
+            self._dashboard,
+            stage,
+            context,
+            self._issue.number,
+            pass_number,
+            display_name,
+        )
+        arguments["progress"] = self._activity_progress or f"issue {self._issue.number}"
+        if execution_role == "coder" and not self._development_started:
+            if self._initial_fix_list and not arguments.get("fix_list"):
+                arguments["fix_list"] = self._initial_fix_list
+            self._development_started = True
+        if self._attempt_label is not None:
+            arguments["attempt_label"] = self._attempt_label
+        arguments["activity_callback"] = self._dashboard.notify_activity
+        try:
+            result = self._runner.run_role(**arguments)
+        except BaseException:
+            self._dashboard.close(f"{display_name} interrupted.")
+            raise
+        finish_role_output(
+            self._dashboard,
+            stage,
+            self._issue.number,
+            display_name,
+            result,
+        )
+        return result
+
+
 def retry_blocked_issues(
     blocked_issues: list[Issue],
     runner: CodexRunner,
     state_writer: LoopStateWriter,
     max_passes: int,
     max_rounds: int,
+    component_catalog: PortableStepComponentCatalog | None = None,
 ) -> list[Issue]:
     remaining = list(blocked_issues)
 
@@ -573,7 +1030,9 @@ def retry_blocked_issues(
         if not remaining:
             break
 
-        issue_numbers = ", ".join(issue.number for issue in remaining)
+        issue_numbers = ", ".join(
+            _terminal_issue_identifier(issue.number) for issue in remaining
+        )
         print(f"\nBlocked retry round {retry_round}/{max_rounds}: {issue_numbers}")
         state_writer.record_blocked_retry_round_start(
             retry_round=retry_round,
@@ -609,6 +1068,7 @@ def retry_blocked_issues(
                 dashboard_position=position,
                 dashboard_total=len(remaining),
                 dashboard=retry_dashboard,
+                component_catalog=component_catalog,
             )
             if issue_result.status in {"BLOCKED", "FAIL"}:
                 next_remaining.append(issue)
@@ -618,7 +1078,9 @@ def retry_blocked_issues(
         remaining = next_remaining
 
     if remaining:
-        issue_numbers = ", ".join(issue.number for issue in remaining)
+        issue_numbers = ", ".join(
+            _terminal_issue_identifier(issue.number) for issue in remaining
+        )
         print(f"Blocked retry exhausted; still blocked: {issue_numbers}", file=sys.stderr)
     else:
         print("Blocked retry completed all previously blocked issues.")
@@ -706,11 +1168,15 @@ def begin_role_output(
     pass_number: int,
     role: str,
 ) -> None:
-    if dashboard.enabled:
+    if dashboard.enabled or dashboard.has_workflow_progress:
         dashboard.begin_role(stage, pass_number)
+    if dashboard.enabled:
         return
-    print(statusui.render_banner(stage, context))
-    print(f"[{issue_number}] Pass {pass_number}: {role}")
+    if not dashboard.has_workflow_progress:
+        print(statusui.render_banner(stage, context))
+    safe_issue_number = _terminal_issue_identifier(issue_number)
+    safe_role = _terminal_issue_title(role)
+    print(f"[{safe_issue_number}] Pass {pass_number}: {safe_role}")
 
 
 def finish_role_output(
@@ -720,25 +1186,34 @@ def finish_role_output(
     role: str,
     result: RoleResult,
 ) -> None:
-    if dashboard.enabled:
+    if dashboard.enabled or dashboard.has_workflow_progress:
         dashboard.finish_role(stage, result.status, result.summary)
+    if dashboard.enabled:
         return
     report_role_result(issue_number, role, result)
 
 
 def report_role_result(issue_number: str, role: str, result: RoleResult) -> None:
+    safe_issue_number = _terminal_issue_identifier(issue_number)
+    safe_role = _terminal_issue_title(role)
+    safe_summary = sanitize_terminal_text(
+        result.summary,
+        preserve_newlines=False,
+    )
     if result.status == "PASS":
         rendered_status = statusui.render_status(result.status, sys.stdout)
-        if result.summary:
-            print(f"[{issue_number}] {role}: {rendered_status} - {result.summary}")
+        if safe_summary:
+            print(
+                f"[{safe_issue_number}] {safe_role}: {rendered_status} - {safe_summary}"
+            )
         else:
-            print(f"[{issue_number}] {role}: {rendered_status}")
+            print(f"[{safe_issue_number}] {safe_role}: {rendered_status}")
         return
 
     rendered_status = statusui.render_status(result.status, sys.stderr)
-    message = f"[{issue_number}] {role}: {rendered_status}"
-    if result.summary:
-        message = f"{message} - {result.summary}"
+    message = f"[{safe_issue_number}] {safe_role}: {rendered_status}"
+    if safe_summary:
+        message = f"{message} - {safe_summary}"
     print(message, file=sys.stderr)
 
 
@@ -857,7 +1332,10 @@ def report_mapped_selection(source_issues: list[Issue], mapped_issues: list[Issu
     source_numbers = [issue.number for issue in source_issues]
     mapped_numbers = [issue.number for issue in mapped_issues]
     if mapped_numbers != source_numbers:
-        print(f"Selected issues in implementation worktree: {', '.join(mapped_numbers)}")
+        print(
+            "Selected issues in implementation worktree: "
+            f"{', '.join(_terminal_issue_identifier(item) for item in mapped_numbers)}"
+        )
 
 
 def merge_implementation_branch(

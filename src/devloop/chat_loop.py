@@ -13,10 +13,16 @@ from typing import Any, Callable, Sequence
 from . import statusui
 from .clipboard import capture_clipboard_image
 from .codex_events import CodexTurnOutcome, codex_turn_outcome, parse_codex_event
-from .codex_runner import resolve_codex_executable
+from .codex_runner import codex_execution_settings_args, resolve_codex_executable
 from .lineeditor import LineEditor
+from .portable_workflow import (
+    CodexExecutionSettings,
+    ExecutionBudget,
+    default_execution_budget,
+)
 from .statusui import Stage, WaitingIndicator, format_duration as _format_duration
-from .subprocess_utils import reap_process_after_terminal_event
+from .subprocess_utils import ProcessExecutionBudget, reap_process_after_terminal_event
+from .terminal_text import sanitize_terminal_text
 
 TurnRunner = Callable[[Sequence[str], Path], "tuple[int, str]"]
 
@@ -42,7 +48,7 @@ KNOWN_COMMANDS = {
 HELP_TEXT = """Commands:
   Alt+V    attach a screenshot from the clipboard (use /paste if unavailable)
   /paste   attach a screenshot from the clipboard
-  /options open agent/skill and development options
+  /options open the Workflow Editor for future-run defaults
   /resume  choose an unfinished PRD and continue its development handoff
   /status  show the stage banner, artifacts, and selection summary
   /done    detect the PRD and issue pack now (or enter paths manually)
@@ -77,8 +83,13 @@ class ChatConfig:
     codex: str
     repo_root: Path
     bundle_root: Path
+    codex_settings: CodexExecutionSettings
+    execution_budget: ExecutionBudget = field(
+        default_factory=lambda: default_execution_budget("analysis")
+    )
     sandbox: str = "workspace-write"
     approval_policy: str = "never"
+    workflow_progress: statusui.WorkflowProgress | None = None
 
 
 @dataclass
@@ -136,6 +147,7 @@ class ChatSession:
                     "--skip-git-repo-check",
                 ]
             )
+        command.extend(codex_execution_settings_args(self.config.codex_settings))
         for image in self.pending_images:
             command.extend(["-i", str(image)])
         command.append(first_prompt if first_prompt is not None else message)
@@ -185,7 +197,13 @@ def detect_image_paths(message: str) -> list[Path]:
     return found
 
 
-def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
+def run_streaming(
+    command: Sequence[str],
+    cwd: Path,
+    *,
+    execution_budget: ExecutionBudget | None = None,
+    workflow_progress: statusui.WorkflowProgress | None = None,
+) -> tuple[int, str]:
     resolved_command = list(command)
     if resolved_command:
         resolved_command[0] = resolve_codex_executable(resolved_command[0])
@@ -211,14 +229,42 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
     waiting_indicator = WaitingIndicator(
         stage=Stage.ANALYSIS,
         context="planning PRD + issues",
+        **(
+            {"workflow_progress": workflow_progress}
+            if workflow_progress is not None
+            else {}
+        ),
     )
     waiting_indicator.start()
     turn_outcome: CodexTurnOutcome | None = None
+    budget = (
+        ProcessExecutionBudget(
+            process,
+            timeout_seconds=execution_budget.timeout_seconds,
+            checkpoint_seconds=execution_budget.checkpoint_seconds,
+        )
+        if execution_budget is not None
+        else None
+    )
+    if budget is not None:
+        budget.start()
+    budget_expiration: str | None = None
     try:
         for line in process.stdout:
-            waiting_indicator.notify_activity()
+            if budget is not None:
+                budget.notify_activity()
             captured.append(line)
-            rendered = _render_codex_stream_line(line) if json_mode else line
+            rendered = (
+                _render_codex_stream_line(line)
+                if json_mode
+                else sanitize_terminal_text(line, preserve_newlines=True)
+            )
+            if workflow_progress is not None:
+                waiting_indicator.notify_activity(
+                    rendered.strip() if rendered else "Codex reported progress."
+                )
+            else:
+                waiting_indicator.notify_activity()
             if rendered:
                 waiting_indicator.stop()
                 sys.stdout.write(rendered)
@@ -248,7 +294,16 @@ def run_streaming(command: Sequence[str], cwd: Path) -> tuple[int, str]:
             process.kill()
         return 130, "".join(captured)
     finally:
+        if budget is not None:
+            budget_expiration = budget.finish()
         waiting_indicator.stop()
+        close = getattr(process.stdout, "close", None)
+        if callable(close):
+            close()
+    if budget_expiration is not None:
+        message = f"{budget_expiration}\n"
+        captured.append(message)
+        return 124, "".join(captured)
     if turn_outcome is CodexTurnOutcome.COMPLETED:
         return 0, "".join(captured)
     if turn_outcome is CodexTurnOutcome.FAILED:
@@ -267,10 +322,20 @@ def _render_codex_stream_line(line: str) -> str | None:
     try:
         payload = json.loads(line)
     except json.JSONDecodeError:
-        return None if _is_codex_noise_line(line) else line
+        rendered = None if _is_codex_noise_line(line) else line
+        return (
+            sanitize_terminal_text(rendered, preserve_newlines=True)
+            if rendered is not None
+            else None
+        )
     if not isinstance(payload, dict):
         return None
-    return _render_codex_json_event(payload)
+    rendered = _render_codex_json_event(payload)
+    return (
+        sanitize_terminal_text(rendered, preserve_newlines=True)
+        if rendered is not None
+        else None
+    )
 
 
 def _is_codex_noise_line(line: str) -> bool:
@@ -362,10 +427,20 @@ def run_planning_chat(
     initial_prompt: str,
     callbacks: ChatCallbacks,
     collect_initial_message: bool = False,
-    turn_runner: TurnRunner = run_streaming,
+    turn_runner: TurnRunner | None = None,
     editor: Any | None = None,
     capture_image: Callable[[Path], Path | None] = capture_clipboard_image,
 ) -> Any | None:
+    if turn_runner is None:
+        def active_turn_runner(command: Sequence[str], cwd: Path) -> tuple[int, str]:
+            return run_streaming(
+                command,
+                cwd,
+                execution_budget=config.execution_budget,
+                workflow_progress=config.workflow_progress,
+            )
+    else:
+        active_turn_runner = turn_runner
     session = ChatSession(config=config)
     image_dir = Path(tempfile.mkdtemp(prefix="devloop-images-"))
 
@@ -382,7 +457,7 @@ def run_planning_chat(
         if editor is None:
             editor = LineEditor(on_paste_image=paste_hook)
 
-        print(statusui.render_banner(Stage.ANALYSIS))
+        print(_planning_progress_banner(config))
         print(
             "Describe the change. Type /resume for unfinished PRDs, "
             "/status for the current phase, "
@@ -395,7 +470,11 @@ def run_planning_chat(
                 return collected.result
             initial_prompt = append_initial_message(initial_prompt, collected.text)
 
-        returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
+        returncode, output = _run_turn(
+            session,
+            active_turn_runner,
+            first_prompt=initial_prompt,
+        )
         if returncode == 0:
             session.started = True
         else:
@@ -413,7 +492,7 @@ def run_planning_chat(
 
             # The banner stays visible: reprint it before every input prompt so the
             # current stage survives any amount of scrolled Codex output.
-            print(statusui.render_banner(Stage.ANALYSIS))
+            print(_planning_progress_banner(config))
             try:
                 line = editor.read_line(statusui.stage_prompt(Stage.ANALYSIS))
             except EOFError:
@@ -442,7 +521,11 @@ def run_planning_chat(
 
             try:
                 if not session.started:
-                    returncode, output = _run_turn(session, turn_runner, first_prompt=initial_prompt)
+                    returncode, output = _run_turn(
+                        session,
+                        active_turn_runner,
+                        first_prompt=initial_prompt,
+                    )
                     if returncode == 0:
                         session.started = True
                         session.consecutive_failures = 0
@@ -450,15 +533,27 @@ def run_planning_chat(
                         session.consecutive_failures += 1
                         continue
                     # The goal text the user just typed still needs to reach Codex.
-                    returncode, output = _run_turn(session, turn_runner, message=text)
+                    returncode, output = _run_turn(
+                        session,
+                        active_turn_runner,
+                        message=text,
+                    )
                 elif session.consecutive_failures >= 1:
                     # The previous resume turn failed. Rather than resuming the same
                     # failing session again, start a fresh `codex exec` session with
                     # the complete planning contract plus the continuation message.
                     continuation = build_recovery_prompt(initial_prompt, text)
-                    returncode, output = _run_fresh_turn(session, turn_runner, continuation)
+                    returncode, output = _run_fresh_turn(
+                        session,
+                        active_turn_runner,
+                        continuation,
+                    )
                 else:
-                    returncode, output = _run_turn(session, turn_runner, message=text)
+                    returncode, output = _run_turn(
+                        session,
+                        active_turn_runner,
+                        message=text,
+                    )
             except KeyboardInterrupt:
                 print("\nCodex turn interrupted.")
                 session.consecutive_failures += 1
@@ -498,7 +593,7 @@ def _collect_initial_message(
         except KeyboardInterrupt:
             if _confirm_abort(editor):
                 return InitialMessage(finished=True)
-            print(statusui.render_banner(Stage.ANALYSIS))
+            print(_planning_progress_banner(session.config))
             continue
 
         text = line.strip()
@@ -510,7 +605,7 @@ def _collect_initial_message(
             if finished:
                 return InitialMessage(result=result, finished=True)
             if handled:
-                print(statusui.render_banner(Stage.ANALYSIS))
+                print(_planning_progress_banner(session.config))
                 continue
 
         for image in detect_image_paths(text):
@@ -589,7 +684,7 @@ def _handle_command(
         print(HELP_TEXT)
         return True, None, False
     if command == "/status":
-        print(statusui.render_banner(Stage.ANALYSIS))
+        print(_planning_progress_banner(session.config))
         print(PLANNING_STAGE_STATUS)
         print(callbacks.status_summary())
         # Detection exits the chat loop the moment a probe succeeds, so mid-chat
@@ -628,6 +723,12 @@ def _handle_command(
     # Unreachable: the loop only routes KNOWN_COMMANDS here. Fall through as a
     # no-op rather than emitting a misleading "unknown command" hint.
     return True, None, False
+
+
+def _planning_progress_banner(config: ChatConfig) -> str:
+    if config.workflow_progress is None:
+        return statusui.render_banner(Stage.ANALYSIS)
+    return statusui.render_workflow_progress_for_stream(config.workflow_progress)
 
 
 def _confirm_abort(editor: Any) -> bool:

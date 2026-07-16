@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -10,7 +11,20 @@ from unittest import mock
 
 from devloop import codex_runner
 from devloop.codex_events import render_safe_codex_activity
+from devloop.issue_pack import Issue
+from devloop.portable_workflow import (
+    FINAL_REVIEW_STEP_ID,
+    SECURITY_REVIEW_STEP_ID,
+    CodexExecutionSettings,
+    ExecutionBudget,
+    FastPreference,
+)
 from devloop.statusui import Stage
+from devloop.templates import BundleContext, Preset
+from tests.terminal_safety import (
+    HOSTILE_TERMINAL_TEXT,
+    assert_terminal_text_is_safe,
+)
 
 
 class ResolveCodexExecutableTests(unittest.TestCase):
@@ -38,6 +52,512 @@ class ResolveCodexExecutableTests(unittest.TestCase):
                 result = codex_runner.resolve_codex_executable("codex")
 
         self.assertEqual(result, str(codex_cmd.resolve()))
+
+
+class CodexCommandSettingsTests(unittest.TestCase):
+    def test_command_explicitly_overrides_model_effort_and_fast_on_or_off(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            codex_runner,
+            "uses_legacy_approval_flag",
+            return_value=False,
+        ):
+            root = Path(raw)
+            common = {
+                "codex": "codex",
+                "repo_root": root,
+                "sandbox": "workspace-write",
+                "approval_policy": "never",
+                "schema_path": root / "schema.json",
+                "message_path": root / "message.json",
+            }
+            for fast, tier, feature_switch in (
+                (FastPreference.ON, 'service_tier="fast"', "--enable"),
+                (FastPreference.OFF, 'service_tier="default"', "--disable"),
+            ):
+                with self.subTest(fast=fast):
+                    command = codex_runner.build_codex_exec_command(
+                        **common,
+                        codex_settings=CodexExecutionSettings(
+                            "gpt-5.6-sol",
+                            "xhigh",
+                            fast,
+                        ),
+                    )
+
+                    self.assertIn("-m", command)
+                    self.assertEqual(command[command.index("-m") + 1], "gpt-5.6-sol")
+                    self.assertIn('model_reasoning_effort="xhigh"', command)
+                    self.assertIn(tier, command)
+                    self.assertIn(feature_switch, command)
+                    self.assertEqual(
+                        command[command.index(feature_switch) + 1],
+                        "fast_mode",
+                    )
+
+    def test_streaming_command_enforces_the_step_execution_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            result = codex_runner.run_streaming_codex_command(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                input_text="",
+                cwd=Path(raw),
+                stage=Stage.DEVELOPMENT,
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=0.2,
+                    checkpoint_seconds=0.2,
+                ),
+            )
+
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("Execution Budget", result.stderr)
+
+
+class RolePromptIdentityTests(unittest.TestCase):
+    def test_step_capabilities_and_guidance_override_role_defaults_in_the_prompt(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={
+                    "reviewer": {
+                        "skills": ["skills/codex/legacy/SKILL.md"],
+                        "agents": ["agents/codex/legacy.md"],
+                    }
+                },
+            )
+            runner.use_self_improvement_wiki = False
+
+            prompt = runner.build_prompt(
+                role="reviewer",
+                issue=Issue("0001", "Security review", issue_path, False),
+                pass_number=1,
+                fix_list=[],
+                skill_paths=("skills/codex/security/SKILL.md",),
+                agent_paths=(),
+                step_guidance="Focus on authentication boundaries.",
+            )
+
+        self.assertIn("skills/codex/security/SKILL.md", prompt)
+        self.assertNotIn("skills/codex/legacy/SKILL.md", prompt)
+        self.assertNotIn("agents/codex/legacy.md", prompt)
+        self.assertIn("Focus on authentication boundaries.", prompt)
+        self.assertIn("permissions, and safety boundaries", prompt)
+
+    def test_placeholder_like_step_guidance_remains_literal_and_bounded(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        literal_guidance = (
+            "Treat {{FIX_LIST}} and {{REVIEW_RESULT}} as literal examples."
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"reviewer": {"skills": [], "agents": []}},
+            )
+            runner.use_self_improvement_wiki = False
+
+            prompt = runner.build_prompt(
+                role="reviewer",
+                issue=Issue("0001", "Security review", issue_path, False),
+                pass_number=1,
+                fix_list=["Do not substitute this finding."],
+                review_result=codex_runner.RoleResult(
+                    status="FAIL",
+                    summary="Do not substitute this result.",
+                ),
+                step_guidance=literal_guidance,
+            )
+
+        guidance_section = prompt.split("## Step Guidance\n\n", 1)[1].split(
+            "\n\n## Review Rules",
+            1,
+        )[0]
+        self.assertIn(literal_guidance, guidance_section)
+        self.assertNotIn("Do not substitute this finding.", guidance_section)
+        self.assertNotIn("Do not substitute this result.", guidance_section)
+
+    def test_custom_role_uses_its_adapter_prompt_and_installed_capabilities(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={
+                    "security-review": {
+                        "skills": ["skills/codex/senior-code-reviewer/SKILL.md"],
+                        "agents": ["agents/codex/senior-code-reviewer.md"],
+                    }
+                },
+            )
+            runner.use_self_improvement_wiki = False
+
+            prompt = runner.build_prompt(
+                role="security-review",
+                role_adapter="reviewer",
+                issue=Issue("0001", "Security review", issue_path, False),
+                pass_number=1,
+                fix_list=[],
+                step_display_name="Security Review",
+            )
+
+        self.assertIn("# Codex Dev Loop Senior Review", prompt)
+        self.assertIn("skills/codex/senior-code-reviewer/SKILL.md", prompt)
+        self.assertIn("agents/codex/senior-code-reviewer.md", prompt)
+        self.assertIn("Workflow step: `Security Review`", prompt)
+
+    def test_rendering_a_prompt_rejects_unsafe_markdown_display_names(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"security-review": {"skills": [], "agents": []}},
+            )
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "control characters or line breaks",
+            ):
+                runner.render_dry_run_prompts(
+                    Issue("0001", "Security review", issue_path, False),
+                    (
+                        (
+                            "security-review",
+                            "reviewer",
+                            "\x1b[2JInjected\nHeading",
+                            str(SECURITY_REVIEW_STEP_ID),
+                        ),
+                    ),
+                )
+
+            self.assertEqual(list(runner.log_root.iterdir()), [])
+
+    def test_duplicate_review_instances_get_distinct_prompt_sessions_and_logs(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Review identity\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"reviewer": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+            issue = Issue("0001", "Review identity", issue_path, False)
+            completed = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout='{"status":"PASS"}',
+                stderr="",
+            )
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                return_value=["codex"],
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=completed,
+            ):
+                runner.run_role(
+                    role="reviewer",
+                    issue=issue,
+                    pass_number=1,
+                    step_instance_id=str(SECURITY_REVIEW_STEP_ID),
+                    step_display_name="Security Review",
+                    prompt_session_id="security-session",
+                )
+                runner.run_role(
+                    role="reviewer",
+                    issue=issue,
+                    pass_number=1,
+                    step_instance_id=str(FINAL_REVIEW_STEP_ID),
+                    step_display_name="Final Review",
+                    prompt_session_id="final-session",
+                )
+
+            prompts = sorted(runner.log_root.glob("*.prompt.md"))
+            self.assertEqual(len(prompts), 2)
+            self.assertNotEqual(prompts[0].name, prompts[1].name)
+            prompt_text = "\n".join(
+                path.read_text(encoding="utf-8") for path in prompts
+            )
+            self.assertIn("Workflow step: `Security Review`", prompt_text)
+            self.assertIn("Prompt session: `security-session`", prompt_text)
+            self.assertIn("Workflow step: `Final Review`", prompt_text)
+            self.assertIn("Prompt session: `final-session`", prompt_text)
+
+    def test_custom_role_path_separators_are_sanitized_in_log_filenames(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Security review\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"security/review": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+            completed = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout='{"status":"PASS"}',
+                stderr="",
+            )
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                return_value=["codex"],
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=completed,
+            ):
+                result = runner.run_role(
+                    role="security/review",
+                    role_adapter="reviewer",
+                    issue=Issue("0001", "Security review", issue_path, False),
+                    pass_number=1,
+                    step_instance_id=str(SECURITY_REVIEW_STEP_ID),
+                    step_display_name="Security Review",
+                )
+
+            prompt_paths = list(runner.log_root.glob("*.prompt.md"))
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(len(prompt_paths), 1)
+        self.assertIn("security-review", prompt_paths[0].name)
+
+    def test_dry_run_filenames_use_instance_ids_to_avoid_slug_collisions(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Review collision\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"security/review": {"skills": [], "agents": []}},
+            )
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+
+            runner.render_dry_run_prompts(
+                Issue("0001", "Review collision", issue_path, False),
+                (
+                    (
+                        "security/review",
+                        "reviewer",
+                        "A+B",
+                        str(SECURITY_REVIEW_STEP_ID),
+                    ),
+                    (
+                        "security/review",
+                        "reviewer",
+                        "A B",
+                        str(FINAL_REVIEW_STEP_ID),
+                    ),
+                ),
+            )
+            prompt_names = sorted(
+                path.name for path in runner.log_root.glob("*.prompt.md")
+            )
+
+        self.assertEqual(len(prompt_names), 2)
+        self.assertTrue(all("security-review" in name for name in prompt_names))
+        self.assertTrue(
+            any(str(SECURITY_REVIEW_STEP_ID) in name for name in prompt_names)
+        )
+        self.assertTrue(any(str(FINAL_REVIEW_STEP_ID) in name for name in prompt_names))
+
+    def test_log_writes_are_confined_to_the_configured_log_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.log_root = root / ".loop.logs"
+            runner.ensure_log_root()
+            escaped_path = runner.log_root / ".." / "escaped.prompt.md"
+
+            with self.assertRaisesRegex(ValueError, "outside the configured log root"):
+                runner.write_log_text(escaped_path, "unsafe")
+
+            self.assertFalse((root / "escaped.prompt.md").exists())
+
+    def test_run_role_writes_the_allowlisted_triggering_attempt_record_to_coder_prompt(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Rework prompt\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"coder": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+            triggering_record = {
+                "attempt_id": "review-attempt-17",
+                "step_instance_id": str(SECURITY_REVIEW_STEP_ID),
+                "issue_id": "0001",
+                "pass": 1,
+                "prompt_session_id": "security-review-session",
+                "outcome": "CHANGES_REQUESTED",
+                "result": {
+                    "status": "FAIL",
+                    "summary": "Security review requested a correction.",
+                    "changed_files": [],
+                    "verification_commands": [],
+                    "findings": ["SEC-017 reaches the shell."],
+                    "fix_list": ["Correct SEC-017."],
+                    "residual_risks": [],
+                },
+            }
+
+            completed = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout='{"status":"PASS"}',
+                stderr="",
+            )
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                return_value=["codex"],
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=completed,
+            ):
+                runner.run_role(
+                    role="coder",
+                    issue=Issue("0001", "Rework prompt", issue_path, False),
+                    pass_number=2,
+                    fix_list=["Correct SEC-017."],
+                    rework_attempt_record=triggering_record,
+                )
+            prompt = next(runner.log_root.glob("*.prompt.md")).read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("## Triggering Rework Step Attempt Record", prompt)
+        self.assertIn('"attempt_id": "review-attempt-17"', prompt)
+        self.assertIn(f'"step_instance_id": "{SECURITY_REVIEW_STEP_ID}"', prompt)
+        self.assertIn('"findings": [', prompt)
+        self.assertNotIn("{{REWORK_ATTEMPT_RECORD}}", prompt)
 
 
 class StreamingCodexRunnerTests(unittest.TestCase):
@@ -70,13 +590,17 @@ class StreamingCodexRunnerTests(unittest.TestCase):
                 "type": "item.completed",
                 "item": {
                     "type": "agent_message",
-                    "text": "Checking files.\x1b[31m",
+                    "text": HOSTILE_TERMINAL_TEXT,
                 },
             }
         )
 
-        self.assertEqual(activity, "Codex update: Checking files.")
-        self.assertNotIn("\x1b", activity)
+        self.assertIsNotNone(activity)
+        assert_terminal_text_is_safe(
+            self,
+            activity or "",
+            redirected=True,
+        )
 
     def test_role_execution_streams_safe_activity_before_process_exit(self) -> None:
         class OpenAfterCompletion:

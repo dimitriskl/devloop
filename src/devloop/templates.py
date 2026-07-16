@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+_TEMPLATE_TOKEN = re.compile(r"\{\{(?P<key>[A-Z][A-Z0-9_]*)\}\}")
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,7 @@ class BundleContext:
 class Preset:
     name: str
     required_docs: list[str]
-    roles: dict[str, dict[str, list[str]]]
+    roles: dict[str, dict[str, Any]]
 
 
 def load_preset(path: Path) -> Preset:
@@ -40,11 +44,20 @@ def load_preset(path: Path) -> Preset:
 
 def render_template(path: Path, values: dict[str, Any]) -> str:
     text = path.read_text(encoding="utf-8")
-    for key, value in values.items():
-        if isinstance(value, (list, tuple)):
-            rendered = "\n".join(f"- {item}" for item in value)
-        else:
-            rendered = str(value)
-        text = text.replace("{{" + key + "}}", rendered)
-    return text
+    return _TEMPLATE_TOKEN.sub(
+        lambda match: _render_template_value(match, values),
+        text,
+    )
 
+
+def _render_template_value(
+    match: re.Match[str],
+    values: dict[str, Any],
+) -> str:
+    key = match.group("key")
+    if key not in values:
+        return match.group(0)
+    value = values[key]
+    if isinstance(value, (list, tuple)):
+        return "\n".join(f"- {item}" for item in value)
+    return str(value)

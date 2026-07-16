@@ -8,8 +8,648 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from devloop import interactive_runner
+from devloop import cli, interactive_runner
+from devloop.codex_runner import RoleResult
 from devloop.interactive_runner import HandoffParams, PlanningArtifacts
+from devloop.issue_pack import Issue
+from devloop.model_catalog import (
+    CatalogDiscoveryError,
+    CatalogSource,
+    CodexModel,
+    CodexModelCatalog,
+)
+from devloop.portable_component_catalog import build_portable_component_catalog
+from devloop.portable_workflow import (
+    ANALYSIS_STEP_ID,
+    DEVELOPMENT_COMPONENT_ID,
+    DEVELOPMENT_STEP_ID,
+    FastPreference,
+    SECURITY_REVIEW_STEP_ID,
+    canonical_workflow_hash,
+    default_portable_component_catalog,
+    default_portable_workflow,
+    load_portable_workflow,
+)
+from devloop.state import LoopStateWriter
+from devloop.templates import BundleContext, load_preset
+from devloop.workflow_editor import WorkflowDraft
+from devloop.workflow_defaults import WorkflowDefaultStore
+from tests.terminal_safety import (
+    HOSTILE_TERMINAL_TEXT,
+    assert_terminal_text_is_safe,
+)
+
+
+class PlanningExecutionSettingsTests(unittest.TestCase):
+    def test_new_analysis_uses_persisted_settings_and_fresh_target_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            catalog = default_portable_component_catalog()
+            document = default_portable_workflow().to_dict()
+            analysis = next(
+                step
+                for step in document["steps"]
+                if step["instance_id"] == ANALYSIS_STEP_ID
+            )
+            analysis["codex_settings"] = {
+                "model": "gpt-5.6-terra",
+                "reasoning_effort": "high",
+                "fast": "ON",
+            }
+            analysis["execution_budget"] = {
+                "timeout_seconds": 1200,
+                "checkpoint_seconds": 150,
+            }
+            WorkflowDefaultStore(state_path, catalog).replace(
+                load_portable_workflow(document, catalog)
+            )
+            live_catalog = CodexModelCatalog(
+                models=(
+                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CodexModel(
+                        "gpt-5.6-sol",
+                        "Sol",
+                        "",
+                        ("xhigh",),
+                    ),
+                    CodexModel(
+                        "gpt-5.6-terra",
+                        "Terra",
+                        "",
+                        ("high",),
+                        advertises_fast=True,
+                    ),
+                ),
+                fetched_at="2026-07-16T12:00:00",
+                source=CatalogSource.LIVE,
+            )
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
+            adapter = mock.Mock()
+            adapter.discover.return_value = live_catalog
+            bundle = mock.Mock(root=root)
+
+            with mock.patch.object(
+                interactive_runner.BundleContext,
+                "from_file",
+                return_value=bundle,
+            ), mock.patch.object(
+                interactive_runner,
+                "plan_state_path",
+                return_value=state_path,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_target_repo",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "apply_branch_strategy",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "snapshot_artifacts",
+                return_value={},
+            ), mock.patch.object(
+                interactive_runner.catalog_module,
+                "discover",
+                return_value=mock.Mock(),
+            ), mock.patch.object(
+                interactive_runner.catalog_module,
+                "planning_skill_paths",
+                return_value=[],
+            ), mock.patch.object(
+                interactive_runner,
+                "build_portable_component_catalog",
+                return_value=catalog,
+            ), mock.patch.object(
+                interactive_runner,
+                "CodexModelCatalogAdapter",
+                return_value=adapter,
+            ) as adapter_type, mock.patch.object(
+                interactive_runner,
+                "preflight_codex_execution_settings",
+                wraps=interactive_runner.preflight_codex_execution_settings,
+            ) as preflight, mock.patch.object(
+                interactive_runner,
+                "run_planning_chat",
+                return_value=None,
+            ) as run_chat, redirect_stdout(StringIO()):
+                result = interactive_runner._run_planning(parser, args)
+
+        self.assertEqual(result, 0)
+        adapter_type.assert_called_with("codex", cwd=root)
+        adapter.discover.assert_called_once_with()
+        preflight.assert_called_once_with(
+            mock.ANY,
+            catalog,
+            live_catalog,
+        )
+        config = run_chat.call_args.kwargs["config"]
+        self.assertEqual(
+            config.codex_settings.as_tuple(),
+            ("gpt-5.6-terra", "high", FastPreference.ON),
+        )
+        self.assertEqual(config.execution_budget.timeout_seconds, 1200)
+        self.assertEqual(config.execution_budget.checkpoint_seconds, 150)
+        self.assertIsNotNone(config.workflow_progress)
+        self.assertEqual(
+            config.workflow_progress.active_step.display_name,
+            "Analysis",
+        )
+        self.assertEqual(
+            config.workflow_progress.active_step.model,
+            "gpt-5.6-terra",
+        )
+
+    def test_future_run_edits_during_analysis_do_not_replace_handoff_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            component_catalog = default_portable_component_catalog()
+            original_workflow = default_portable_workflow()
+            WorkflowDefaultStore(state_path, component_catalog).replace(
+                original_workflow
+            )
+            artifacts = PlanningArtifacts(
+                prd_path=root / "feature.md",
+                issues_index=root / "README.md",
+            )
+            live_catalog = CodexModelCatalog(
+                models=(
+                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                ),
+                fetched_at="2026-07-16T12:00:00",
+                source=CatalogSource.LIVE,
+            )
+            adapter = mock.Mock()
+            adapter.discover.return_value = live_catalog
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
+
+            def edit_future_runs(*_args: object, **_kwargs: object) -> None:
+                store = WorkflowDefaultStore(state_path, component_catalog)
+                document = store.load().to_dict()
+                development = next(
+                    step
+                    for step in document["steps"]
+                    if step["instance_id"] == DEVELOPMENT_STEP_ID
+                )
+                development["codex_settings"] = {
+                    "model": "gpt-5.6-terra",
+                    "reasoning_effort": "high",
+                    "fast": "OFF",
+                }
+                store.replace(load_portable_workflow(document, component_catalog))
+
+            def planning_chat(**kwargs: object) -> PlanningArtifacts:
+                callbacks = kwargs["callbacks"]
+                callbacks.open_options()  # type: ignore[union-attr]
+                return artifacts
+
+            with mock.patch.object(
+                interactive_runner.BundleContext,
+                "from_file",
+                return_value=mock.Mock(root=root),
+            ), mock.patch.object(
+                interactive_runner,
+                "plan_state_path",
+                return_value=state_path,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_target_repo",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "apply_branch_strategy",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "snapshot_artifacts",
+                return_value={},
+            ), mock.patch.object(
+                interactive_runner.catalog_module,
+                "discover",
+                return_value=mock.Mock(),
+            ), mock.patch.object(
+                interactive_runner.catalog_module,
+                "planning_skill_paths",
+                return_value=[],
+            ), mock.patch.object(
+                interactive_runner,
+                "build_portable_component_catalog",
+                return_value=component_catalog,
+            ), mock.patch.object(
+                interactive_runner,
+                "CodexModelCatalogAdapter",
+                return_value=adapter,
+            ), mock.patch.object(
+                interactive_runner,
+                "run_options_menu",
+                side_effect=edit_future_runs,
+            ), mock.patch.object(
+                interactive_runner,
+                "run_planning_chat",
+                side_effect=planning_chat,
+            ), mock.patch.object(
+                interactive_runner,
+                "run_handoff",
+                return_value=0,
+            ) as run_handoff, redirect_stdout(StringIO()):
+                result = interactive_runner._run_planning(parser, args)
+
+            future_workflow = WorkflowDefaultStore(
+                state_path,
+                component_catalog,
+            ).load()
+
+        self.assertEqual(result, 0)
+        handed_off_workflow = run_handoff.call_args.kwargs["workflow_snapshot"]
+        self.assertEqual(
+            handed_off_workflow.step(DEVELOPMENT_STEP_ID).codex_settings.model,
+            "gpt-5.6-luna",
+        )
+        self.assertEqual(
+            future_workflow.step(DEVELOPMENT_STEP_ID).codex_settings.model,
+            "gpt-5.6-terra",
+        )
+
+    def test_new_run_does_not_execute_unsupported_analysis_transformations(
+        self,
+    ) -> None:
+        for transformation in ("duplicate", "delete", "type-change"):
+            with (
+                self.subTest(transformation=transformation),
+                tempfile.TemporaryDirectory() as raw,
+            ):
+                root = Path(raw)
+                state_path = root / "devloop-plan.json"
+                component_catalog = default_portable_component_catalog()
+                draft = WorkflowDraft(
+                    default_portable_workflow(),
+                    component_catalog,
+                )
+                if transformation == "duplicate":
+                    draft.duplicate(ANALYSIS_STEP_ID)
+                elif transformation == "delete":
+                    draft.delete(draft.preview_delete(ANALYSIS_STEP_ID))
+                else:
+                    draft.change_type(
+                        ANALYSIS_STEP_ID,
+                        DEVELOPMENT_COMPONENT_ID,
+                    )
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "user_workflow_default": draft.workflow.to_dict(),
+                            "user_workflow_default_hash": canonical_workflow_hash(
+                                draft.workflow
+                            ),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                live_catalog = CodexModelCatalog(
+                    models=(
+                        CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                        CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                        CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                    ),
+                    fetched_at="2026-07-16T12:00:00",
+                    source=CatalogSource.LIVE,
+                )
+                adapter = mock.Mock()
+                adapter.discover.return_value = live_catalog
+                parser = interactive_runner.build_parser()
+                args = parser.parse_args(
+                    ["--repo", str(root), "--goal", "plan it"]
+                )
+
+                with mock.patch.object(
+                    interactive_runner.BundleContext,
+                    "from_file",
+                    return_value=mock.Mock(root=root),
+                ), mock.patch.object(
+                    interactive_runner,
+                    "plan_state_path",
+                    return_value=state_path,
+                ), mock.patch.object(
+                    interactive_runner,
+                    "choose_target_repo",
+                    return_value=root,
+                ), mock.patch.object(
+                    interactive_runner,
+                    "apply_branch_strategy",
+                    return_value=root,
+                ), mock.patch.object(
+                    interactive_runner,
+                    "snapshot_artifacts",
+                    return_value={},
+                ), mock.patch.object(
+                    interactive_runner,
+                    "build_portable_component_catalog",
+                    return_value=component_catalog,
+                ), mock.patch.object(
+                    interactive_runner,
+                    "CodexModelCatalogAdapter",
+                    return_value=adapter,
+                ), mock.patch.object(
+                    interactive_runner,
+                    "read_prompt",
+                    return_value="/quit",
+                ), mock.patch.object(
+                    interactive_runner,
+                    "run_planning_chat",
+                    return_value=None,
+                ) as run_chat, redirect_stdout(StringIO()) as output:
+                    result = interactive_runner._run_planning(parser, args)
+
+                self.assertEqual(result, 0)
+                run_chat.assert_not_called()
+                adapter.discover.assert_not_called()
+                self.assertIn(
+                    "exactly one WORKFLOW-scoped",
+                    output.getvalue(),
+                )
+
+    def test_new_run_executes_a_replacement_analysis_step_with_a_new_id(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            component_catalog = default_portable_component_catalog()
+            draft = WorkflowDraft(
+                default_portable_workflow(),
+                component_catalog,
+            )
+            duplicate = draft.duplicate(ANALYSIS_STEP_ID)
+            draft.set_guidance(
+                duplicate.step_instance_id,
+                "Replacement planning guidance.",
+            )
+            draft.delete(draft.preview_delete(ANALYSIS_STEP_ID))
+            replacement = WorkflowDefaultStore(
+                state_path,
+                component_catalog,
+            ).replace(draft.workflow)
+            live_catalog = CodexModelCatalog(
+                models=(
+                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                ),
+                fetched_at="2026-07-16T12:00:00",
+                source=CatalogSource.LIVE,
+            )
+            adapter = mock.Mock()
+            adapter.discover.return_value = live_catalog
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
+
+            with mock.patch.object(
+                interactive_runner.BundleContext,
+                "from_file",
+                return_value=mock.Mock(root=root),
+            ), mock.patch.object(
+                interactive_runner,
+                "plan_state_path",
+                return_value=state_path,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_target_repo",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "apply_branch_strategy",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "snapshot_artifacts",
+                return_value={},
+            ), mock.patch.object(
+                interactive_runner,
+                "build_portable_component_catalog",
+                return_value=component_catalog,
+            ), mock.patch.object(
+                interactive_runner,
+                "CodexModelCatalogAdapter",
+                return_value=adapter,
+            ), mock.patch.object(
+                interactive_runner,
+                "run_planning_chat",
+                return_value=None,
+            ) as run_chat, redirect_stdout(StringIO()):
+                result = interactive_runner._run_planning(parser, args)
+
+        self.assertEqual(result, 0)
+        self.assertNotEqual(replacement.start_step_id, ANALYSIS_STEP_ID)
+        self.assertEqual(
+            replacement.start_step_id,
+            duplicate.step_instance_id,
+        )
+        run_chat.assert_called_once()
+        self.assertIn(
+            "Replacement planning guidance.",
+            run_chat.call_args.kwargs["initial_prompt"],
+        )
+
+    def test_analysis_preflight_can_open_options_then_retry_live_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            component_catalog = default_portable_component_catalog()
+            invalid_document = default_portable_workflow().to_dict()
+            invalid_document["steps"][0]["codex_settings"]["model"] = "missing-model"
+            WorkflowDefaultStore(state_path, component_catalog).replace(
+                load_portable_workflow(invalid_document, component_catalog)
+            )
+            live_catalog = CodexModelCatalog(
+                models=(
+                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                ),
+                fetched_at="2026-07-16T12:00:00",
+                source=CatalogSource.LIVE,
+            )
+            adapter = mock.Mock()
+            adapter.discover.side_effect = [
+                CatalogDiscoveryError("temporary failure one"),
+                CatalogDiscoveryError("temporary failure two"),
+                live_catalog,
+            ]
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
+
+            def repair_workflow(*_args: object, **_kwargs: object) -> None:
+                WorkflowDefaultStore(state_path, component_catalog).replace(
+                    default_portable_workflow()
+                )
+
+            with mock.patch.object(
+                interactive_runner.BundleContext,
+                "from_file",
+                return_value=mock.Mock(root=root),
+            ), mock.patch.object(
+                interactive_runner,
+                "plan_state_path",
+                return_value=state_path,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_target_repo",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "apply_branch_strategy",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "snapshot_artifacts",
+                return_value={},
+            ), mock.patch.object(
+                interactive_runner.catalog_module,
+                "discover",
+                return_value=mock.Mock(),
+            ), mock.patch.object(
+                interactive_runner.catalog_module,
+                "planning_skill_paths",
+                return_value=[],
+            ), mock.patch.object(
+                interactive_runner,
+                "build_portable_component_catalog",
+                return_value=component_catalog,
+            ), mock.patch.object(
+                interactive_runner,
+                "CodexModelCatalogAdapter",
+                return_value=adapter,
+            ), mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["/options", "retry-catalog"],
+            ), mock.patch.object(
+                interactive_runner,
+                "run_options_menu",
+                side_effect=repair_workflow,
+            ) as options, mock.patch.object(
+                interactive_runner,
+                "run_planning_chat",
+                return_value=None,
+            ), redirect_stdout(StringIO()) as output:
+                result = interactive_runner._run_planning(parser, args)
+
+        self.assertEqual(result, 0)
+        options.assert_called_once()
+        self.assertEqual(adapter.discover.call_count, 3)
+        self.assertIn("/options", output.getvalue())
+        self.assertIn("retry-catalog", output.getvalue())
+
+    def test_analysis_preflight_sanitizes_backend_catalog_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            interactive_runner,
+            "read_prompt",
+            return_value="/quit",
+        ), redirect_stdout(StringIO()) as output:
+            workflow = interactive_runner.preflight_analysis_workflow(
+                bundle_root=Path(raw),
+                state_path=Path(raw) / "devloop-plan.json",
+                selection=interactive_runner.catalog_module.Selection.defaults(),
+                component_catalog=default_portable_component_catalog(),
+                model_catalog_loader=lambda: (_ for _ in ()).throw(
+                    CatalogDiscoveryError(HOSTILE_TERMINAL_TEXT)
+                ),
+            )
+
+        self.assertIsNone(workflow)
+        assert_terminal_text_is_safe(self, output.getvalue(), redirected=True)
+
+    def test_analysis_repair_resets_and_applies_a_schema_v1_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "target_repo": "/repo",
+                        "user_workflow_default": {
+                            "schema": "devloop.portable-workflow/v1",
+                        },
+                        "user_workflow_default_hash": "invalid",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            catalog = default_portable_component_catalog()
+            live_catalog = CodexModelCatalog(
+                models=(
+                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                ),
+                fetched_at="2026-07-16T12:00:00",
+                source=CatalogSource.LIVE,
+            )
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["/options", "reset-workflow", "apply"],
+            ), redirect_stdout(StringIO()):
+                workflow = interactive_runner.preflight_analysis_workflow(
+                    bundle_root=root,
+                    state_path=state_path,
+                    selection=interactive_runner.catalog_module.Selection.defaults(),
+                    component_catalog=catalog,
+                    model_catalog_loader=lambda: live_catalog,
+                )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            stored_workflow = WorkflowDefaultStore(state_path, catalog).load()
+
+        self.assertEqual(workflow, default_portable_workflow())
+        self.assertEqual(persisted["target_repo"], "/repo")
+        self.assertEqual(stored_workflow, default_portable_workflow())
+
+    def test_analysis_repair_cancel_preserves_a_malformed_v2_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            original = json.dumps(
+                {
+                    "target_repo": "/repo",
+                    "user_workflow_default": {
+                        "schema": "devloop.portable-workflow/v2",
+                        "steps": [],
+                    },
+                    "user_workflow_default_hash": "invalid",
+                },
+                indent=2,
+            )
+            state_path.write_text(original, encoding="utf-8")
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["/options", "cancel", "/quit"],
+            ), redirect_stdout(StringIO()):
+                workflow = interactive_runner.preflight_analysis_workflow(
+                    bundle_root=root,
+                    state_path=state_path,
+                    selection=interactive_runner.catalog_module.Selection.defaults(),
+                    component_catalog=default_portable_component_catalog(),
+                    model_catalog_loader=lambda: self.fail(
+                        "Malformed defaults must fail before catalog discovery."
+                    ),
+                )
+
+            persisted = state_path.read_text(encoding="utf-8")
+
+        self.assertIsNone(workflow)
+        self.assertEqual(persisted, original)
 
 
 class BuildPlanningPromptTests(unittest.TestCase):
@@ -29,6 +669,21 @@ class BuildPlanningPromptTests(unittest.TestCase):
         prompt = self.make_prompt()
         self.assertIn("grill-with-docs", prompt)
         self.assertIn("to-prd", prompt)
+
+    def test_planning_prompt_includes_step_guidance_with_visible_precedence(self) -> None:
+        prompt = interactive_runner.build_planning_prompt(
+            repo_root=Path("C:/repo"),
+            bundle_root=Path("F:/devloop"),
+            goal="add login",
+            skill_paths=[],
+            agent_paths=[Path("F:/devloop/agents/codex/security.md")],
+            step_guidance="Ask about authentication boundaries.",
+            wiki_index=Path("F:/devloop/docs/devloop-self-improvement/wiki/index.md"),
+        )
+
+        self.assertIn("agents/codex/security.md", prompt)
+        self.assertIn("Ask about authentication boundaries.", prompt)
+        self.assertIn("permissions, and safety boundaries", prompt)
 
     def test_references_wiki_index(self) -> None:
         prompt = self.make_prompt()
@@ -150,6 +805,183 @@ class BuildDevloopArgsTests(unittest.TestCase):
             args = interactive_runner.build_devloop_args(params, artifacts, preset)
         self.assertIn("--preset", args)
         self.assertIn(str(preset), args)
+
+    def test_custom_codex_executable_is_forwarded_to_devloop_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_artifacts(root)
+            params = HandoffParams(
+                start_issue=None,
+                run_all=True,
+                use_worktree=False,
+                worktree_path=root / "unused",
+                branch_name="unused",
+            )
+
+            args = interactive_runner.build_devloop_args(
+                params,
+                artifacts,
+                None,
+                "/opt/custom-codex",
+            )
+
+        codex_index = args.index("--codex")
+        self.assertEqual(args[codex_index + 1], "/opt/custom-codex")
+
+    def test_handoff_passes_analysis_snapshot_and_custom_codex_to_devloop(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_artifacts(root)
+            issue = artifacts.issues_index.parent / "0001-run.md"
+            issue.write_text("# Run\n\nCompleted: [ ]\n", encoding="utf-8")
+            artifacts.issues_index.write_text(
+                "[Issue 0001](./0001-run.md)\n",
+                encoding="utf-8",
+            )
+            workflow_snapshot = default_portable_workflow()
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                return_value="",
+            ), mock.patch(
+                "devloop.cli.main",
+                return_value=17,
+            ) as devloop_main, redirect_stdout(StringIO()):
+                result = interactive_runner.run_handoff(
+                    root,
+                    root,
+                    artifacts,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    root / "devloop-plan.json",
+                    codex="/opt/custom-codex",
+                    workflow_snapshot=workflow_snapshot,
+                )
+
+        self.assertEqual(result, 17)
+        launched_args = devloop_main.call_args.args[0]
+        codex_index = launched_args.index("--codex")
+        self.assertEqual(launched_args[codex_index + 1], "/opt/custom-codex")
+        self.assertIs(
+            devloop_main.call_args.kwargs["workflow_snapshot"],
+            workflow_snapshot,
+        )
+
+    def test_handoff_options_opens_workflow_editor_with_current_run_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_artifacts(root)
+            issue = artifacts.issues_index.parent / "0001-edit.md"
+            issue.write_text("# Edit\n\nCompleted: [ ]\n", encoding="utf-8")
+            artifacts.issues_index.write_text(
+                "[Issue 0001](./0001-edit.md)\n",
+                encoding="utf-8",
+            )
+            current_workflow = default_portable_workflow()
+            state_path = root / "devloop-plan.json"
+            selection = interactive_runner.catalog_module.Selection.defaults()
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["/options", "/quit"],
+            ), mock.patch.object(
+                interactive_runner,
+                "load_current_run_workflow",
+                return_value=current_workflow,
+            ), mock.patch.object(
+                interactive_runner,
+                "run_options_menu",
+            ) as options, mock.patch.object(
+                interactive_runner,
+                "CodexModelCatalogAdapter",
+            ) as adapter_type, redirect_stdout(StringIO()):
+                result = interactive_runner.run_handoff(
+                    root,
+                    root,
+                    artifacts,
+                    selection,
+                    state_path,
+                    codex="/opt/custom-codex",
+                )
+
+        self.assertEqual(result, 0)
+        options.assert_called_once_with(
+            root,
+            selection,
+            state_path,
+            current_workflow=current_workflow,
+            component_catalog=mock.ANY,
+            model_catalog_loader=mock.ANY,
+        )
+        adapter_type.assert_called_once_with("/opt/custom-codex", cwd=root)
+
+    def test_handoff_options_loads_current_run_from_reused_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_repo = root / "source"
+            source_repo.mkdir()
+            artifacts = self.make_artifacts(source_repo)
+            issue = artifacts.issues_index.parent / "0001-edit.md"
+            issue.write_text("# Edit\n\nCompleted: [ ]\n", encoding="utf-8")
+            artifacts.issues_index.write_text(
+                "[Issue 0001](./0001-edit.md)\n",
+                encoding="utf-8",
+            )
+            worktree = root / "feature-dev"
+            worktree_issues_index = worktree / artifacts.issues_index.relative_to(
+                source_repo
+            )
+            worktree_issues_index.parent.mkdir(parents=True)
+            worktree_issues_index.write_text(
+                artifacts.issues_index.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            worktree_state = LoopStateWriter(worktree_issues_index)
+            worktree_state.record_resolved_workflow(
+                default_portable_workflow(),
+                default_portable_component_catalog(),
+            )
+            source_state_path = artifacts.issues_index.with_name(
+                "README.loop.state.json"
+            )
+
+            with mock.patch.object(
+                interactive_runner,
+                "default_worktree_path",
+                return_value=worktree,
+            ), mock.patch.object(
+                interactive_runner,
+                "resolve_existing_worktree",
+                return_value=worktree,
+            ), mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["/options", "current", "cancel", "/quit"],
+            ), mock.patch.object(
+                interactive_runner,
+                "terminal_width",
+                return_value=100,
+            ), mock.patch.object(
+                interactive_runner,
+                "CodexModelCatalogAdapter",
+            ) as adapter_type, redirect_stdout(StringIO()) as output:
+                adapter_type.return_value.discover.side_effect = (
+                    CatalogDiscoveryError("offline test catalog")
+                )
+                result = interactive_runner.run_handoff(
+                    root,
+                    source_repo,
+                    artifacts,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    root / "devloop-plan.json",
+                )
+            source_state_was_created = source_state_path.exists()
+
+        self.assertEqual(result, 0)
+        self.assertFalse(source_state_was_created)
+        self.assertIn("Current Run (read-only)", output.getvalue())
+        self.assertIn("Viewing Current Run settings.", output.getvalue())
 
 
 class WorktreePromptTests(unittest.TestCase):
@@ -344,6 +1176,302 @@ class BranchStrategyTests(unittest.TestCase):
 
 
 class PlanStateTests(unittest.TestCase):
+    @staticmethod
+    def write_custom_component_bundle(root: Path) -> Path:
+        preset_path = root / "presets" / "generic-minimal.json"
+        preset_path.parent.mkdir(parents=True)
+        skill_path = root / "skills" / "codex" / "security-review" / "SKILL.md"
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text("# Security review\n", encoding="utf-8")
+        preset_path.write_text(
+            json.dumps(
+                {
+                    "name": "custom-portable-components",
+                    "roles": {
+                        "security-review": {
+                            "step_adapter": "reviewer",
+                            "component_id": "example.security-review",
+                            "display_name": "Security Review",
+                            "skills": [
+                                "skills/codex/security-review/SKILL.md"
+                            ],
+                            "agents": [],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return preset_path
+
+    def test_options_discovers_a_custom_portable_component_from_an_installed_role(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.write_custom_component_bundle(root)
+            state_path = root / "devloop-plan.json"
+            output = StringIO()
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["add", "5", "apply"],
+            ), mock.patch.object(
+                interactive_runner,
+                "terminal_width",
+                return_value=100,
+            ), redirect_stdout(output):
+                interactive_runner.run_options_menu(
+                    root,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    state_path,
+                )
+
+            stored = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertIn("Security Review (ISSUE)", output.getvalue())
+        self.assertEqual(
+            stored["user_workflow_default"]["steps"][-1]["component_id"],
+            "example.security-review",
+        )
+
+    def test_custom_portable_component_snapshots_and_executes_through_the_issue_loop(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            preset_path = self.write_custom_component_bundle(root)
+            configuration_path = root / "devloop-plan.json"
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["add", "5", "apply"],
+            ), mock.patch.object(
+                interactive_runner,
+                "terminal_width",
+                return_value=100,
+            ), redirect_stdout(StringIO()):
+                interactive_runner.run_options_menu(
+                    root,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    configuration_path,
+                )
+
+            issue_path = root / "0004-custom.md"
+            issue_path.write_text(
+                "# Custom component\n\nCompleted: [ ]\n",
+                encoding="utf-8",
+            )
+            issue = Issue("0004", "Custom component", issue_path, False)
+            issues_index = root / "feature-issues.md"
+            issues_index.write_text("[0004](./0004-custom.md)\n", encoding="utf-8")
+            state_writer = LoopStateWriter(issues_index)
+            preset = load_preset(preset_path)
+            installed_catalog = build_portable_component_catalog(
+                root,
+                preset.roles,
+            )
+            cli.resolve_run_workflow(
+                state_writer,
+                installed_catalog,
+                user_workflow_path=configuration_path,
+            )
+            current_workflow = interactive_runner.load_current_run_workflow(
+                issues_index,
+                component_catalog=installed_catalog,
+            )
+
+            class PassingRunner:
+                dry_run = False
+                bundle = BundleContext(
+                    root=root,
+                    prompts=root / "prompts",
+                    schemas=root / "schemas",
+                )
+                preset = load_preset(preset_path)
+
+                def __init__(self) -> None:
+                    self.calls: list[dict[str, object]] = []
+
+                def run_role(self, **arguments: object) -> RoleResult:
+                    self.calls.append(arguments)
+                    return RoleResult(status="PASS")
+
+            runner = PassingRunner()
+            with redirect_stdout(StringIO()):
+                result = cli.run_issue(
+                    issue,
+                    runner,  # type: ignore[arg-type]
+                    state_writer,
+                    max_passes=1,
+                )
+
+            dry_issue_path = root / "0005-dry.md"
+            dry_issue_path.write_text("# Dry run\n", encoding="utf-8")
+            dry_issue = Issue("0005", "Dry run", dry_issue_path, False)
+            dry_index = root / "dry-issues.md"
+            dry_index.write_text("[0005](./0005-dry.md)\n", encoding="utf-8")
+            dry_state_writer = LoopStateWriter(dry_index)
+            cli.resolve_run_workflow(
+                dry_state_writer,
+                installed_catalog,
+                user_workflow_path=configuration_path,
+            )
+
+            class DryRunRunner:
+                dry_run = True
+                bundle = runner.bundle
+                preset = runner.preset
+
+                def __init__(self) -> None:
+                    self.steps: list[tuple[object, ...]] = []
+
+                def render_dry_run_prompts(
+                    self,
+                    _issue: Issue,
+                    steps: object,
+                ) -> None:
+                    self.steps = list(steps)  # type: ignore[arg-type]
+
+            dry_runner = DryRunRunner()
+            with redirect_stdout(StringIO()):
+                cli.run_issue(
+                    dry_issue,
+                    dry_runner,  # type: ignore[arg-type]
+                    dry_state_writer,
+                    max_passes=1,
+                )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            current_workflow.primary_path()[-1].component_id,
+            "example.security-review",
+        )
+        self.assertEqual(
+            [call["role"] for call in runner.calls],
+            ["coder", "reviewer", "reviewer", "qa", "security-review"],
+        )
+        self.assertEqual(runner.calls[-1]["role_adapter"], "reviewer")
+        self.assertEqual(
+            dry_runner.steps[-1][:2],
+            ("security-review", "reviewer"),
+        )
+
+    def test_options_opens_the_public_workflow_editor_and_applies_future_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            selection = interactive_runner.catalog_module.Selection.defaults()
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["3", "rename", "Planner Review", "apply"],
+            ), mock.patch.object(
+                interactive_runner,
+                "terminal_width",
+                return_value=100,
+                create=True,
+            ), redirect_stdout(StringIO()) as output:
+                interactive_runner.run_options_menu(root, selection, state_path)
+
+            stored = WorkflowDefaultStore(
+                state_path,
+                default_portable_component_catalog(),
+            ).load()
+            restored_selection = interactive_runner.catalog_module.load_selection(
+                state_path
+            )
+
+        self.assertIn("Workflow Editor", output.getvalue())
+        self.assertNotIn("Planning skills", output.getvalue())
+        self.assertEqual(
+            stored.step(SECURITY_REVIEW_STEP_ID).display_name,
+            "Planner Review",
+        )
+        self.assertEqual(restored_selection.to_dict(), selection.to_dict())
+
+    def test_active_options_edits_future_runs_without_mutating_the_run_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issues_index = root / "feature-issues.md"
+            issues_index.write_text("", encoding="utf-8")
+            state_path = root / "devloop-plan.json"
+            catalog = default_portable_component_catalog()
+            writer = LoopStateWriter(issues_index)
+            writer.record_resolved_workflow(
+                default_portable_workflow(),
+                catalog,
+            )
+            writer.state["issues"]["0001"] = {
+                "status": "IN_PROGRESS",
+                "current_step_instance_id": str(SECURITY_REVIEW_STEP_ID),
+                "current_pass": 3,
+            }
+            writer.flush()
+            before = writer.state_path.read_bytes()
+            current_workflow = interactive_runner.load_current_run_workflow(
+                issues_index
+            )
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=["3", "rename", "Next Run Review", "apply"],
+            ), mock.patch.object(
+                interactive_runner,
+                "terminal_width",
+                return_value=100,
+            ), redirect_stdout(StringIO()) as output:
+                interactive_runner.run_options_menu(
+                    root,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    state_path,
+                    current_workflow=current_workflow,
+                )
+
+            stored = WorkflowDefaultStore(state_path, catalog).load()
+            after = writer.state_path.read_bytes()
+
+        self.assertIn("Current Run (read-only)", output.getvalue())
+        self.assertEqual(before, after)
+        self.assertEqual(
+            stored.step(SECURITY_REVIEW_STEP_ID).display_name,
+            "Next Run Review",
+        )
+
+    def test_cancel_discards_staged_capability_and_workflow_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_path = Path(raw) / "devloop-plan.json"
+            bundle_root = Path(__file__).resolve().parents[1]
+            selection = interactive_runner.catalog_module.Selection.defaults()
+            original = selection.to_dict()
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=[
+                    "capabilities",
+                    "1",
+                    "angular-typescript-developer",
+                    "1",
+                    "4",
+                    "cancel",
+                ],
+            ), mock.patch.object(
+                interactive_runner,
+                "terminal_width",
+                return_value=100,
+            ), redirect_stdout(StringIO()):
+                interactive_runner.run_options_menu(
+                    bundle_root,
+                    selection,
+                    state_path,
+                )
+
+        self.assertEqual(selection.to_dict(), original)
+        self.assertFalse(state_path.exists())
+
     def test_save_last_target_repo_preserves_selection_and_worktree_parent(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -455,6 +1583,63 @@ class ResumePlanningTests(unittest.TestCase):
 
         self.assertEqual(candidate.active_issue, "0002")
         self.assertEqual(candidate.active_status, "In Progress: reviewer")
+
+    def test_resume_candidate_recognizes_canonical_portable_issue_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_prd_pair(root, "active-v2", completed=(False,))
+            state_path = artifacts.issues_index.with_name("README.loop.state.json")
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "issues": {
+                            "0001": {
+                                "status": "IN_PROGRESS",
+                                "current_step_instance_id": (
+                                    "e7f9d3a2-1b64-48c5-9d20-6a7b8c9d0e02"
+                                ),
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            candidate = interactive_runner.find_resume_candidates(root)[0]
+
+        self.assertEqual(candidate.active_issue, "0001")
+        self.assertEqual(candidate.active_status, "IN_PROGRESS")
+
+    def test_status_display_recognizes_canonical_portable_issue_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_prd_pair(
+                root,
+                "status-v2",
+                completed=(False, False, False),
+            )
+            state_path = artifacts.issues_index.with_name("README.loop.state.json")
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "issues": {
+                            "0001": {"status": "COMPLETED"},
+                            "0002": {"status": "BLOCKED"},
+                            "0003": {"status": "IN_PROGRESS"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                interactive_runner.print_prd_status(artifacts)
+
+        rendered = output.getvalue()
+        self.assertIn("Completed issues: 0001", rendered)
+        self.assertIn("Blocked issues: 0002", rendered)
+        self.assertIn("In-progress issues: 0003", rendered)
 
     def test_discovers_a_flat_local_issue_pack(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

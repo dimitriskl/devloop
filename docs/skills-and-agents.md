@@ -66,10 +66,42 @@ Dev Loop discovers agents and skills from the bundle at startup:
 Copy a folder or file into place and it appears in the `/options` pickers on
 the next planning session. Nothing needs registering.
 
+Capability selection is per Workflow Step instance. Two Review steps do not
+share a mutable profile: each begins with its component defaults and can toggle
+replaceable Skills and Agent References independently. Component-required
+entries remain locked and explain why the Step Contract needs them.
+
+An installed preset role can also advertise a custom portable Workflow Step
+Type by selecting one of the portable step adapters. The role's installed skill
+and agent paths become defaults copied into each new instance, while the
+adapter supplies the component-owned
+scope, ports, and outcomes. For example:
+
+```json
+{
+  "roles": {
+    "security-review": {
+      "step_adapter": "reviewer",
+      "component_id": "example.security-review",
+      "display_name": "Security Review",
+      "skills": ["skills/codex/security-review/SKILL.md"],
+      "agents": []
+    }
+  }
+}
+```
+
+The portable adapters are `coder`, `reviewer`, and `qa`. Referenced skill and
+agent files must already be installed in the bundle. A custom component then
+appears in the Workflow Editor Type picker, persists in future-run defaults and
+snapshots, and executes with its configured role instructions through the
+selected adapter.
+
 ## Install From GitHub
 
-Inside the planning chat, `/options` -> "Add skill or agent from GitHub"
-accepts a repository URL with an optional `#subpath`:
+Inside the planning chat, follow `/options` → `capabilities` → **Add skill or
+agent from GitHub**. The installer accepts a repository URL with an optional
+`#subpath`:
 
     https://github.com/someone/skills-repo#skills/my-skill
 

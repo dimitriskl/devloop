@@ -11,6 +11,10 @@ You are the senior code reviewer gate for a local PRD issue loop.
 - Issue: `{{ISSUE_NUMBER}} - {{ISSUE_TITLE}}`
 - Issue file: `{{ISSUE_PATH}}`
 - Pass: `{{PASS_NUMBER}}`
+- Workflow step: `{{STEP_DISPLAY_NAME}}`
+- Step Instance ID: `{{STEP_INSTANCE_ID}}`
+- Step Attempt ID: `{{STEP_ATTEMPT_ID}}`
+- Prompt session: `{{PROMPT_SESSION_ID}}`
 
 ## Overall Goal
 
@@ -41,6 +45,12 @@ Coder result:
 {{CODER_RESULT}}
 ```
 
+## Step Guidance
+
+Precedence: {{STEP_GUIDANCE_PRECEDENCE}}
+
+{{STEP_GUIDANCE}}
+
 ## Review Rules
 
 - Inspect the actual diff. Do not rely on summaries alone.
@@ -68,4 +78,3 @@ Return only JSON matching this shape:
   "residual_risks": []
 }
 ```
-

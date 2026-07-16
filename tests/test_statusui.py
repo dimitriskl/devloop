@@ -4,11 +4,25 @@ import io
 import os
 import re
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 from devloop import statusui
+from devloop.portable_workflow import (
+    ANALYSIS_STEP_ID,
+    DEVELOPMENT_STEP_ID,
+    StepRuntimeState,
+    StepRuntimeStatus,
+    default_portable_component_catalog,
+    default_portable_workflow,
+)
 from devloop.statusui import Stage
 from devloop.terminal_editor import display_width
+from devloop.terminal_text import sanitize_terminal_text
+from tests.terminal_safety import (
+    HOSTILE_TERMINAL_TEXT,
+    assert_terminal_text_is_safe,
+)
 
 
 class FakeStream(io.StringIO):
@@ -31,6 +45,51 @@ class StageTests(unittest.TestCase):
             [stage.value for stage in statusui.PIPELINE],
             ["analysis", "development", "review", "qa"],
         )
+
+
+class TerminalUnicodeSafetyTests(unittest.TestCase):
+    def test_sanitizer_preserves_rtl_joining_and_joined_emoji(self) -> None:
+        multilingual_text = "فارسی: می\u200cروم · emoji: 👩\u200d💻"
+
+        sanitized = sanitize_terminal_text(multilingual_text)
+
+        self.assertEqual(sanitized, multilingual_text)
+
+    def test_progress_surface_preserves_rtl_joining_and_joined_emoji(self) -> None:
+        multilingual_text = "بررسی می\u200cروم 👩\u200d💻"
+        progress = statusui.project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+        progress = replace(
+            progress,
+            issue_steps=(
+                replace(progress.issue_steps[0], display_name=multilingual_text),
+                *progress.issue_steps[1:],
+            ),
+            issue_title=multilingual_text,
+            activity=replace(progress.activity, safe_text=multilingual_text),
+        )
+
+        rendered = statusui.render_workflow_progress(
+            progress,
+            width=120,
+            color=False,
+            unicode=True,
+            frame="⠋",
+        )
+
+        self.assertGreaterEqual(rendered.count(multilingual_text), 3)
 
 
 class RenderBannerTests(unittest.TestCase):
@@ -71,6 +130,157 @@ class RenderBannerTests(unittest.TestCase):
 
 
 class IssueDashboardRenderingTests(unittest.TestCase):
+    def test_shared_progress_honors_no_color_on_a_tty(self) -> None:
+        workflow = default_portable_workflow()
+        projection = statusui.project_workflow_progress(
+            workflow,
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=ANALYSIS_STEP_ID,
+                    issue_id=None,
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id=None,
+        )
+
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            rendered = statusui.render_workflow_progress_for_stream(
+                projection,
+                stream=FakeStream(tty=True),
+            )
+
+        self.assertIn("WORKING", rendered)
+        self.assertNotIn("\x1b[", rendered)
+
+    def test_dashboard_activity_and_role_summary_are_terminal_safe(self) -> None:
+        progress = statusui.project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+
+        for tty in (True, False):
+            with self.subTest(tty=tty):
+                output = FakeStream(tty=tty)
+                dashboard = statusui.IssueDashboard(
+                    issue_number="0009",
+                    issue_title="Dynamic workflow progress",
+                    position=9,
+                    total=10,
+                    stream=output,
+                    frame_seconds=60,
+                )
+                dashboard.show_workflow_progress(progress)
+                dashboard.notify_activity(HOSTILE_TERMINAL_TEXT)
+                dashboard.finish_role(
+                    Stage.DEVELOPMENT,
+                    "PASS",
+                    HOSTILE_TERMINAL_TEXT,
+                )
+                dashboard.close()
+
+                assert_terminal_text_is_safe(
+                    self,
+                    output.getvalue(),
+                    redirected=not tty,
+                )
+
+    def test_implementation_surface_sanitizes_every_dynamic_progress_field(self) -> None:
+        progress = statusui.project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+        active = replace(
+            progress.active_step,
+            step_instance_id=HOSTILE_TERMINAL_TEXT,
+            display_name=f"{HOSTILE_TERMINAL_TEXT} {'x' * 500}",
+            component_id=HOSTILE_TERMINAL_TEXT,
+            issue_id=HOSTILE_TERMINAL_TEXT,
+            model=HOSTILE_TERMINAL_TEXT,
+            reasoning_effort=HOSTILE_TERMINAL_TEXT,
+            fast=HOSTILE_TERMINAL_TEXT,
+            latest_result=HOSTILE_TERMINAL_TEXT,
+            attempt_id=HOSTILE_TERMINAL_TEXT,
+        )
+        progress = replace(
+            progress,
+            workflow_steps=(
+                replace(
+                    progress.workflow_steps[0],
+                    display_name=HOSTILE_TERMINAL_TEXT,
+                ),
+            ),
+            issue_steps=(active, *progress.issue_steps[1:]),
+            active_step_instance_id=HOSTILE_TERMINAL_TEXT,
+            activity=replace(progress.activity, safe_text=HOSTILE_TERMINAL_TEXT),
+            issue_title=HOSTILE_TERMINAL_TEXT,
+            last_result=statusui.IssueResultSummary(
+                issue_number=HOSTILE_TERMINAL_TEXT,
+                status=statusui.DashboardStatus.PASS,
+                pass_number=1,
+                elapsed_seconds=1,
+            ),
+        )
+
+        for tty in (True, False):
+            with self.subTest(tty=tty):
+                output = FakeStream(tty=tty)
+                dashboard = statusui.IssueDashboard(
+                    issue_number=HOSTILE_TERMINAL_TEXT,
+                    issue_title=HOSTILE_TERMINAL_TEXT,
+                    position=9,
+                    total=10,
+                    stream=output,
+                    frame_seconds=60,
+                    terminal_size=lambda **_: os.terminal_size((1200, 40)),
+                )
+                dashboard.show_workflow_progress(progress)
+                dashboard.notify_activity(HOSTILE_TERMINAL_TEXT)
+                dashboard.close()
+
+                rendered = output.getvalue()
+                assert_terminal_text_is_safe(
+                    self,
+                    rendered,
+                    redirected=not tty,
+                )
+                self.assertNotIn("x" * 500, rendered)
+                self.assertIn(
+                    "model Καλημέρα 世界 ESC-CSI C1-CSI BIDI",
+                    rendered,
+                )
+                self.assertIn(
+                    "effort Καλημέρα 世界 ESC-CSI C1-CSI BIDI",
+                    rendered,
+                )
+                self.assertIn(
+                    "Fast Καλημέρα 世界 E...",
+                    rendered,
+                )
+
     def test_narrow_dashboard_has_only_horizontal_rules_and_semantic_colors(self) -> None:
         snapshot = statusui.IssueDashboardSnapshot(
             issue_number="0002",
@@ -233,6 +443,167 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         )
         self.assertIn("CURRENT ISSUE · 0003 · 3/26 · 23 remaining", plain)
 
+    def test_small_terminal_windows_rows_around_the_active_step(self) -> None:
+        workflow = default_portable_workflow()
+        projection = statusui.project_workflow_progress(
+            workflow,
+            default_portable_component_catalog(),
+            (),
+            (),
+            issue_id="0009",
+        )
+        prototype = projection.issue_steps[0]
+        projection = replace(
+            projection,
+            issue_steps=tuple(
+                replace(
+                    prototype,
+                    step_instance_id=f"step-{index}",
+                    display_name=f"Review {index}",
+                )
+                for index in range(1, 13)
+            ),
+            active_step_instance_id="step-11",
+        )
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0009",
+            issue_title="Dynamic workflow progress",
+            position=9,
+            total=10,
+            stream=output,
+            frame_seconds=60,
+            terminal_size=lambda **_: os.terminal_size((80, 12)),
+        )
+
+        dashboard.show_workflow_progress(projection)
+        dashboard.close()
+
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.getvalue())
+        self.assertIn("Review 11", plain)
+        self.assertIn("steps hidden", plain)
+
+    def test_same_step_rework_starts_a_new_live_timer_without_double_counting(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        progress = statusui.project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                    attempt_id="attempt-1",
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+        clock = Clock()
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0009",
+            issue_title="Dynamic workflow progress",
+            position=9,
+            total=10,
+            stream=output,
+            clock=clock,
+            frame_seconds=60,
+        )
+        dashboard.show_workflow_progress(progress)
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        clock.value = 10
+        dashboard.finish_role(Stage.DEVELOPMENT, "PASS")
+        rework = replace(
+            progress,
+            issue_steps=tuple(
+                replace(
+                    step,
+                    status=(
+                        statusui.DashboardStatus.WORKING
+                        if step.step_instance_id == progress.active_step_instance_id
+                        else step.status
+                    ),
+                    pass_number=(
+                        2
+                        if step.step_instance_id == progress.active_step_instance_id
+                        else step.pass_number
+                    ),
+                    elapsed_seconds=(
+                        10
+                        if step.step_instance_id == progress.active_step_instance_id
+                        else step.elapsed_seconds
+                    ),
+                    attempt_id=(
+                        "attempt-2"
+                        if step.step_instance_id == progress.active_step_instance_id
+                        else step.attempt_id
+                    ),
+                )
+                for step in progress.issue_steps
+            ),
+        )
+        transition_start = len(output.getvalue())
+
+        dashboard.show_workflow_progress(rework)
+        dashboard.close()
+
+        transition = re.sub(
+            r"\x1b\[[0-?]*[ -/]*[@-~]",
+            "",
+            output.getvalue()[transition_start:],
+        )
+        self.assertIn("WORKING   Development · pass 2 · 00:00:10", transition)
+
+    def test_tty_redraw_clears_rows_when_active_details_disappear(self) -> None:
+        progress = statusui.project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0009",
+            issue_title="Dynamic workflow progress",
+            position=9,
+            total=10,
+            stream=output,
+            frame_seconds=60,
+        )
+        dashboard.show_workflow_progress(progress)
+        completed = replace(
+            progress,
+            issue_steps=tuple(
+                replace(step, status=statusui.DashboardStatus.PASS)
+                if step.step_instance_id == progress.active_step_instance_id
+                else step
+                for step in progress.issue_steps
+            ),
+            active_step_instance_id=None,
+        )
+        transition_start = len(output.getvalue())
+
+        dashboard.show_workflow_progress(completed)
+
+        transition = output.getvalue()[transition_start:]
+        self.assertEqual(transition.count("\x1b[2K"), 14)
+        self.assertTrue(transition.endswith("\x1b[4A\r"))
+
 
 class StagePromptTests(unittest.TestCase):
     def test_prompt_names_stage(self) -> None:
@@ -271,6 +642,46 @@ class WaitingIndicatorTests(unittest.TestCase):
         self.assertIn("STALL?", stalled)
         self.assertIn("Ctrl+C", stalled)
         self.assertLessEqual(len(stalled), 79)
+
+    def test_workflow_indicator_advances_shared_active_timers_and_activity(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        workflow = default_portable_workflow()
+        progress = statusui.project_workflow_progress(
+            workflow,
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=ANALYSIS_STEP_ID,
+                    issue_id=None,
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id=None,
+        )
+        clock = Clock()
+        indicator = statusui.WaitingIndicator(
+            FakeStream(),
+            clock=clock,
+            workflow_progress=progress,
+        )
+
+        clock.value = 15
+        indicator.notify_activity("Inspecting repository guidance.")
+        clock.value = 20
+        rendered = indicator._progress_panel("/")
+
+        self.assertIn("ACTIVE Analysis", rendered)
+        self.assertIn("model gpt-5.6-sol", rendered)
+        self.assertIn("elapsed 00:00:20", rendered)
+        self.assertIn("event 00:00:05 ago", rendered)
+        self.assertIn("AI › Inspecting repository guidance.", rendered)
 
 
 if __name__ == "__main__":

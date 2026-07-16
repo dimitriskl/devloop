@@ -39,6 +39,54 @@ Check the loop state files next to the issue README:
 Recent versions print selected issues, role status, and blocked summaries to
 the terminal. If a run still looks silent, open `README.loop.md` first.
 
+## The Workflow Editor cannot apply a draft
+
+Read the validation message together with the selected Step Display Name and,
+under `advanced`, its Step Instance ID. Use the live graph preview to repair an
+unsupported or unreachable `route`. Use `advanced` and `bind` to repair a
+missing, incompatible, ambiguous, or no-longer-upstream Input Port producer.
+Dev Loop chooses a producer automatically only when exactly one compatible
+source is executable on every path to the consumer.
+
+After `delete`, repair every binding sourced from the deleted step; downstream
+steps are intentionally retained. After `duplicate`, bind consumers to the new
+outputs only when that is deliberate. After `type`, review reset ports,
+settings, capabilities, outcomes, and any preserved guidance. Guidance marked
+`NEEDS_REVIEW` must be kept, edited, or cleared before `apply`.
+
+## A portable workflow default reports schema v1 or malformed schema v2
+
+Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v2`.
+There is no v1 reader, migration, or dual-write path. From planning or
+implementation preflight, open `/options`; the editor enters a fail-closed
+recovery mode and does not load rejected content as an editable draft. Choose
+`reset-workflow` and then `apply` to atomically replace the invalid default with
+the built-in v2 workflow. Choose `cancel` to leave the stored configuration
+byte-for-byte unchanged. You may instead repair the local JSON outside a
+running Current Run. Malformed UUIDs, duplicate names, unknown Step Types,
+invalid routes, scopes, bindings, and unknown fields fail closed rather than
+being ignored.
+
+## Model discovery or execution preflight fails
+
+Confirm the installed Codex CLI is authenticated, then use `retry-catalog` in
+the Workflow Editor. A stale cache is display-only and cannot authorize a run.
+If preflight names a Step Display Name and model, reasoning effort, or Fast
+setting, edit that exact Future Runs step in `/options` and retry. Dev Loop does
+not substitute another model, lower effort, or disable Fast silently. An
+already-started Current Run is immutable; it can retry live discovery but
+cannot adopt Future Runs edits.
+
+## Dashboard rows wrap, lack color, or repeat in redirected output
+
+Widen the terminal when possible. Narrow layouts window long workflows while
+keeping the active instance visible. `NO_COLOR=1` intentionally removes color,
+but PASS, FAIL, BLOCKED, WORKING, and WAITING text remains authoritative.
+Redirected output is intentionally append-only, so repeated snapshots preserve
+history without cursor-control sequences. If dynamic content appears unsafe or
+garbled, update Dev Loop; current releases sanitize backend activity and fall
+back to ASCII when the output encoding cannot represent Unicode.
+
 ## A restarted run begins again at coder pass 1
 
 Update Dev Loop and rerun the same `--prd` and `--issues` command. Current

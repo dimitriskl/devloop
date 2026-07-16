@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, TextIO
 
 from .codex_events import (
     CodexTurnOutcome,
@@ -20,19 +20,28 @@ from .codex_events import (
     render_safe_codex_activity,
 )
 from .issue_pack import Issue
+from .portable_text import normalize_single_line_display_name
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage, WaitingIndicator
+from .step_configuration import STEP_GUIDANCE_PRECEDENCE
 from .subprocess_utils import (
+    ProcessExecutionBudget,
     output_text,
     reap_process_after_terminal_event,
     run_captured_text,
     terminate_process,
 )
+from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext, Preset, render_template
+
+if TYPE_CHECKING:
+    from .portable_workflow import CodexExecutionSettings, ExecutionBudget
 
 _LEGACY_APPROVAL_FLAG: bool | None = None
 CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
 STREAM_THREAD_JOIN_SECONDS = 1.0
+FAST_CLI_SERVICE_TIER = "fast"
+STANDARD_CLI_SERVICE_TIER = "default"
 ROLE_STAGES = {
     "coder": Stage.DEVELOPMENT,
     "reviewer": Stage.REVIEW,
@@ -98,6 +107,7 @@ def build_codex_exec_command(
     approval_policy: str,
     schema_path: Path,
     message_path: Path,
+    codex_settings: CodexExecutionSettings | None = None,
 ) -> list[str]:
     command = [
         codex,
@@ -107,6 +117,8 @@ def build_codex_exec_command(
         "-s",
         sandbox,
     ]
+    if codex_settings is not None:
+        command.extend(codex_execution_settings_args(codex_settings))
     if uses_legacy_approval_flag(codex):
         command.extend(["-a", approval_policy])
     else:
@@ -124,6 +136,25 @@ def build_codex_exec_command(
     return command
 
 
+def codex_execution_settings_args(
+    settings: CodexExecutionSettings,
+) -> list[str]:
+    fast_enabled = settings.fast.value == "ON"
+    service_tier = (
+        FAST_CLI_SERVICE_TIER if fast_enabled else STANDARD_CLI_SERVICE_TIER
+    )
+    return [
+        "-m",
+        settings.model,
+        "-c",
+        f'model_reasoning_effort="{settings.reasoning_effort}"',
+        "-c",
+        f'service_tier="{service_tier}"',
+        "--enable" if fast_enabled else "--disable",
+        "fast_mode",
+    ]
+
+
 def stage_for_role(role: str) -> Stage:
     try:
         return ROLE_STAGES[role]
@@ -139,6 +170,7 @@ def run_streaming_codex_command(
     stage: Stage,
     activity_context: str = "",
     activity_callback: ActivityCallback | None = None,
+    execution_budget: ExecutionBudget | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -169,6 +201,21 @@ def run_streaming_codex_command(
 
         def stderr_activity_callback(_activity: str | None) -> None:
             indicator.notify_activity()
+    budget = (
+        ProcessExecutionBudget(
+            process,
+            timeout_seconds=execution_budget.timeout_seconds,
+            checkpoint_seconds=execution_budget.checkpoint_seconds,
+        )
+        if execution_budget is not None
+        else None
+    )
+
+    def notify_stderr_activity(activity: str | None) -> None:
+        if budget is not None:
+            budget.notify_activity()
+        stderr_activity_callback(activity)
+
     input_thread = threading.Thread(
         target=_write_process_input,
         args=(process.stdin, input_text),
@@ -179,7 +226,7 @@ def run_streaming_codex_command(
         args=(
             process.stderr,
             stderr_parts,
-            stderr_activity_callback,
+            notify_stderr_activity,
         ),
         daemon=True,
     )
@@ -189,8 +236,13 @@ def run_streaming_codex_command(
         indicator.start()
     input_thread.start()
     stderr_thread.start()
+    if budget is not None:
+        budget.start()
+    budget_expiration: str | None = None
     try:
         for line in process.stdout:
+            if budget is not None:
+                budget.notify_activity()
             stdout_parts.append(line)
             event = parse_codex_event(line)
             activity = render_safe_codex_activity(event)
@@ -215,10 +267,20 @@ def run_streaming_codex_command(
         terminate_process(process)
         raise
     finally:
+        if budget is not None:
+            budget_expiration = budget.finish()
         if indicator is not None:
             indicator.stop()
         input_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
         stderr_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
+        for stream in (process.stdout, process.stderr):
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+    if budget_expiration is not None:
+        stderr_parts.append(f"{budget_expiration}\n")
+        returncode = 124
 
     return subprocess.CompletedProcess(
         command,
@@ -257,8 +319,10 @@ def _drain_process_stream(
 def _print_codex_activity(stage: Stage, context: str, activity: str) -> None:
     prefix = f"[{stage.value}]"
     if context:
-        prefix = f"{prefix} {context}:"
-    print(f"{prefix} {activity}")
+        safe_context = sanitize_terminal_text(context, preserve_newlines=False)
+        prefix = f"{prefix} {safe_context}:"
+    safe_activity = sanitize_terminal_text(activity, preserve_newlines=False)
+    print(f"{prefix} {safe_activity}")
 
 
 def _terminal_returncode(
@@ -344,9 +408,17 @@ class CodexRunner:
     def ensure_log_root(self) -> None:
         self.log_root.mkdir(parents=True, exist_ok=True)
 
-    def write_log_text(self, path: Path, text: str) -> None:
-        self.ensure_log_root()
-        path.write_text(text, encoding="utf-8")
+    def write_log_text(
+        self,
+        path: Path,
+        text: str,
+        *,
+        log_root: Path | None = None,
+    ) -> None:
+        configured_root = log_root or self.log_root
+        configured_root.mkdir(parents=True, exist_ok=True)
+        resolved_path = _confined_log_path(path, configured_root)
+        resolved_path.write_text(text, encoding="utf-8")
 
     def run_role(
         self,
@@ -359,6 +431,17 @@ class CodexRunner:
         attempt_label: str | None = None,
         progress: str = "",
         activity_callback: ActivityCallback | None = None,
+        step_instance_id: str | None = None,
+        step_display_name: str | None = None,
+        step_attempt_id: str | None = None,
+        prompt_session_id: str | None = None,
+        rework_attempt_record: Mapping[str, Any] | None = None,
+        role_adapter: str | None = None,
+        codex_settings: CodexExecutionSettings | None = None,
+        execution_budget: ExecutionBudget | None = None,
+        skill_paths: Iterable[str] | None = None,
+        agent_paths: Iterable[str] | None = None,
+        step_guidance: str | None = None,
     ) -> RoleResult:
         prompt = self.build_prompt(
             role=role,
@@ -367,18 +450,48 @@ class CodexRunner:
             fix_list=fix_list or [],
             coder_result=coder_result,
             review_result=review_result,
+            step_instance_id=step_instance_id,
+            step_display_name=step_display_name,
+            step_attempt_id=step_attempt_id,
+            prompt_session_id=prompt_session_id,
+            rework_attempt_record=rework_attempt_record,
+            role_adapter=role_adapter,
+            skill_paths=skill_paths,
+            agent_paths=agent_paths,
+            step_guidance=step_guidance,
         )
 
         attempt_slug = slugify_log_token(attempt_label)
-        prefix_parts = [issue.number]
+        prefix_parts = [slugify_log_token(issue.number) or "issue"]
         if attempt_slug:
             prefix_parts.append(attempt_slug)
-        prefix_parts.extend([role, f"pass{pass_number}"])
+        if step_instance_id:
+            prefix_parts.extend(
+                [
+                    slugify_log_token(step_display_name) or "step",
+                    slugify_log_token(step_instance_id) or "instance",
+                ]
+            )
+        prefix_parts.extend(
+            [slugify_log_token(role) or "role", f"pass{pass_number}"]
+        )
         prefix = "-".join(prefix_parts)
-        prompt_path = self.log_root / f"{prefix}.prompt.md"
-        stdout_path = self.log_root / f"{prefix}.stdout.jsonl"
-        stderr_path = self.log_root / f"{prefix}.stderr.txt"
-        message_path = self.log_root / f"{prefix}.last-message.json"
+        prompt_path = _confined_log_path(
+            self.log_root / f"{prefix}.prompt.md",
+            self.log_root,
+        )
+        stdout_path = _confined_log_path(
+            self.log_root / f"{prefix}.stdout.jsonl",
+            self.log_root,
+        )
+        stderr_path = _confined_log_path(
+            self.log_root / f"{prefix}.stderr.txt",
+            self.log_root,
+        )
+        message_path = _confined_log_path(
+            self.log_root / f"{prefix}.last-message.json",
+            self.log_root,
+        )
         self.write_log_text(prompt_path, prompt)
 
         schema_path = self.bundle.schemas / "role-result.schema.json"
@@ -389,6 +502,7 @@ class CodexRunner:
             approval_policy=self.approval_policy,
             schema_path=schema_path,
             message_path=message_path,
+            codex_settings=codex_settings,
         )
 
         result = self.run_codex_exec_with_connection_retries(
@@ -396,12 +510,13 @@ class CodexRunner:
             prompt=prompt,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            stage=stage_for_role(role),
+            stage=stage_for_role(role_adapter or role),
             activity_context=_role_activity_context(
                 progress=progress,
                 pass_number=pass_number,
             ),
             activity_callback=activity_callback,
+            execution_budget=execution_budget,
         )
         self.write_log_text(stdout_path, result.stdout)
         self.write_log_text(stderr_path, result.stderr)
@@ -425,6 +540,8 @@ class CodexRunner:
         stage: Stage = Stage.DEVELOPMENT,
         activity_context: str = "",
         activity_callback: ActivityCallback | None = None,
+        log_root: Path | None = None,
+        execution_budget: ExecutionBudget | None = None,
     ) -> subprocess.CompletedProcess[str]:
         attempt = 1
         stdout_parts: list[str] = []
@@ -438,6 +555,7 @@ class CodexRunner:
                 stage=stage,
                 activity_context=activity_context,
                 activity_callback=activity_callback,
+                execution_budget=execution_budget,
             )
             current_stdout = output_text(result.stdout)
             current_stderr = output_text(result.stderr)
@@ -459,15 +577,53 @@ class CodexRunner:
                 activity_callback(retry_message.strip())
             stderr_parts.append(retry_message)
             result.stderr = "".join(stderr_parts)
-            self.write_log_text(stdout_path, result.stdout)
-            self.write_log_text(stderr_path, result.stderr)
+            self.write_log_text(stdout_path, result.stdout, log_root=log_root)
+            self.write_log_text(stderr_path, result.stderr, log_root=log_root)
             time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
             attempt += 1
 
-    def render_dry_run_prompts(self, issue: Issue) -> None:
-        for role in ("coder", "reviewer", "qa"):
-            prompt = self.build_prompt(role=role, issue=issue, pass_number=1, fix_list=[])
-            path = self.log_root / f"{issue.number}-{role}-dry-run.prompt.md"
+    def render_dry_run_prompts(
+        self,
+        issue: Issue,
+        workflow_steps: Iterable[tuple[Any, ...]] | None = None,
+    ) -> None:
+        steps = workflow_steps or (
+            ("coder", "coder", "Development", "legacy-development"),
+            ("reviewer", "reviewer", "Review", "legacy-review"),
+            ("qa", "qa", "QA", "legacy-qa"),
+        )
+        for raw_step in steps:
+            role, role_adapter, display_name, instance_id = raw_step[:4]
+            skill_paths = raw_step[4] if len(raw_step) > 4 else None
+            agent_paths = raw_step[5] if len(raw_step) > 5 else None
+            step_guidance = raw_step[6] if len(raw_step) > 6 else None
+            prompt_session_id = f"dry-run-{instance_id}"
+            prompt = self.build_prompt(
+                role=role,
+                issue=issue,
+                pass_number=1,
+                fix_list=[],
+                step_instance_id=instance_id,
+                step_display_name=display_name,
+                step_attempt_id=f"dry-run-{instance_id}",
+                prompt_session_id=prompt_session_id,
+                role_adapter=role_adapter,
+                skill_paths=skill_paths,
+                agent_paths=agent_paths,
+                step_guidance=step_guidance,
+            )
+            issue_slug = slugify_log_token(issue.number) or "issue"
+            step_slug = slugify_log_token(display_name) or "step"
+            instance_slug = slugify_log_token(instance_id) or "instance"
+            role_slug = slugify_log_token(role) or "role"
+            path = _confined_log_path(
+                self.log_root
+                / (
+                    f"{issue_slug}-{step_slug}-{instance_slug}-{role_slug}"
+                    "-dry-run.prompt.md"
+                ),
+                self.log_root,
+            )
             self.write_log_text(path, prompt)
             print(f"[dry-run] Wrote {path}")
 
@@ -493,11 +649,23 @@ class CodexRunner:
         )
 
         prefix = "self-improvement-compiler"
-        prompt_path = log_root / f"{prefix}.prompt.md"
-        stdout_path = log_root / f"{prefix}.stdout.jsonl"
-        stderr_path = log_root / f"{prefix}.stderr.txt"
-        message_path = log_root / f"{prefix}.last-message.json"
-        self.write_log_text(prompt_path, prompt)
+        prompt_path = _confined_log_path(
+            log_root / f"{prefix}.prompt.md",
+            log_root,
+        )
+        stdout_path = _confined_log_path(
+            log_root / f"{prefix}.stdout.jsonl",
+            log_root,
+        )
+        stderr_path = _confined_log_path(
+            log_root / f"{prefix}.stderr.txt",
+            log_root,
+        )
+        message_path = _confined_log_path(
+            log_root / f"{prefix}.last-message.json",
+            log_root,
+        )
+        self.write_log_text(prompt_path, prompt, log_root=log_root)
 
         schema_path = self.bundle.schemas / "role-result.schema.json"
         command = build_codex_exec_command(
@@ -516,9 +684,10 @@ class CodexRunner:
             stderr_path=stderr_path,
             stage=Stage.QA,
             activity_context="self-improvement",
+            log_root=log_root,
         )
-        self.write_log_text(stdout_path, result.stdout)
-        self.write_log_text(stderr_path, result.stderr)
+        self.write_log_text(stdout_path, result.stdout, log_root=log_root)
+        self.write_log_text(stderr_path, result.stderr, log_root=log_root)
 
         if result.returncode != 0:
             return RoleResult(
@@ -538,13 +707,27 @@ class CodexRunner:
         fix_list: list[str],
         coder_result: RoleResult | None = None,
         review_result: RoleResult | None = None,
+        step_instance_id: str | None = None,
+        step_display_name: str | None = None,
+        step_attempt_id: str | None = None,
+        prompt_session_id: str | None = None,
+        rework_attempt_record: Mapping[str, Any] | None = None,
+        role_adapter: str | None = None,
+        skill_paths: Iterable[str] | None = None,
+        agent_paths: Iterable[str] | None = None,
+        step_guidance: str | None = None,
     ) -> str:
         role_config = self.preset.roles.get(role, {})
+        execution_role = role_adapter or role
+        normalized_step_display_name = normalize_single_line_display_name(
+            step_display_name or role,
+            field_name="Workflow step display name",
+        )
         template_name = {
             "coder": "coder.md",
             "reviewer": "reviewer.md",
             "qa": "qa.md",
-        }[role]
+        }[execution_role]
 
         values = {
             "ROLE": role,
@@ -556,11 +739,31 @@ class CodexRunner:
             "ISSUE_NUMBER": issue.number,
             "ISSUE_TITLE": issue.title,
             "ISSUE_PATH": issue.path,
+            "STEP_INSTANCE_ID": step_instance_id or "Not applicable",
+            "STEP_DISPLAY_NAME": normalized_step_display_name,
+            "STEP_ATTEMPT_ID": step_attempt_id or "Not applicable",
+            "PROMPT_SESSION_ID": prompt_session_id or "Not applicable",
+            "REWORK_ATTEMPT_RECORD": json.dumps(
+                rework_attempt_record,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             "REQUIRED_DOCS": self.preset.required_docs,
             "RUN_GOAL": DEVLOOP_RUN_GOAL,
             "BUNDLE_MEMORY_DOCS": self.bundle_memory_docs(),
-            "SKILL_PATHS": role_config.get("skills", []),
-            "AGENT_PATHS": role_config.get("agents", []),
+            "SKILL_PATHS": (
+                tuple(skill_paths)
+                if skill_paths is not None
+                else role_config.get("skills", [])
+            ),
+            "AGENT_PATHS": (
+                tuple(agent_paths)
+                if agent_paths is not None
+                else role_config.get("agents", [])
+            ),
+            "STEP_GUIDANCE": step_guidance or "No additional Step Guidance.",
+            "STEP_GUIDANCE_PRECEDENCE": STEP_GUIDANCE_PRECEDENCE,
             "FIX_LIST": fix_list or ["None"],
             "CODER_RESULT": json.dumps(result_to_dict(coder_result), indent=2),
             "REVIEW_RESULT": json.dumps(result_to_dict(review_result), indent=2),
@@ -629,6 +832,18 @@ def slugify_log_token(value: str | None) -> str:
         return ""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug[:48]
+
+
+def _confined_log_path(path: Path, log_root: Path) -> Path:
+    resolved_root = log_root.resolve()
+    resolved_path = path.resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError(
+            f"Refusing to write a log outside the configured log root: {path}"
+        ) from error
+    return resolved_path
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:

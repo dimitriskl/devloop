@@ -106,34 +106,95 @@ Clipboard capture depends on tools already present on most machines:
 | --- | --- |
 | Alt+V | attach a screenshot from the clipboard (use `/paste` if unavailable) |
 | `/paste` | attach a screenshot from the clipboard |
-| `/options` | open agent/skill and development options |
+| `/options` | open the Workflow Editor for future-run defaults and capabilities |
 | `/resume` | list unfinished PRDs and continue the selected handoff |
 | `/status` | show the stage banner, artifacts, and selection summary |
 | `/done` | detect the PRD and issue pack now (or enter paths manually) |
 | `/help` | show this help |
 | `/quit` | abort planning (never required to continue) |
 
-## `/options`: Agents, Skills, And GitHub Installs
+## `/options`: Workflow Editor And Capabilities
 
-Typing `/options` at any prompt opens a small menu without leaving the chat:
+Typing `/options` at any planning or development-handoff prompt opens the
+transactional terminal Workflow Editor. It shows the Primary Path and the
+selected step's display name, component type, and component-owned scope. Step
+Instance IDs stay hidden unless `advanced` is selected. Use a step number to
+change selection. `add` appends an installed component type, while `insert`
+places one at a one-based Primary Path position. `move-up`, `move-down`, and
+`position` reorder the `SUCCEEDED` path without changing Step Instance IDs;
+displayed positions are always renumbered from one. New required inputs are
+bound automatically only when one compatible upstream output exists. Missing
+or ambiguous inputs stay visible and block `apply` for deliberate repair.
+When a move places a producer after one of its consumers, the editor clears
+that now-unexecutable binding and leaves the input explicitly unresolved; it
+never keeps or guesses a runtime-invalid source.
+Use `route` to choose a supported outcome and then target an existing step,
+create a new branch step, insert a step on the route, or terminate that outcome
+explicitly. The live text graph preview is derived from these structured
+transitions and supports loops and branch-local steps without pretending they
+have a Primary Path Position. Use `advanced` to display required and optional
+typed Input Ports, compatible producers, current bindings, and repair errors;
+use `bind` to select a producer or clear the binding. `apply` fails closed until
+all routes and required bindings form an executable workflow with a start and
+a successful terminal path.
+`duplicate` creates a new identity and warns about outputs that still need
+consumers. `delete` first previews affected transitions and bindings, requires
+an explicit confirmation, never deletes downstream steps, and repairs only an
+unambiguous Primary Path success link. `type` preserves the selected identity,
+name, and position while resetting type-owned settings and showing the repair
+work. All three operations remain draft-only and can be reverted with `undo`.
+For Codex-backed steps, `model`, `reasoning`, and `fast` edit that Step
+Instance's independent Codex Execution Settings. Model names come from every
+page of the live installed Codex catalog; reasoning choices and Fast are
+limited to capabilities advertised for the selected model. If discovery
+fails, the editor marks its last cache as stale display-only data and offers
+`retry-catalog`. A fresh catalog preflight is still required before execution,
+and an unavailable model, effort, or Fast choice blocks the run without
+substitution. Local deterministic steps instead state that Codex settings do
+not apply.
+Every step also shows an independent Execution Budget. Use `budget` to set its
+overall timeout and checkpoint inactivity deadline without changing its model,
+reasoning effort, or Fast choice. These limits are snapshotted with the
+workflow and enforced for Analysis and each development role attempt.
+Each step owns an independent capability profile. Enter `capabilities` to
+search and toggle installed Skills and Agent References for the selected Step
+Instance. Required capabilities remain enabled and locked with the
+component-contract reason; Reset restores only that component's defaults.
+Enter `guidance` to edit optional bounded multiline Step Guidance. Secret-like
+values are redacted before persistence, and the editor and generated prompt
+state that component contracts, execution policy, permissions, output
+requirements, required capabilities, and safety boundaries outrank guidance.
+Guidance marked `NEEDS_REVIEW` must be explicitly kept, edited, or cleared
+before Apply.
+Use `rename`, `undo`, `reset-step`, or `reset-workflow` for the remaining draft
+actions. `apply` atomically replaces the User Workflow Default; `cancel`
+discards the workflow and capability-selection draft.
 
-1. **Planning skills** — pick which bundled skills drive the planning chat
-   itself (defaults to `grill-with-docs`, `domain-modeling`, `to-prd`,
-   `to-issues`).
-2. **Default agents & skills per role (coder / reviewer / qa)** — override
-   which bundled skills and agent references each development role uses
-   instead of the embedded preset defaults.
+When an existing implementation worktree contains loop state, the editor also
+shows its immutable **Current Run** configuration. Enter `current` to inspect
+it and `future` to return to the editable **Future Runs** draft. The editor
+states explicitly that saved changes affect newly created runs only.
+
+If live catalog discovery or exact-setting validation fails before a new run,
+the preflight prompt can open `/options`, run `retry-catalog`, and revalidate
+without exiting to an unavailable command surface. An already-started Current
+Run remains immutable and can only retry live discovery or stop.
+
+Enter `capabilities` to open the existing capability choices without leaving
+the workflow draft:
+
+1. **Search and toggle this Step Instance's capabilities** — filter installed
+   Skills and Agent References and enable or disable replaceable entries.
+2. **Reset this Step Instance to component capability defaults** — restores
+   required and default capabilities without changing another instance.
 3. **Add skill or agent from GitHub** — installs new skills or agents into
    the bundle; see `docs/skills-and-agents.md` for the exact format and rules.
-4. **Back** — returns to the chat and persists the current selection to the
-   plan-state JSON (the same file that remembers your last target checkout),
-   so future sessions reopen with your last choices.
+4. **Back to Workflow Editor** — returns to the workflow draft. Capability
+   selections are persisted together with `apply`.
 
-If you customized any per-role agents or skills, devloop writes a session
-preset, `devloop.session.preset.json`, into the PRD folder once planning
-hands off to development, and passes it to the implementation runner as
-`--preset`. Sessions with no per-role overrides skip writing a preset and use
-the bundled `presets/generic-minimal.json` defaults.
+Applied capability profiles and Step Guidance are stored in the User Workflow
+Default. A new run snapshots them per Step Instance, and every attempt prompt
+and saved attempt context uses that immutable snapshot.
 
 ## Handoff To Development
 
@@ -143,9 +204,11 @@ will run, the implementation worktree path (or "disabled" if you chose not to
 use one), the branch name, and a line confirming the self-improvement wiki is
 always on (read before development, and updated after). Press Enter to start
 development immediately with those defaults. Type `/options` to change the
-start issue, whether to run every pending issue, whether to use a dedicated
-worktree, the worktree parent path and folder name, or the branch name before
-starting. Type `/quit` to stop without starting development.
+User Workflow Default or inspect a reused worktree's Current Run snapshot. Type
+`/run-options` to change the start issue, whether to run every pending issue,
+whether to use a dedicated worktree, the worktree parent path and folder name,
+or the branch name before starting. Type `/quit` to stop without starting
+development.
 Friendly branch names are normalized before Git runs, so `Reset Queue` becomes
 `Reset-Queue`.
 Entered worktree parent paths are remembered and offered as the next default.
@@ -154,9 +217,17 @@ from that checkout instead of trying to create it again.
 
 Development, review, and QA then run in the same terminal, in-process —
 devloop calls its own implementation runner directly rather than spawning a
-new process. Expect a DEVELOPMENT/REVIEW/QA banner before every role prompt,
-with a context suffix such as `issue 0004 (2/6) / pass 1`, and the
-self-improvement wiki update running automatically at the end of the run.
+new process. The shared dashboard renders every configured Workflow Step
+instance by display name, including two instances backed by the same component.
+Workflow-scoped rows are separated from current-Issue rows. Completed status,
+pass, Last Result, and elapsed time remain frozen while the active row shows
+model, reasoning effort, Fast, a spinner, elapsed time, event freshness, and
+safe activity. Rework adds time to the same step row without overwriting its
+older Step Attempt Records. Long workflows keep the active row in view.
+Interactive terminals update one bounded region; redirected output is
+append-only and contains no cursor movement. `NO_COLOR=1`, narrow terminals,
+and non-Unicode consoles retain complete text labels. The self-improvement
+wiki update runs automatically at the end of the run.
 
 The generated PRD is expected under `prd/<prd-stem>/`. The issue pack is
 expected under `prd/<prd-stem>/issues/README.md` with real Markdown links to

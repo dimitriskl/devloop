@@ -8,10 +8,30 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .codex_runner import RoleResult
 from .issue_pack import Issue
+from .portable_workflow import (
+    DataContractId,
+    InterruptedStepAttemptRecord,
+    IssueStatus,
+    PortableStepComponentCatalog,
+    PortableWorkflowCheckpoint,
+    PortableWorkflowRunResult,
+    StepAttemptRecord,
+    StepInstanceId,
+    StepOutcome,
+    StepRuntimeState,
+    StepRuntimeStatus,
+    TypedStepOutput,
+    WorkflowDefinition,
+    canonical_workflow_hash,
+    load_portable_workflow,
+    parse_issue_status,
+    step_attempt_record_to_dict,
+)
+from .step_configuration import StepAttemptContext, StepCapabilityProfile
 
 
 class ResumeRole(str, Enum):
@@ -49,6 +69,537 @@ class LoopStateWriter:
         self.prd_state_path: Path | None = None
         self.prd_board_path: Path | None = None
         self.state = load_existing_state(self.state_path, issues_index)
+
+    def record_resolved_workflow(
+        self,
+        workflow: WorkflowDefinition,
+        catalog: PortableStepComponentCatalog,
+    ) -> WorkflowDefinition:
+        validated_workflow = load_portable_workflow(workflow.to_dict(), catalog)
+        workflow_hash = canonical_workflow_hash(validated_workflow)
+        if (
+            "resolved_workflow" in self.state
+            or "resolved_workflow_hash" in self.state
+        ):
+            existing_workflow = self.resolved_workflow(catalog)
+            if canonical_workflow_hash(existing_workflow) == workflow_hash:
+                return existing_workflow
+            raise ValueError("The resolved portable workflow is immutable for an active run.")
+        self.state["resolved_workflow"] = validated_workflow.to_dict()
+        self.state["resolved_workflow_hash"] = workflow_hash
+        self.flush()
+        return validated_workflow
+
+    def resolved_workflow(
+        self,
+        catalog: PortableStepComponentCatalog,
+    ) -> WorkflowDefinition:
+        document = self.state.get("resolved_workflow")
+        if not isinstance(document, dict):
+            raise ValueError("Loop state has no resolved portable workflow.")
+        workflow = load_portable_workflow(document, catalog)
+        expected_hash = self.state.get("resolved_workflow_hash")
+        actual_hash = canonical_workflow_hash(workflow)
+        if expected_hash != actual_hash:
+            raise ValueError("Resolved portable workflow hash does not match its content.")
+        return workflow
+
+    def record_step_runtime_state(
+        self,
+        issue: Issue,
+        runtime: StepRuntimeState,
+    ) -> None:
+        self._store_step_runtime_state(runtime)
+        issue_state = self.issue_state(issue)
+        issue_state.update({"title": issue.title, "path": str(issue.path)})
+        if runtime.status is StepRuntimeStatus.RUNNING:
+            issue_state["status"] = IssueStatus.IN_PROGRESS.value
+            issue_state["current_step_instance_id"] = str(runtime.step_instance_id)
+        self.flush()
+
+    def record_portable_checkpoint(
+        self,
+        issue: Issue,
+        checkpoint: PortableWorkflowCheckpoint,
+    ) -> None:
+        if checkpoint.issue_id != issue.number:
+            raise ValueError("Portable workflow checkpoint belongs to another Issue.")
+        for runtime in checkpoint.runtime_states:
+            if runtime.issue_id != issue.number:
+                raise ValueError("Portable workflow runtime belongs to another Issue.")
+            self._store_step_runtime_state(runtime)
+        for attempt in checkpoint.attempts:
+            if attempt.issue_id != issue.number:
+                raise ValueError("Portable workflow attempt belongs to another Issue.")
+            self._store_step_attempt_record(attempt)
+        issue_state = self.issue_state(issue)
+        issue_state.update(
+            {
+                "title": issue.title,
+                "path": str(issue.path),
+                "status": checkpoint.issue_status.value,
+                "current_pass": checkpoint.pass_number,
+            }
+        )
+        if checkpoint.current_step_instance_id is None:
+            issue_state.pop("current_step_instance_id", None)
+            issue_state.pop("cycle_path_step_instance_ids", None)
+        else:
+            issue_state["current_step_instance_id"] = str(
+                checkpoint.current_step_instance_id
+            )
+            issue_state["cycle_path_step_instance_ids"] = [
+                str(step_id)
+                for step_id in checkpoint.cycle_path_step_instance_ids
+            ]
+        if checkpoint.pending_rework_attempt_id is None:
+            issue_state.pop("pending_rework_attempt_id", None)
+        else:
+            issue_state["pending_rework_attempt_id"] = (
+                checkpoint.pending_rework_attempt_id
+            )
+        self.flush()
+
+    def resume_portable_workflow(
+        self,
+        issue: Issue,
+        workflow: WorkflowDefinition,
+    ) -> PortableWorkflowCheckpoint | None:
+        issue_state = self.issue_state(issue)
+        if parse_issue_status(issue_state.get("status")) is not IssueStatus.IN_PROGRESS:
+            return None
+        raw_step_id = issue_state.get("current_step_instance_id")
+        if not isinstance(raw_step_id, str):
+            return None
+        current_step_id = StepInstanceId(raw_step_id)
+        try:
+            workflow.step(current_step_id)
+        except KeyError as error:
+            raise ValueError(
+                "Portable workflow cursor references an unknown Step Instance ID."
+            ) from error
+        pass_number = issue_state.get("current_pass")
+        if not isinstance(pass_number, int) or pass_number < 1:
+            matching_runtime = next(
+                (
+                    runtime
+                    for runtime in reversed(self.step_runtime_states(issue.number))
+                    if runtime.step_instance_id == current_step_id
+                ),
+                None,
+            )
+            if matching_runtime is None:
+                raise ValueError("Portable workflow cursor has no valid pass number.")
+            pass_number = matching_runtime.pass_number
+        pending_rework_attempt_id = optional_state_string(
+            issue_state.get("pending_rework_attempt_id")
+        )
+        raw_cycle_path = issue_state.get("cycle_path_step_instance_ids", [])
+        if not isinstance(raw_cycle_path, list) or not all(
+            isinstance(step_id, str) for step_id in raw_cycle_path
+        ):
+            raise ValueError("Portable workflow cycle path must be a list of IDs.")
+        return PortableWorkflowCheckpoint(
+            issue_id=issue.number,
+            issue_status=IssueStatus.IN_PROGRESS,
+            current_step_instance_id=current_step_id,
+            pass_number=pass_number,
+            runtime_states=self.step_runtime_states(issue.number),
+            attempts=self.step_attempt_records(issue.number),
+            pending_rework_attempt_id=pending_rework_attempt_id,
+            cycle_path_step_instance_ids=tuple(
+                StepInstanceId(step_id) for step_id in raw_cycle_path
+            ),
+        )
+
+    def retry_portable_workflow(
+        self,
+        issue: Issue,
+        workflow: WorkflowDefinition,
+        *,
+        pass_number: int | None = None,
+    ) -> PortableWorkflowCheckpoint | None:
+        if pass_number is not None and pass_number < 1:
+            raise ValueError("Portable workflow retry pass must be positive.")
+        issue_state = self.issue_state(issue)
+        issue_status = parse_issue_status(issue_state.get("status"))
+        if issue_status not in {
+            IssueStatus.CHANGES_REQUESTED,
+            IssueStatus.BLOCKED,
+            IssueStatus.FAILED,
+            IssueStatus.CANCELLED,
+        }:
+            return None
+        attempts = self.step_attempt_records(issue.number)
+        if not attempts:
+            return None
+        latest_attempt = attempts[-1]
+        if latest_attempt.outcome.value != issue_status.value:
+            raise ValueError(
+                "Portable workflow retry status does not match its latest attempt."
+            )
+        try:
+            latest_step = workflow.step(latest_attempt.step_instance_id)
+        except KeyError as error:
+            raise ValueError(
+                "Portable workflow retry references an unknown Step Instance ID."
+            ) from error
+        current_step_id = latest_attempt.step_instance_id
+        persisted_rework_attempt_id = optional_state_string(
+            issue_state.get("pending_rework_attempt_id")
+        )
+        linked_rework_attempt_id = latest_attempt.rework_attempt_id
+        if (
+            persisted_rework_attempt_id is not None
+            and linked_rework_attempt_id is not None
+            and persisted_rework_attempt_id != linked_rework_attempt_id
+        ):
+            raise ValueError("Portable workflow retry has conflicting rework triggers.")
+        pending_rework_attempt_id = (
+            linked_rework_attempt_id or persisted_rework_attempt_id
+        )
+        default_pass_number = latest_attempt.pass_number
+        if issue_status is IssueStatus.CHANGES_REQUESTED:
+            current_step_id = latest_step.transitions.get(
+                StepOutcome.CHANGES_REQUESTED
+            )
+            if current_step_id is None:
+                raise ValueError(
+                    "Changes-requested retry has no configured destination."
+                )
+            pending_rework_attempt_id = latest_attempt.attempt_id
+            default_pass_number += 1
+        return PortableWorkflowCheckpoint(
+            issue_id=issue.number,
+            issue_status=IssueStatus.IN_PROGRESS,
+            current_step_instance_id=current_step_id,
+            pass_number=(
+                default_pass_number
+                if pass_number is None
+                else pass_number
+            ),
+            runtime_states=self.step_runtime_states(issue.number),
+            attempts=attempts,
+            pending_rework_attempt_id=pending_rework_attempt_id,
+            cycle_path_step_instance_ids=(current_step_id,),
+        )
+
+    def completed_portable_workflow(
+        self,
+        issue: Issue,
+        workflow: WorkflowDefinition,
+    ) -> PortableWorkflowRunResult | None:
+        if (
+            parse_issue_status(self.issue_state(issue).get("status"))
+            is not IssueStatus.COMPLETED
+        ):
+            return None
+        attempts = self.step_attempt_records(issue.number)
+        if not attempts or attempts[-1].outcome is not StepOutcome.SUCCEEDED:
+            raise ValueError(
+                "Completed portable workflow has no successful terminal attempt."
+            )
+        terminal_step = workflow.step(attempts[-1].step_instance_id)
+        if terminal_step.transitions.get(StepOutcome.SUCCEEDED) is not None:
+            raise ValueError(
+                "Completed portable workflow did not stop at a terminal step."
+            )
+        return PortableWorkflowRunResult(
+            issue_status=IssueStatus.COMPLETED,
+            current_step_instance_id=None,
+            runtime_states=self.step_runtime_states(issue.number),
+            attempts=attempts,
+            role_result=attempts[-1].result,
+        )
+
+    def record_portable_execution_result(
+        self,
+        issue: Issue,
+        execution: PortableWorkflowRunResult,
+        *,
+        attempt_label: str | None = None,
+        retry_round: int | None = None,
+    ) -> None:
+        for runtime in execution.runtime_states:
+            self._store_step_runtime_state(runtime)
+        for attempt in execution.attempts:
+            self._store_step_attempt_record(attempt)
+        issue_state = self.issue_state(issue)
+        issue_state.update(
+            {
+                "title": issue.title,
+                "path": str(issue.path),
+                "status": execution.issue_status.value,
+            }
+        )
+        if execution.current_step_instance_id is None:
+            issue_state.pop("current_step_instance_id", None)
+            issue_state.pop("cycle_path_step_instance_ids", None)
+        else:
+            issue_state["current_step_instance_id"] = str(
+                execution.current_step_instance_id
+            )
+        if execution.issue_status in {
+            IssueStatus.CHANGES_REQUESTED,
+            IssueStatus.BLOCKED,
+            IssueStatus.FAILED,
+        }:
+            latest_attempt = execution.attempts[-1]
+            issue_state.update(
+                {
+                    "blocked_at": now(),
+                    "blocked_gate": str(latest_attempt.step_instance_id),
+                    "blocked_summary": execution.role_result.summary,
+                    "findings": list(execution.role_result.findings),
+                    "fix_list": list(
+                        execution.role_result.fix_list
+                        or execution.role_result.findings
+                    ),
+                    "residual_risks": list(execution.role_result.residual_risks),
+                }
+            )
+        elif execution.issue_status is IssueStatus.COMPLETED:
+            successful_attempts = _latest_successful_portable_attempts(execution)
+            successful_results = [attempt.result for attempt in successful_attempts]
+            issue_state["completed_at"] = now()
+            issue_state["changed_files"] = _unique_strings(
+                result.changed_files for result in successful_results
+            )
+            issue_state["verification_commands"] = sorted(
+                _unique_strings(
+                    result.verification_commands for result in successful_results
+                )
+            )
+            issue_state["step_summaries"] = [
+                {
+                    "step_instance_id": str(attempt.step_instance_id),
+                    "summary": attempt.result.summary,
+                }
+                for attempt in successful_attempts
+            ]
+            if attempt_label:
+                issue_state["completed_attempt"] = attempt_label
+            if retry_round is not None:
+                issue_state["completed_retry_round"] = retry_round
+            for field_name in (
+                "blocked_at",
+                "blocked_gate",
+                "blocked_summary",
+                "findings",
+                "fix_list",
+                "residual_risks",
+            ):
+                issue_state.pop(field_name, None)
+            event = {"issue": issue.number}
+            if attempt_label:
+                event["attempt"] = attempt_label
+            if retry_round is not None:
+                event["retry_round"] = retry_round
+            self.add_event("issue-completed", event)
+        self.flush()
+
+    def _store_step_runtime_state(self, runtime: StepRuntimeState) -> None:
+        issue_key = runtime.issue_id or "__workflow__"
+        step_states = self.state.setdefault("step_runtime_states", {})
+        issue_states = step_states.setdefault(str(runtime.step_instance_id), {})
+        existing_runtime = issue_states.get(issue_key)
+        if isinstance(existing_runtime, dict):
+            self._preserve_interrupted_runtime(existing_runtime, runtime)
+        issue_states[issue_key] = {
+            "step_instance_id": str(runtime.step_instance_id),
+            "issue_id": runtime.issue_id,
+            "status": runtime.status.value,
+            "pass": runtime.pass_number,
+            "prompt_session_id": runtime.prompt_session_id,
+            "attempt_id": runtime.attempt_id,
+            "started_at": runtime.started_at,
+            "outcome": runtime.outcome.value if runtime.outcome is not None else None,
+            "backend_thread_id": runtime.backend_thread_id,
+            "backend_turn_id": runtime.backend_turn_id,
+            "checkpoint": runtime.checkpoint,
+            "component_state": dict(runtime.component_state),
+            "attempt_context": (
+                runtime.attempt_context.to_dict()
+                if runtime.attempt_context is not None
+                else None
+            ),
+        }
+
+    def _preserve_interrupted_runtime(
+        self,
+        stored_runtime: dict[str, Any],
+        replacement: StepRuntimeState,
+    ) -> None:
+        previous = step_runtime_state_from_state(stored_runtime)
+        if (
+            previous.status is not StepRuntimeStatus.RUNNING
+            or previous.attempt_id is None
+            or previous.started_at is None
+            or previous.prompt_session_id is None
+            or replacement.attempt_id is None
+            or previous.attempt_id == replacement.attempt_id
+        ):
+            return
+        self._store_interrupted_step_attempt_record(
+            InterruptedStepAttemptRecord(
+                attempt_id=previous.attempt_id,
+                step_instance_id=previous.step_instance_id,
+                issue_id=previous.issue_id,
+                pass_number=previous.pass_number,
+                prompt_session_id=previous.prompt_session_id,
+                started_at=previous.started_at,
+                interrupted_at=now(),
+                backend_thread_id=previous.backend_thread_id,
+                backend_turn_id=previous.backend_turn_id,
+                checkpoint=previous.checkpoint,
+                attempt_context=previous.attempt_context,
+            )
+        )
+
+    def _store_interrupted_step_attempt_record(
+        self,
+        attempt: InterruptedStepAttemptRecord,
+    ) -> None:
+        records = self.state.setdefault("interrupted_step_attempt_records", [])
+        if not isinstance(records, list):
+            raise ValueError("Interrupted portable step attempt history must be a list.")
+        if any(
+            isinstance(stored, dict)
+            and stored.get("attempt_id") == attempt.attempt_id
+            for stored in records
+        ):
+            return
+        records.append(
+            {
+                "attempt_id": attempt.attempt_id,
+                "step_instance_id": str(attempt.step_instance_id),
+                "issue_id": attempt.issue_id,
+                "pass": attempt.pass_number,
+                "prompt_session_id": attempt.prompt_session_id,
+                "started_at": attempt.started_at,
+                "interrupted_at": attempt.interrupted_at,
+                "backend_thread_id": attempt.backend_thread_id,
+                "backend_turn_id": attempt.backend_turn_id,
+                "checkpoint": attempt.checkpoint,
+                "attempt_context": (
+                    attempt.attempt_context.to_dict()
+                    if attempt.attempt_context is not None
+                    else None
+                ),
+            }
+        )
+
+    def _store_step_attempt_record(self, attempt: StepAttemptRecord) -> None:
+        issue_key = attempt.issue_id or "__workflow__"
+        step_attempts = self.state.setdefault("step_attempt_records", {})
+        attempt_order = self.state.get("step_attempt_order")
+        if attempt_order is None:
+            attempt_order = [
+                stored.get("attempt_id")
+                for issue_records in step_attempts.values()
+                if isinstance(issue_records, dict)
+                for raw_attempts in issue_records.values()
+                if isinstance(raw_attempts, list)
+                for stored in raw_attempts
+                if isinstance(stored, dict)
+                and isinstance(stored.get("attempt_id"), str)
+            ]
+            self.state["step_attempt_order"] = attempt_order
+        if not isinstance(attempt_order, list):
+            raise ValueError("Portable step attempt order must be a list.")
+        issue_attempts = step_attempts.setdefault(
+            str(attempt.step_instance_id), {}
+        ).setdefault(issue_key, [])
+        if any(
+            isinstance(stored, dict)
+            and stored.get("attempt_id") == attempt.attempt_id
+            for stored in issue_attempts
+        ):
+            return
+        if attempt.attempt_id in attempt_order:
+            raise ValueError("Portable Step Attempt ID must be globally unique.")
+        issue_attempts.append(step_attempt_record_to_dict(attempt))
+        attempt_order.append(attempt.attempt_id)
+
+    def step_runtime_states(
+        self,
+        issue_id: str | None = None,
+    ) -> tuple[StepRuntimeState, ...]:
+        stored_runtimes = self.state.get("step_runtime_states", {})
+        if not isinstance(stored_runtimes, dict):
+            raise ValueError("Portable step runtime states must be an object.")
+        runtimes: list[StepRuntimeState] = []
+        for issue_states in stored_runtimes.values():
+            if not isinstance(issue_states, dict):
+                raise ValueError("Portable step runtime Issue states must be an object.")
+            for raw_runtime in issue_states.values():
+                runtime = step_runtime_state_from_state(raw_runtime)
+                if issue_id is None or runtime.issue_id == issue_id:
+                    runtimes.append(runtime)
+        return tuple(runtimes)
+
+    def step_attempt_records(
+        self,
+        issue_id: str | None = None,
+    ) -> tuple[StepAttemptRecord, ...]:
+        stored_attempts = self.state.get("step_attempt_records", {})
+        if not isinstance(stored_attempts, dict):
+            raise ValueError("Portable step attempt records must be an object.")
+        attempts_by_id: dict[str, StepAttemptRecord] = {}
+        fallback_order: list[str] = []
+        for issue_records in stored_attempts.values():
+            if not isinstance(issue_records, dict):
+                raise ValueError("Portable step attempt issue records must be an object.")
+            for raw_attempts in issue_records.values():
+                if not isinstance(raw_attempts, list):
+                    raise ValueError("Portable step attempt history must be a list.")
+                for raw_attempt in raw_attempts:
+                    attempt = step_attempt_record_from_state(raw_attempt)
+                    attempts_by_id[attempt.attempt_id] = attempt
+                    fallback_order.append(attempt.attempt_id)
+        raw_order = self.state.get("step_attempt_order", fallback_order)
+        if not isinstance(raw_order, list) or not all(
+            isinstance(attempt_id, str) for attempt_id in raw_order
+        ):
+            raise ValueError("Portable step attempt order must be a list of IDs.")
+        if len(set(raw_order)) != len(raw_order):
+            raise ValueError("Portable step attempt order contains duplicate IDs.")
+        unknown_order_ids = set(raw_order) - set(attempts_by_id)
+        if unknown_order_ids:
+            raise ValueError("Portable step attempt order references unknown IDs.")
+        ordered_attempts = [
+            attempts_by_id[attempt_id]
+            for attempt_id in raw_order
+            if attempt_id in attempts_by_id
+        ]
+        ordered_ids = set(raw_order)
+        ordered_attempts.extend(
+            attempt
+            for attempt_id, attempt in attempts_by_id.items()
+            if attempt_id not in ordered_ids
+        )
+        return tuple(
+            attempt
+            for attempt in ordered_attempts
+            if issue_id is None or attempt.issue_id == issue_id
+        )
+
+    def interrupted_step_attempt_records(
+        self,
+        issue_id: str | None = None,
+    ) -> tuple[InterruptedStepAttemptRecord, ...]:
+        stored_attempts = self.state.get("interrupted_step_attempt_records", [])
+        if not isinstance(stored_attempts, list):
+            raise ValueError("Interrupted portable step attempt history must be a list.")
+        attempts = tuple(
+            interrupted_step_attempt_record_from_state(raw_attempt)
+            for raw_attempt in stored_attempts
+        )
+        return tuple(
+            attempt
+            for attempt in attempts
+            if issue_id is None or attempt.issue_id == issue_id
+        )
 
     def record_run_start(self, repo_root: Path, prd_path: Path, issues: list[str], dry_run: bool) -> None:
         self.prd_state_path = prd_path.parent / "devloop.status.json"
@@ -214,7 +765,7 @@ class LoopStateWriter:
 
     def resume_issue(self, issue: Issue) -> IssueResumeCursor:
         issue_state = self.issue_state(issue)
-        if not str(issue_state.get("status", "")).startswith("In Progress"):
+        if parse_issue_status(issue_state.get("status")) is not IssueStatus.IN_PROGRESS:
             return IssueResumeCursor()
 
         passes = issue_state.get("passes")
@@ -321,22 +872,35 @@ def write_text_creating_parent(path: Path, text: str) -> None:
 
 
 def load_existing_state(state_path: Path, issues_index: Path) -> dict[str, Any]:
-    if state_path.is_file():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            state = None
-        if isinstance(state, dict):
-            state.setdefault("events", [])
-            state.setdefault("issues", {})
-            return state
+    try:
+        state_text = state_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {
+            "started_at": now(),
+            "issues_index": str(issues_index),
+            "events": [],
+            "issues": {},
+        }
+    except OSError as error:
+        raise ValueError(
+            f"Cannot load existing loop state {state_path}: "
+            f"file could not be read: {error}"
+        ) from error
 
-    return {
-        "started_at": now(),
-        "issues_index": str(issues_index),
-        "events": [],
-        "issues": {},
-    }
+    try:
+        state = json.loads(state_text)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Cannot load existing loop state {state_path}: content is not valid JSON."
+        ) from error
+
+    if not isinstance(state, dict):
+        raise ValueError(
+            f"Cannot load existing loop state {state_path}: content must be a JSON object."
+        )
+    state.setdefault("events", [])
+    state.setdefault("issues", {})
+    return state
 
 
 def result_summary(result: RoleResult) -> dict[str, Any]:
@@ -361,6 +925,171 @@ def role_result_from_state(data: dict[str, Any]) -> RoleResult:
         fix_list=state_string_list(data.get("fix_list")),
         residual_risks=state_string_list(data.get("residual_risks")),
     )
+
+
+def step_runtime_state_from_state(data: Any) -> StepRuntimeState:
+    if not isinstance(data, dict):
+        raise ValueError("Portable step runtime state must be an object.")
+    pass_number = data.get("pass")
+    if not isinstance(pass_number, int) or pass_number < 1:
+        raise ValueError("Portable step runtime pass must be a positive integer.")
+    issue_id = data.get("issue_id")
+    if issue_id is not None and not isinstance(issue_id, str):
+        raise ValueError("Portable step runtime Issue ID must be a string or null.")
+    raw_outcome = data.get("outcome")
+    component_state = data.get("component_state", {})
+    if not isinstance(component_state, dict):
+        raise ValueError("Portable step component state must be an object.")
+    return StepRuntimeState(
+        step_instance_id=StepInstanceId(data.get("step_instance_id")),
+        issue_id=issue_id,
+        status=StepRuntimeStatus(data.get("status")),
+        pass_number=pass_number,
+        prompt_session_id=optional_state_string(data.get("prompt_session_id")),
+        attempt_id=optional_state_string(data.get("attempt_id")),
+        started_at=optional_state_string(data.get("started_at")),
+        outcome=None if raw_outcome is None else StepOutcome(raw_outcome),
+        backend_thread_id=optional_state_string(data.get("backend_thread_id")),
+        backend_turn_id=optional_state_string(data.get("backend_turn_id")),
+        checkpoint=optional_state_string(data.get("checkpoint")),
+        component_state=component_state,
+        attempt_context=_step_attempt_context_from_state(
+            data.get("attempt_context"),
+            record_name="Portable step runtime",
+        ),
+    )
+
+
+def interrupted_step_attempt_record_from_state(
+    data: Any,
+) -> InterruptedStepAttemptRecord:
+    if not isinstance(data, dict):
+        raise ValueError("Interrupted portable step attempt must be an object.")
+    pass_number = data.get("pass")
+    if not isinstance(pass_number, int) or pass_number < 1:
+        raise ValueError(
+            "Interrupted portable step attempt pass must be a positive integer."
+        )
+    issue_id = data.get("issue_id")
+    if issue_id is not None and not isinstance(issue_id, str):
+        raise ValueError(
+            "Interrupted portable step attempt Issue ID must be a string or null."
+        )
+    return InterruptedStepAttemptRecord(
+        attempt_id=required_state_string(data, "attempt_id"),
+        step_instance_id=StepInstanceId(data.get("step_instance_id")),
+        issue_id=issue_id,
+        pass_number=pass_number,
+        prompt_session_id=required_state_string(data, "prompt_session_id"),
+        started_at=required_state_string(data, "started_at"),
+        interrupted_at=required_state_string(data, "interrupted_at"),
+        backend_thread_id=optional_state_string(data.get("backend_thread_id")),
+        backend_turn_id=optional_state_string(data.get("backend_turn_id")),
+        checkpoint=optional_state_string(data.get("checkpoint")),
+        attempt_context=_step_attempt_context_from_state(
+            data.get("attempt_context"),
+            record_name="Interrupted portable step attempt",
+        ),
+    )
+
+
+def step_attempt_record_from_state(data: Any) -> StepAttemptRecord:
+    if not isinstance(data, dict):
+        raise ValueError("Portable step attempt record must be an object.")
+    raw_outputs = data.get("outputs", {})
+    if not isinstance(raw_outputs, dict):
+        raise ValueError("Portable step attempt outputs must be an object.")
+    outputs: dict[str, TypedStepOutput] = {}
+    for port_name, raw_output in raw_outputs.items():
+        if not isinstance(port_name, str) or not isinstance(raw_output, dict):
+            raise ValueError("Portable step attempt output is malformed.")
+        raw_result = raw_output.get("result")
+        if not isinstance(raw_result, dict):
+            raise ValueError("Portable step attempt output has no structured result.")
+        outputs[port_name] = TypedStepOutput(
+            contract_id=DataContractId(raw_output.get("contract_id")),
+            value=role_result_from_state(raw_result),
+        )
+
+    raw_result = data.get("result")
+    if not isinstance(raw_result, dict):
+        raw_result = next(
+            (
+                raw_output.get("result")
+                for raw_output in raw_outputs.values()
+                if isinstance(raw_output, dict)
+                and isinstance(raw_output.get("result"), dict)
+            ),
+            None,
+        )
+    if not isinstance(raw_result, dict):
+        raise ValueError("Portable step attempt has no structured result.")
+
+    pass_number = data.get("pass")
+    if not isinstance(pass_number, int) or pass_number < 1:
+        raise ValueError("Portable step attempt pass must be a positive integer.")
+    issue_id = data.get("issue_id")
+    if issue_id is not None and not isinstance(issue_id, str):
+        raise ValueError("Portable step attempt Issue ID must be a string or null.")
+    attempt_context = _step_attempt_context_from_state(
+        data.get("attempt_context"),
+        record_name="Portable step attempt",
+    )
+    return StepAttemptRecord(
+        attempt_id=required_state_string(data, "attempt_id"),
+        step_instance_id=StepInstanceId(data.get("step_instance_id")),
+        issue_id=issue_id,
+        pass_number=pass_number,
+        prompt_session_id=required_state_string(data, "prompt_session_id"),
+        outcome=StepOutcome(data.get("outcome")),
+        result=role_result_from_state(raw_result),
+        outputs=outputs,
+        started_at=required_state_string(data, "started_at"),
+        finished_at=required_state_string(data, "finished_at"),
+        elapsed_seconds=float(data.get("elapsed_seconds", 0.0)),
+        backend_thread_id=optional_state_string(data.get("backend_thread_id")),
+        backend_turn_id=optional_state_string(data.get("backend_turn_id")),
+        blocked_reason=optional_state_string(data.get("blocked_reason")),
+        blocker_details=tuple(state_string_list(data.get("blocker_details"))),
+        failure_reason=optional_state_string(data.get("failure_reason")),
+        rework_attempt_id=optional_state_string(data.get("rework_attempt_id")),
+        attempt_context=attempt_context,
+    )
+
+
+def _step_attempt_context_from_state(
+    value: Any,
+    *,
+    record_name: str,
+) -> StepAttemptContext | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{record_name} context must be an object or null.")
+    raw_guidance = value.get("guidance")
+    raw_precedence = value.get("guidance_precedence")
+    if raw_guidance is not None and not isinstance(raw_guidance, str):
+        raise ValueError(f"{record_name} guidance must be text or null.")
+    if not isinstance(raw_precedence, str) or not raw_precedence:
+        raise ValueError(f"{record_name} guidance precedence is required.")
+    return StepAttemptContext(
+        capability_profile=StepCapabilityProfile.from_dict(
+            value.get("capability_profile")
+        ),
+        guidance=raw_guidance,
+        guidance_precedence=raw_precedence,
+    )
+
+
+def required_state_string(data: dict[str, Any], field_name: str) -> str:
+    value = data.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Portable step attempt {field_name!r} must be a string.")
+    return value
+
+
+def optional_state_string(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def state_string_list(value: Any) -> list[str]:
@@ -482,10 +1211,6 @@ def mark_issue_completed(
     reviewer: RoleResult,
     qa: RoleResult,
 ) -> None:
-    text = issue_path.read_text(encoding="utf-8")
-    text = re.sub(r"(?im)^Completed:\s*\[\s*\]", "Completed: [x]", text, count=1)
-    text = mark_acceptance_criteria(text)
-
     notes = [
         "",
         "## Implementation Notes",
@@ -496,7 +1221,12 @@ def mark_issue_completed(
         *[f"- `{path}`" for path in coder.changed_files],
         "",
         "### Verification",
-        *[f"- `{command}`" for command in sorted(set(coder.verification_commands + qa.verification_commands))],
+        *[
+            f"- `{command}`"
+            for command in sorted(
+                set(coder.verification_commands + qa.verification_commands)
+            )
+        ],
         "",
         "### Review",
         reviewer.summary or "- PASS",
@@ -505,11 +1235,100 @@ def mark_issue_completed(
         qa.summary or "- PASS",
         "",
     ]
+    _write_issue_completion(issue_path, notes)
+
+
+def mark_portable_issue_completed(
+    issue_path: Path,
+    workflow: WorkflowDefinition,
+    execution: PortableWorkflowRunResult,
+) -> None:
+    step_results = tuple(
+        (
+            workflow.step(attempt.step_instance_id).display_name,
+            attempt.result,
+        )
+        for attempt in _latest_successful_portable_attempts(execution)
+    )
+    _mark_issue_completed_from_steps(issue_path, step_results)
+
+
+def _mark_issue_completed_from_steps(
+    issue_path: Path,
+    step_results: tuple[tuple[str, RoleResult], ...],
+) -> None:
+    results = [result for _, result in step_results]
+    notes = [
+        "",
+        "## Implementation Notes",
+        "",
+        f"Completed: {now()}",
+        "",
+        "### Changed Files",
+        *[
+            f"- `{path}`"
+            for path in _unique_strings(result.changed_files for result in results)
+        ],
+        "",
+        "### Verification",
+        *[
+            f"- `{command}`"
+            for command in sorted(
+                _unique_strings(
+                    result.verification_commands for result in results
+                )
+            )
+        ],
+        "",
+        "### Workflow Step Results",
+        "",
+    ]
+    for display_name, result in step_results:
+        notes.extend(
+            (
+                f"#### {display_name}",
+                "",
+                result.summary or "PASS",
+                "",
+            )
+        )
+    _write_issue_completion(issue_path, notes)
+
+
+def _write_issue_completion(issue_path: Path, notes: list[str]) -> None:
+    text = issue_path.read_text(encoding="utf-8")
+    text = re.sub(r"(?im)^Completed:\s*\[\s*\]", "Completed: [x]", text, count=1)
+    text = mark_acceptance_criteria(text)
 
     if "## Implementation Notes" not in text:
         text = text.rstrip() + "\n" + "\n".join(notes)
 
     write_text_creating_parent(issue_path, text)
+
+
+def _latest_successful_portable_attempts(
+    execution: PortableWorkflowRunResult,
+) -> tuple[StepAttemptRecord, ...]:
+    step_order: list[StepInstanceId] = []
+    latest_by_step: dict[StepInstanceId, StepAttemptRecord] = {}
+    for attempt in execution.attempts:
+        if attempt.outcome is not StepOutcome.SUCCEEDED:
+            continue
+        if attempt.step_instance_id not in latest_by_step:
+            step_order.append(attempt.step_instance_id)
+        latest_by_step[attempt.step_instance_id] = attempt
+    return tuple(latest_by_step[step_id] for step_id in step_order)
+
+
+def _unique_strings(value_groups: Iterable[Iterable[str]]) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for value_group in value_groups:
+        for value in value_group:
+            if value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
 
 
 def mark_acceptance_criteria(text: str) -> str:

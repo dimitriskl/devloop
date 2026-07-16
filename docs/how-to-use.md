@@ -117,18 +117,51 @@ development handoff screen.
 
 ## 4. Stage Pipeline
 
-Every complete run follows this pipeline:
+The built-in workflow currently follows this Primary Path:
 
 ```text
-analysis => development => review => qa
+analysis => development => Security Review => Final Review => qa
 ```
 
-The active stage prints as a banner and in the prompt. `NO_COLOR=1` disables
-color. Consoles that cannot encode the Unicode markers fall back to ASCII
-markers.
+This is a configurable workflow, not a fixed phase list. The Workflow Editor
+can add, duplicate, remove, rename, or reorder instances, including multiple
+instances of the same Step Type. Each instance keeps its own identity,
+execution settings, capabilities, guidance, runtime state, and attempt history.
 
-Press Enter on the development summary to start with the shown defaults, or
-type `/options` to adjust the run before starting.
+Press Enter on the development summary to start with the shown defaults. Use
+`/run-options` to adjust this launch before starting, or `/options` to edit the
+User Workflow Default for Future Runs.
+
+Inside the Workflow Editor, select a Codex-backed step and use `model`,
+`reasoning`, or `fast` to choose its execution settings. Choices are filtered
+by the live Codex Model Catalog. `retry-catalog` retries temporary discovery
+failures; any stale cache is labeled display-only and cannot authorize a run.
+Run startup refreshes the catalog and stops with the exact step and unsupported
+setting instead of silently falling back. Fast Off is passed explicitly, so a
+global Codex `/fast` setting cannot change the saved step choice.
+Use `budget` to edit the selected step's separate timeout and checkpoint
+inactivity deadline. Budget changes never alter model, reasoning, or Fast.
+When preflight fails interactively, choose `/options` to repair a future-run
+default or `retry-catalog` to retry live discovery before execution.
+
+Use `route` to edit any supported outcome. A route can target an existing
+step, create a branch step, insert a step before the current destination, or
+terminate explicitly. The text graph preview updates after each draft change.
+Use `advanced` to inspect typed Input Ports and current Port Bindings, then
+`bind` to select a compatible upstream output or clear a binding. Dev Loop
+auto-binds only when exactly one executable compatible producer exists.
+`apply` remains blocked while a start, successful terminal path, route, scope,
+or required binding is invalid. `delete` previews every affected transition
+and binding and never cascades into downstream deletion; repair any unresolved
+references explicitly before applying.
+
+The shared dashboard lists every configured instance separately. Workflow and
+current-Issue rows are separated, completed timers freeze, rework time
+accumulates on the same row, and the active line includes model, reasoning,
+Fast, elapsed time, event freshness, and safe activity. Interactive terminals
+reuse one bounded region; redirected output is append-only. `NO_COLOR=1`
+disables color, and terminals that cannot encode Unicode use ASCII markers
+without losing status labels.
 
 ## 5. Planning Chat Commands
 
@@ -138,7 +171,7 @@ Inside `devloop-plan`, these commands are available:
 | --- | --- |
 | Alt+V | Attach a clipboard screenshot in a real interactive terminal. |
 | `/paste` | Attach a clipboard screenshot when Alt+V is unavailable. |
-| `/options` | Change planning skills, role agents/skills, and development options. |
+| `/options` | Open the Workflow Editor for future-run defaults and capability choices. |
 | `/resume` | List unfinished PRDs and continue the selected development handoff. |
 | `/status` | Show the stage banner, artifacts, and current selection. |
 | `/done` | Detect PRD/issues now or enter artifact paths manually. |
@@ -261,6 +294,19 @@ For PRD-folder runs, it also writes:
 - `devloop.status.md`
 - `devloop.status.json`
 
+Each new run stores an immutable resolved `devloop.portable-workflow/v2`
+snapshot and canonical hash in the JSON state. Editing Future Runs never
+changes that snapshot. The same state keeps generic Step Runtime States and an
+ordered Step Attempt Record for every execution, so duplicate reviews,
+changes-requested rework, interruption, and resume remain inspectable. Portable
+workflow schema v1 is intentionally rejected; repair or recreate an old local
+default in `/options` rather than expecting migration or compatibility mode.
+When preflight finds a schema-v1 or malformed schema-v2 User Workflow Default,
+`/options` opens a fail-closed recovery mode instead of loading the rejected
+content as a draft. Use `reset-workflow` and then `apply` to atomically replace
+it with the built-in v2 default. `cancel` leaves the stored configuration
+unchanged.
+
 Completed issue files are updated in place with `Completed: [x]`, checked
 acceptance criteria, and implementation notes. Completed issues are skipped on
 future runs. `--all` continues only blocked or unfinished issues.
@@ -271,11 +317,16 @@ Bundled skills live under `skills/codex/`. Agent reference files live under
 `agents/codex/`. The runner can read these bundled copies directly, so global
 installation is optional.
 
-Use `/options` during planning to choose planning skills, override coder,
-reviewer, or QA role skills, or install new skills and agents from GitHub. GitHub
-installs accept repository URLs with an optional `#subpath`, then copy approved
-skill folders and agent Markdown files into the bundle without overwriting
-existing names.
+Use `/options` during planning to open the Workflow Editor, then enter
+`capabilities` to search and toggle Skills and Agent References for the selected
+Step Instance, reset its component defaults, or install new capabilities from
+GitHub. Duplicate component types can therefore use different profiles.
+Required capabilities are locked with the component-contract reason. Use
+`guidance` to add bounded multiline Step Guidance; secrets are redacted before
+Apply and the displayed precedence keeps contracts, permissions, execution
+policy, safety, and output requirements authoritative. GitHub installs accept
+repository URLs with an optional `#subpath`, then copy approved skill folders
+and agent Markdown files into the bundle without overwriting existing names.
 
 The default implementation preset is `presets/generic-minimal.json`, which runs
 coder, senior review, and QA roles with the bundled guidance.

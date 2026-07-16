@@ -131,9 +131,18 @@ lists only PRD/issue packs with unfinished issues and shows completion counts,
 the active issue when known, and last activity. The same catalog is available
 through `/resume` during planning. Chat with Codex to sharpen a new change; when
 the PRD and issue pack are written, press Enter on the summary screen to start
-development. Type `/options` at any prompt to pick agents/skills or install new
-ones from GitHub; type `/help` for all commands. The self-improvement wiki is
-always used: planning reads it, and every run updates it.
+development. Type `/options` at any prompt to open the Workflow Editor for
+future-run defaults, including independent `model`, `reasoning`, and `fast`
+choices for each Codex-backed step and a separate `budget` timeout/checkpoint
+for every step. Its `capabilities` command still lets you
+search and toggle agents and skills for the selected Step Instance, reset that
+profile to its component defaults, or install new ones from GitHub. Required
+capabilities stay enabled and show the component-contract reason. Use `guidance`
+for bounded multiline instructions specific to the selected step; the editor
+shows that contracts, execution policy, permissions, safety, and output rules
+take precedence. Type `/help` for all commands. The
+self-improvement wiki is always used: planning reads it, and every run updates
+it.
 
 `devloop-plan` asks for the target checkout. On the first run there is no target
 default; after a valid selection it saves that checkout and shows it as the
@@ -156,9 +165,11 @@ session follows this sequence:
 
 Press Enter on that summary screen to start development immediately with
 sensible defaults (all pending issues, a dedicated worktree, the
-self-improvement wiki always on), or type `/options` to change the start
-issue, worktree parent path, worktree folder name, or branch first. When a run
-finishes successfully, the runner asks whether to merge the implementation
+self-improvement wiki always on). Type `/run-options` to change the start issue,
+worktree parent path, worktree folder name, or branch first. Type `/options` to
+edit the User Workflow Default for Future Runs and, when resuming an existing
+implementation worktree, inspect its immutable Current Run snapshot. When a
+run finishes successfully, the runner asks whether to merge the implementation
 branch or worktree into another branch.
 
 The final handoff command is equivalent to:
@@ -174,13 +185,14 @@ To continue an existing PRD without reopening planning:
 ```
 
 The runner finds `issues\README.md`, prints the PRD status, and shows the
-DEVELOPMENT summary screen (Enter to start, `/options` to adjust). Dev Loop
-writes `devloop.status.json` and `devloop.status.md` in the PRD folder, while
-keeping the older `issues\README.loop.state.json` and `issues\README.loop.md`
-files for compatibility. Reruns with `all` skip completed issue files. If a run
-was interrupted, Dev Loop resumes the unfinished issue at its next coder,
-reviewer, or QA gate and preserves the current pass and review/QA fix list. When
-an existing implementation worktree is reused, its issue mapping can narrow the
+DEVELOPMENT summary screen (Enter to start, `/run-options` to adjust this
+launch, or `/options` to open the Workflow Editor). Dev Loop writes
+`devloop.status.json` and `devloop.status.md` in the PRD folder, while keeping
+the older `issues\README.loop.state.json` and `issues\README.loop.md` files for
+compatibility. Reruns with `all` skip completed issue files. If a run was
+interrupted, Dev Loop resumes the unfinished issue at its next coder, reviewer,
+or QA gate and preserves the current pass and review/QA fix list. When an
+existing implementation worktree is reused, its issue mapping can narrow the
 source selection but cannot reintroduce issues already completed in the source
 PRD package.
 
@@ -196,9 +208,9 @@ The main implementation loop uses `presets/generic-minimal.json`:
 - reviewer: senior code review guidance
 - QA: focused verification guidance
 
-The interactive planning loop uses these skills by default; type `/options` in
-the planning chat to pick a different set, override per-role agents/skills, or
-install more from GitHub:
+The interactive planning loop uses these skills by default. Type `/options` in
+the planning chat, then `capabilities` in the Workflow Editor, to pick a
+different set, override per-role agents/skills, or install more from GitHub:
 
 - `grill-with-docs` and `domain-modeling` for design clarification, glossary
   terms, and ADR decisions
@@ -230,6 +242,7 @@ All detailed documentation is under `docs/`:
 - `docs/install-macos.md`
 - `docs/usage.md`
 - `docs/interactive-runner.md`
+- `docs/configurable-workflow.md`
 - `docs/worktrees.md`
 - `docs/skills-and-agents.md`
 - `docs/mcp-setup.md`

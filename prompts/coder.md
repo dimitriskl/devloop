@@ -11,6 +11,10 @@ You are the coding worker for a local PRD issue loop.
 - Issue: `{{ISSUE_NUMBER}} - {{ISSUE_TITLE}}`
 - Issue file: `{{ISSUE_PATH}}`
 - Pass: `{{PASS_NUMBER}}`
+- Workflow step: `{{STEP_DISPLAY_NAME}}`
+- Step Instance ID: `{{STEP_INSTANCE_ID}}`
+- Step Attempt ID: `{{STEP_ATTEMPT_ID}}`
+- Prompt session: `{{PROMPT_SESSION_ID}}`
 
 ## Overall Goal
 
@@ -41,9 +45,24 @@ Read these Dev Loop self-improvement wiki pages from the bundle if they exist:
 If a copied Codex agent reference conflicts with repository rules, follow the repository
 rules, copied Codex skills, and Dev Loop self-improvement wiki first.
 
+## Step Guidance
+
+Precedence: {{STEP_GUIDANCE_PRECEDENCE}}
+
+{{STEP_GUIDANCE}}
+
 ## Fix List From Previous Gate
 
 {{FIX_LIST}}
+
+## Triggering Rework Step Attempt Record
+
+When this is not `null`, it is the allowlisted serialization of the exact
+changes-requested Step Attempt Record that triggered this Development rework.
+
+```json
+{{REWORK_ATTEMPT_RECORD}}
+```
 
 ## Work Rules
 
@@ -81,4 +100,3 @@ Return only JSON matching this shape:
 Use `BLOCKED` when you cannot continue because of missing input, environment, or
 an unresolved external dependency. Use `FAIL` only when you intentionally leave
 known implementation issues for a later coder pass.
-
