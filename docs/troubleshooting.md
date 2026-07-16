@@ -113,6 +113,25 @@ codex exec -c 'approval_policy="never"' ...
 
 If stderr mentions `unexpected argument '-a'`, update devloop and rerun.
 
+## An issue remains `WAITING_ON_DEPENDENCY`
+
+Check its `## Blocked by` section and the task board in `README.loop.md` or
+`devloop.status.md`. The listed prerequisite must finish its complete workflow;
+a Development pass alone does not unlock descendants. Dev Loop will continue
+independent ready branches and later spend up to five fair Blocker Resolution
+passes on unresolved ready blockers. If the run stops after exhaustion, the
+final unresolved dependency cut lists the root blockers and affected waiting
+issues.
+
+## The runner prints `RUN PAUSED`
+
+This is a run-wide Codex availability problem, not an issue failure. Restore
+usage capacity, authentication, or service availability, then rerun the exact
+same `devloop` command. Do not delete the loop-state JSON: it preserves the
+active issue, workflow step, pass, scheduling phase, round, and remaining
+budgets. A repeated global failure remains paused and does not consume another
+issue attempt.
+
 ## Codex returns invalid JSON
 
 The runner marks the role `BLOCKED`. Inspect `.loop.logs/*last-message*`,

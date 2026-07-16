@@ -59,3 +59,15 @@ the interactive dashboard, append-only output, task board, and resume path.
 - User stories 32–38
 - User story 40
 
+## Implementation Notes
+
+Completed: [x]
+
+Implemented deterministic dependency-ready scheduling, durable
+`WAITING_ON_DEPENDENCY` state, independent-branch continuation, full-workflow
+completion gates, task-board blocker identities, and live/append-only scheduler
+phase with ready/waiting counts.
+
+Validation covers chains, a diamond, multiple roots, independent work, dry-run
+isolation, persisted completion reconciliation, and zero premature descendant
+execution.

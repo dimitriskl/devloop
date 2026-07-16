@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, TextIO
 
 from .codex_events import (
     CodexTurnOutcome,
+    RunWideBlocker,
+    classify_run_wide_blocker,
     codex_turn_outcome,
     parse_codex_event,
     render_safe_codex_activity,
@@ -52,6 +54,12 @@ DEVLOOP_RUN_GOAL = (
     "and tested so the finished product has as few bugs and deficiencies as practical."
 )
 ActivityCallback = Callable[[str | None], None]
+
+
+class RunWideBlockerError(RuntimeError):
+    def __init__(self, blocker: RunWideBlocker) -> None:
+        super().__init__(blocker.summary)
+        self.blocker = blocker
 
 
 def resolve_codex_executable(codex: str) -> str:
@@ -521,6 +529,13 @@ class CodexRunner:
         self.write_log_text(stdout_path, result.stdout)
         self.write_log_text(stderr_path, result.stderr)
 
+        run_wide_blocker = classify_run_wide_blocker(
+            output_text(result.stdout),
+            output_text(result.stderr),
+        )
+        if run_wide_blocker is not None:
+            raise RunWideBlockerError(run_wide_blocker)
+
         if result.returncode != 0:
             return RoleResult(
                 status="BLOCKED",
@@ -563,6 +578,9 @@ class CodexRunner:
             stderr_parts.append(current_stderr)
             result.stdout = "".join(stdout_parts)
             result.stderr = "".join(stderr_parts)
+
+            if classify_run_wide_blocker(current_stdout, current_stderr) is not None:
+                return result
 
             if result.returncode == 0 or not is_retryable_codex_connection_failure(current_stderr):
                 return result

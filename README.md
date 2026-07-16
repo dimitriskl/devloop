@@ -98,12 +98,18 @@ Ubuntu/Linux:
 ```
 
 The default run processes one pending issue. Add `--all` to continue through
-all pending issues in dependency order.
+all dependency-ready issues. Declare prerequisites as local Markdown links
+under an issue's `## Blocked by` heading. Index order is priority among ready
+issues; it never creates an implicit dependency.
 
-If any issue blocks, the runner retries blocked issues at the end with clean
-Codex attempts and compact blocker context. Tune this with
-`--blocked-retry-rounds`, `--blocked-retry-max-passes`, or disable it with
-`--no-blocked-retry`.
+If a ready issue blocks, its descendants become `WAITING_ON_DEPENDENCY` and
+receive no Codex calls while independent ready work continues. When normal
+work is exhausted, Blocker Resolution gives each unresolved ready blocker one
+additional workflow pass per round, up to five total. Use
+`--blocked-retry-rounds` to lower that cap or `--no-blocked-retry` to disable
+Blocker Resolution. `--blocked-retry-max-passes` remains accepted for command
+compatibility, but an additional attempt always consumes exactly one workflow
+pass.
 
 After a real run, Dev Loop compiles the most important durable lessons into its
 own self-improvement wiki at `docs/devloop-self-improvement/wiki/`. The role

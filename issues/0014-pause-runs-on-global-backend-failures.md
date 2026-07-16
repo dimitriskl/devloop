@@ -57,3 +57,15 @@ provider data.
 - User story 34
 - User story 40
 
+## Implementation Notes
+
+Completed: [x]
+
+Implemented typed usage-limit, authentication, and service-unavailable
+classification; early termination of connection retries; a typed run-wide
+exception; redacted durable `RUN_PAUSED` state; and exact issue/step/pass/phase
+resume without consuming scheduling budget.
+
+Validation uses replayed Codex JSON and fake completed processes only. Repeated
+global pauses preserve one active attempt and increment safe pause evidence
+without creating issue-level failure results.

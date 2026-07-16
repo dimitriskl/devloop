@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -24,6 +26,72 @@ class CodexItemType(Enum):
     MCP_TOOL_CALL = "mcp_tool_call"
     WEB_SEARCH = "web_search"
     PLAN_UPDATE = "todo_list"
+
+
+class RunWideBlockerKind(str, Enum):
+    USAGE_LIMIT = "USAGE_LIMIT"
+    AUTHENTICATION = "AUTHENTICATION"
+    SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class RunWideBlocker:
+    kind: RunWideBlockerKind
+    summary: str
+
+
+RUN_WIDE_BLOCKER_PATTERNS = (
+    (
+        RunWideBlockerKind.USAGE_LIMIT,
+        re.compile(
+            r"\b(usage limit|rate limit exceeded|insufficient_quota|"
+            r"out of credits|credits? exhausted)\b",
+            re.IGNORECASE,
+        ),
+        "Codex usage is exhausted. Restore usage availability, then rerun the same command.",
+    ),
+    (
+        RunWideBlockerKind.AUTHENTICATION,
+        re.compile(
+            r"\b(invalid api key|authentication failed|unauthorized|"
+            r"not authenticated|login required|http 401)\b",
+            re.IGNORECASE,
+        ),
+        "Codex authentication is unavailable. Restore authentication, then rerun the same command.",
+    ),
+    (
+        RunWideBlockerKind.SERVICE_UNAVAILABLE,
+        re.compile(
+            r"\b(service unavailable|temporarily unavailable|backend unavailable|"
+            r"server overloaded|http 503)\b",
+            re.IGNORECASE,
+        ),
+        "The Codex service is unavailable. Wait for recovery, then rerun the same command.",
+    ),
+)
+
+
+def classify_run_wide_blocker(stdout: str, stderr: str) -> RunWideBlocker | None:
+    terminal_errors: list[str] = []
+    for line in stdout.splitlines():
+        payload = parse_codex_event(line)
+        if payload is None or payload.get("type") not in {
+            "error",
+            CodexTurnOutcome.FAILED.value,
+        }:
+            continue
+        message = extract_text(payload.get("message")) or extract_text(
+            payload.get("error")
+        )
+        if message:
+            terminal_errors.append(message)
+    if stderr:
+        terminal_errors.append(stderr)
+    error_text = "\n".join(terminal_errors)
+    for kind, pattern, summary in RUN_WIDE_BLOCKER_PATTERNS:
+        if pattern.search(error_text):
+            return RunWideBlocker(kind=kind, summary=summary)
+    return None
 
 
 def parse_codex_event(line: str) -> dict[str, Any] | None:

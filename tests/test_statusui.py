@@ -356,6 +356,32 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         self.assertIn("WORKING   REVIEW      · pass 1 · 00:00:42", rendered)
         self.assertIn("WAITING   QA          · pass 1 · 00:00:00", rendered)
 
+    def test_dashboard_shows_dependency_scheduler_summary(self) -> None:
+        snapshot = statusui.IssueDashboardSnapshot(
+            issue_number="0003",
+            issue_title="Independent work",
+            position=3,
+            total=8,
+            pass_number=1,
+            active_stage=Stage.DEVELOPMENT,
+            scheduler_summary=(
+                "SCHEDULER · NORMAL SCHEDULING · 2 ready · 5 waiting"
+            ),
+        )
+
+        rendered = statusui.render_issue_dashboard(
+            snapshot,
+            width=79,
+            color=False,
+            unicode=True,
+            frame="⠋",
+        )
+
+        self.assertIn(
+            "SCHEDULER · NORMAL SCHEDULING · 2 ready · 5 waiting",
+            rendered,
+        )
+
     def test_dashboard_freezes_each_step_clock_on_transition(self) -> None:
         class Clock:
             value = 0.0

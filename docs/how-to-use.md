@@ -219,21 +219,31 @@ Core inputs:
 - `--preset <json>` selects role agents and skills. Relative paths resolve from
   the Dev Loop bundle. Default: `presets/generic-minimal.json`.
 
-Issue selection:
+Issue selection and dependencies:
 
-- `--all` runs all blocked or unfinished issues in dependency order.
+- `--all` runs all dependency-ready blocked or unfinished issues.
 - `--start-issue <number-or-prefix>` starts at an issue number or filename
-  prefix.
+  prefix. Preflight rejects a selection that omits an unfinished prerequisite.
 - `--max-passes <n>` controls coder/review/QA correction passes per issue.
   Default: `3`.
 
-Blocked retry:
+Declare dependencies only with local Markdown links inside `## Blocked by` in
+the dependent issue. The issue index controls deterministic priority among
+ready issues, not graph edges. Preflight rejects unknown, out-of-pack,
+duplicate, self-referential, or cyclic dependencies before Codex starts.
 
-- `--blocked-retry-rounds <n>` controls clean retry rounds after the normal run.
-  Default: `3`.
-- `--blocked-retry-max-passes <n>` controls passes inside each clean retry.
-  Default: `1`.
-- `--no-blocked-retry` disables the blocked retry phase.
+Scheduling and Blocker Resolution:
+
+- A prerequisite is satisfied only when its complete configured workflow is
+  `COMPLETED`.
+- `WAITING_ON_DEPENDENCY` issues do not invoke Codex or spend attempt budget.
+- Independent dependency-ready work continues when another branch blocks.
+- Blocker Resolution starts only after no ready issue has unused normal budget.
+- `--blocked-retry-rounds <n>` lowers the default five additional passes per
+  ready blocker; values above five are capped at five.
+- `--blocked-retry-max-passes` is retained for command compatibility. Every
+  Blocker Resolution attempt is exactly one workflow pass.
+- `--no-blocked-retry` disables Blocker Resolution.
 
 Codex execution:
 
@@ -306,6 +316,14 @@ When preflight finds a schema-v1 or malformed schema-v2 User Workflow Default,
 content as a draft. Use `reset-workflow` and then `apply` to atomically replace
 it with the built-in v2 default. `cancel` leaves the stored configuration
 unchanged.
+
+Dependency scheduler state is stored in the same JSON file. It includes ready
+and waiting projections, normal attempts, per-issue additional-pass counters,
+and the active scheduling reservation. Rerunning the same command resumes that
+reservation without double charging it. Usage exhaustion, authentication
+failure, or Codex service unavailability pauses the entire run as `RUN PAUSED`;
+restore the backend condition and rerun the same command to continue the exact
+issue, workflow step, pass, scheduling phase, and Blocker Resolution round.
 
 Completed issue files are updated in place with `Completed: [x]`, checked
 acceptance criteria, and implementation notes. Completed issues are skipped on

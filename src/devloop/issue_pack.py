@@ -13,6 +13,7 @@ class Issue:
     title: str
     path: Path
     completed: bool
+    dependencies: tuple[str, ...] = ()
 
     @staticmethod
     def is_completed_file(path: Path) -> bool:
@@ -64,7 +65,59 @@ def parse_issue_index(index_path: Path) -> list[Issue]:
             )
         )
 
-    return issues
+    issues_by_path = {issue.path: issue for issue in issues}
+    return [
+        Issue(
+            number=issue.number,
+            title=issue.title,
+            path=issue.path,
+            completed=issue.completed,
+            dependencies=resolve_issue_dependencies(
+                issue,
+                issue_root,
+                issues_by_path,
+            ),
+        )
+        for issue in issues
+    ]
+
+
+def blocked_by_paths(issue_path: Path) -> tuple[Path, ...]:
+    text = issue_path.read_text(encoding="utf-8")
+    section = re.search(
+        r"(?ims)^## Blocked by\s*$\n(?P<body>.*?)(?=^## |\Z)",
+        text,
+    )
+    if section is None:
+        return ()
+    return tuple(
+        (issue_path.parent / match.group("href")).resolve()
+        for match in LINK_PATTERN.finditer(section.group("body"))
+    )
+
+
+def resolve_issue_dependencies(
+    issue: Issue,
+    issue_root: Path,
+    issues_by_path: dict[Path, Issue],
+) -> tuple[str, ...]:
+    dependencies: list[str] = []
+    for dependency_path in blocked_by_paths(issue.path):
+        try:
+            dependency_path.relative_to(issue_root)
+        except ValueError as error:
+            raise ValueError(
+                f"Issue dependency in {issue.path} points outside the issue pack: "
+                f"{dependency_path}"
+            ) from error
+        dependency = issues_by_path.get(dependency_path)
+        if dependency is None:
+            raise ValueError(
+                f"Issue dependency in {issue.path} is not present in the issue index: "
+                f"{dependency_path}"
+            )
+        dependencies.append(dependency.number)
+    return tuple(dependencies)
 
 
 def issue_number(path: Path, title: str) -> str:
