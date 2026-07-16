@@ -30,3 +30,20 @@ Start this Issue in a fresh Codex context. Use `gpt-5.6-sol` with ultra reasonin
 
 - [Issue 0006: Recover the exact workflow cursor after shutdown](./0006-recover-exact-workflow-cursor.md)
 - [Issue 0007: Complete shared TUI operations and capability profiles](./0007-complete-shared-tui-and-capabilities.md)
+
+## Implementation Notes
+
+Completed: 2026-07-16T22:24:20+03:00 (development scope)
+
+The v0.1.0 source, packaging metadata, deterministic artifact verifier, isolated
+installer gates, verification tiers, content-addressed evidence manifests, genuine
+recovery/UI scenarios, demonstration harness, release documentation, redacted
+finalization, and safe workspace disposition are implemented. Release scripts are
+provided for Linux and Windows and require the same commit and artifact identities.
+
+Sandbox-safe evidence passed with 483 standard-library tests, Python compilation,
+shell syntax checks, and whitespace validation. The five unchecked criteria are
+release-operator work: clean installer execution, authenticated Windows/Linux gates,
+recording, immutable artifact evidence, and publication. The release notes retain
+`PENDING` values and publication remains blocked until those external gates produce
+real evidence. This marker closes repository development, not the release itself.

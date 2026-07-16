@@ -29,3 +29,20 @@ Start this Issue in a fresh Codex context. Use `gpt-5.6-sol` with ultra reasonin
 ## Blocked by
 
 - [Issue 0005: Process rework and dependent Issues](./0005-process-rework-and-dependent-issues.md)
+
+## Implementation Notes
+
+Completed: 2026-07-16T22:24:20+03:00 (development scope)
+
+Exact-cursor recovery is implemented across checkpoints, append-only event replay,
+lease recovery, source-drift validation, continued App Server threads, and explicit
+transcript-free Recovery Attempts. The mandatory ten-Issue gate now creates and
+advances its state through the production analysis, publication, workspace,
+scheduler, development, review, QA, recovery, and Textual services; it does not seed
+the target snapshot.
+
+Sandbox-safe evidence passed with 483 standard-library tests, Python compilation,
+shell syntax checks, and whitespace validation. The three unchecked criteria are
+operator release gates requiring authenticated App Server access and both Windows
+and Linux. They remain publication blockers in `docs/release-checklist-v0.1.0.md`
+and are not represented as executed by this development completion marker.
