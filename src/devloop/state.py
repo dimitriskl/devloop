@@ -28,6 +28,7 @@ from .portable_workflow import (
     StepRuntimeStatus,
     TypedStepOutput,
     WorkflowDefinition,
+    canonical_workflow_document_hash,
     canonical_workflow_hash,
     load_portable_workflow,
     parse_issue_status,
@@ -101,7 +102,7 @@ class LoopStateWriter:
             raise ValueError("Loop state has no resolved portable workflow.")
         workflow = load_portable_workflow(document, catalog)
         expected_hash = self.state.get("resolved_workflow_hash")
-        actual_hash = canonical_workflow_hash(workflow)
+        actual_hash = canonical_workflow_document_hash(document)
         if expected_hash != actual_hash:
             raise ValueError("Resolved portable workflow hash does not match its content.")
         return workflow

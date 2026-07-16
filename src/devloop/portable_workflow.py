@@ -1175,8 +1175,12 @@ def _timestamp() -> str:
 
 
 def canonical_workflow_hash(workflow: WorkflowDefinition) -> str:
+    return canonical_workflow_document_hash(workflow.to_dict())
+
+
+def canonical_workflow_document_hash(document: Mapping[str, Any]) -> str:
     canonical = json.dumps(
-        workflow.to_dict(),
+        document,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

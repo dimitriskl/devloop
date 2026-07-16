@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -1865,6 +1866,38 @@ class PortableWorkflowExecutionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "hash does not match"):
                 LoopStateWriter(index).resolved_workflow(catalog)
+
+    def test_state_round_trip_accepts_an_intact_legacy_sparse_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            index = root / "README.md"
+            index.write_text("# Issues\n", encoding="utf-8")
+            workflow = default_portable_workflow()
+            document = workflow.to_dict()
+            for step in document["steps"]:
+                step.pop("capability_profile")
+                step.pop("codex_settings")
+                step.pop("execution_budget")
+            canonical_document = json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            writer = LoopStateWriter(index)
+            writer.state["resolved_workflow"] = document
+            writer.state["resolved_workflow_hash"] = hashlib.sha256(
+                canonical_document.encode("utf-8")
+            ).hexdigest()
+            writer.flush()
+
+            restored = LoopStateWriter(index).resolved_workflow(
+                default_portable_component_catalog()
+            )
+
+            self.assertEqual(restored.to_dict(), workflow.to_dict())
+            persisted = json.loads(writer.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["resolved_workflow"], document)
 
     def test_recording_workflow_refuses_to_overwrite_a_tampered_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

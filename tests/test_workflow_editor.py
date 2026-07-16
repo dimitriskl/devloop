@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -114,6 +115,40 @@ class WorkflowDefaultStoreTests(unittest.TestCase):
                 store.load().step(SECURITY_REVIEW_STEP_ID).display_name,
                 "Threat Review",
             )
+
+    def test_load_accepts_an_intact_legacy_sparse_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "devloop-plan.json"
+            workflow = default_portable_workflow()
+            document = workflow.to_dict()
+            for step in document["steps"]:
+                step.pop("capability_profile")
+                step.pop("codex_settings")
+                step.pop("execution_budget")
+            canonical_document = json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            path.write_text(
+                json.dumps(
+                    {
+                        "user_workflow_default": document,
+                        "user_workflow_default_hash": hashlib.sha256(
+                            canonical_document.encode("utf-8")
+                        ).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            restored = WorkflowDefaultStore(
+                path,
+                default_portable_component_catalog(),
+            ).load()
+
+        self.assertEqual(restored.to_dict(), workflow.to_dict())
 
     def test_failed_atomic_replace_preserves_the_previous_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
