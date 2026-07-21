@@ -50,6 +50,40 @@ target project checkout. It contains the runner, prompts, output schemas, copied
 Codex skills, Codex agent references, MCP setup templates, and setup
 documentation.
 
+Try the standard workflow without rebuilding from scratch:
+
+```bash
+uv tool install .
+./examples/release-demo/run-demo.sh   # Linux
+# .\examples\release-demo\run-demo.ps1  # Windows
+```
+
+Submit the request in `examples/release-demo/feature-request.md`. The script
+creates a disposable Git repository and opens `codexcli` against it.
+
+## Built with Codex and GPT-5.6
+
+Dev Loop was built and runs through the **Codex CLI / Codex App Server** for
+session management, tool use, approvals, and workflow execution. Each workflow
+step calls **GPT-5.6** models through Codex; we did not call the OpenAI API
+directly.
+
+| Step | Role | CodexCLI (`codexcli`) | Portable Dev Loop (`devloop`) |
+| --- | --- | --- | --- |
+| Analysis | Planning and PRD | `gpt-5.6-sol` / xhigh | `gpt-5.6-sol` / xhigh |
+| Development | Implementation | `gpt-5.6-sol` / xhigh | `gpt-5.6-luna` / high |
+| Code review | Independent review | `gpt-5.6-sol` / xhigh | `gpt-5.6-sol` / xhigh |
+| QA | Verification | `gpt-5.6-sol` / xhigh | `gpt-5.6-terra` / high |
+
+**Codex** provides orchestration: the App Server protocol, fresh role threads,
+permission prompts, `/resume`, and structured workflow state. **GPT-5.6** provides
+the reasoning for each step. Models are selected through Codex CLI (`-m
+gpt-5.6-sol`, etc.) and locked per component in CodexCLI execution profiles.
+
+During development of this repository, Codex was used for implementation,
+refactoring, and release verification. GPT-5.6 models executed analysis,
+development, review, and QA turns through the installed Codex App Server.
+
 ## What You Can Run
 
 The portable Dev Loop has two entrypoints:
@@ -241,6 +275,7 @@ in this repository.
 
 All detailed documentation is under `docs/`:
 
+- `docs/hackathon-submission.md`
 - `docs/how-to-use.md`
 - `docs/new-pc-setup.md`
 - `docs/install-windows.md`

@@ -427,6 +427,21 @@ def main(
     )
     print(f"Loop state: {state_writer.board_path}")
 
+    persisted_issue_states = state_writer.state.get("issues", {})
+    finished_issue_numbers = tuple(
+        issue.number
+        for issue in source_issues
+        if issue.completed
+        or (
+            isinstance(persisted_issue_states, dict)
+            and isinstance(persisted_issue_states.get(issue.number), dict)
+            and parse_issue_status(
+                persisted_issue_states[issue.number].get("status")
+            )
+            is IssueStatus.COMPLETED
+        )
+    )
+
     delivery_dashboard = (
         None
         if args.dry_run
@@ -435,6 +450,7 @@ def main(
             issue_title=issues[0].title,
             position=1,
             total=len(issues),
+            finished_issue_numbers=finished_issue_numbers,
         )
     )
     current_schedule_position = 1
@@ -450,9 +466,11 @@ def main(
             f"blocker-resolution-{ordinal}" if blocker_resolution else None
         )
         if blocker_resolution:
-            print(
-                f"\nBlocker Resolution pass {ordinal}/{blocker_resolution_budget}: "
-                f"{_terminal_issue_identifier(issue.number)}"
+            report_blocker_resolution_start(
+                delivery_dashboard,
+                issue.number,
+                ordinal,
+                blocker_resolution_budget,
             )
         result = run_issue(
             issue=issue,
@@ -670,6 +688,20 @@ def issue_activity_label(position: int, total: int, issue_number: str) -> str:
     return (
         f"{_terminal_issue_identifier(issue_number)} "
         f"{position}/{total} +{after_current}"
+    )
+
+
+def report_blocker_resolution_start(
+    dashboard: statusui.IssueDashboard | None,
+    issue_number: str,
+    ordinal: int,
+    budget: int,
+) -> None:
+    if dashboard is not None and dashboard.enabled:
+        return
+    print(
+        f"\nBlocker Resolution pass {ordinal}/{budget}: "
+        f"{_terminal_issue_identifier(issue_number)}"
     )
 
 

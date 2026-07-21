@@ -8,17 +8,25 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: Dev Loop startup, authenticated backends, cross-platform and release workflows
 - Lesson: Detect mandatory gates that require credentials, network access, another operating system, writable user storage, recording, or publication authority before starting a long issue pack.
-- Evidence: Issues 0002 through 0007 repeatedly passed deterministic gates but could not run authenticated App Server scenarios because Codex was not logged in; Issues 0001 and 0008 also required unavailable Linux or clean release environments, and all eight issues finished blocked.
+- Evidence: In the July 21 recovery run, Issue 0003 already passed 131 platform-independent behaviors, but its mandatory Android/iOS Release and device gates could not run without MAUI workloads, mobile tooling, and an Apple build host.
 - Action: Preflight every non-repository prerequisite, show which acceptance gates are unavailable, and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
-- Last seen: 2026-07-13
+- Last seen: 2026-07-21
 
 ## Retry External Blockers Only After State Changes
 
 - Applies to: blocked retry rounds, coder scheduling and long-running issue packs
 - Lesson: A clean Codex attempt cannot fix a proven external prerequisite, so unchanged quota, authentication, connectivity, platform, permission, or publication blockers should not consume another retry round.
-- Evidence: On July 16, Issues 0004 through 0010 each made an initial attempt plus three clean retries that failed with the same Codex usage-limit response; the July 13 run likewise repeated unchanged authentication and connectivity blockers across retry rounds.
+- Evidence: Issue 0003 received five fresh dependency-scheduler attempts on July 21; every attempt reproduced the same missing MAUI workload, device-tooling, and Apple-host blocker while repository-only verification kept passing.
 - Action: Fingerprint external blockers and the relevant environment or account state, skip equivalent retries until that state changes, and leave one concise operator action on the loop board.
-- Last seen: 2026-07-16
+- Last seen: 2026-07-21
+
+## Validate Every Component Of Derived Data
+
+- Applies to: coder, reviewer, QA, domain-to-presentation projections and persisted calculations
+- Lesson: Matching a final total and collection count does not prove that a derived breakdown agrees with its durable inputs; validate every component and value at the owning boundary.
+- Evidence: Issue 0006 initially checked only final score and hint-deduction count, so contradictory baseline, time adjustment, or deduction values could pass; review caught the gap, and full recomputation plus focused mutation tests passed 131 core/mobile behaviors.
+- Action: Recompute the authoritative result from durable inputs, compare every derived field and item value, and test mutations of each independently meaningful component.
+- Last seen: 2026-07-21
 
 ## Keep Completion Markers Behind Acceptance Gates
 
@@ -252,13 +260,13 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: Add sparse/non-contiguous fixtures whenever issue logic creates, updates, or validates numbered instances.
 - Last seen: 2026-06-30
 
-## Recover Locked Dotnet Builds Sequentially
+## Isolate Unreliable Dotnet Build Servers
 
-- Applies to: reviewer, QA, Windows dotnet build and test gates
-- Lesson: Locked `obj` artifacts after overlapping build/test work should be treated as an environment retry path, not as product failure.
-- Evidence: Issue 0002 recorded an initial locked artifact build failure that passed after build-server shutdown and sequential `-m:1` / `UseSharedCompilation=false` settings.
-- Action: On CS2012 or locked intermediate artifacts, stop dotnet build servers and rerun the scoped build sequentially with an isolated output directory.
-- Last seen: 2026-06-30
+- Applies to: coder, reviewer, QA, sandboxed dotnet build and test gates
+- Lesson: Locked intermediates or a shared-server build that exits without diagnostics are environment retry signals, not product failures.
+- Evidence: Issue 0002 recovered a locked artifact build with build-server shutdown and sequential compilation; on July 21, Issue 0006's default shared-server build exited silently while isolated single-node Release builds passed without warnings.
+- Action: On CS2012, locked artifacts, or a silent shared-server exit, rerun the scoped gate with build servers and shared compilation disabled, one build node, and an isolated output path when needed.
+- Last seen: 2026-07-21
 
 ## Prefer Local Package Cache When Feeds Are Unreachable
 

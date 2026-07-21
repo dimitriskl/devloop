@@ -264,6 +264,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
                     issue_title=HOSTILE_TERMINAL_TEXT,
                     position=9,
                     total=10,
+                    finished_issue_numbers=(HOSTILE_TERMINAL_TEXT,),
                     stream=output,
                     frame_seconds=60,
                     terminal_size=lambda **_: os.terminal_size((1200, 40)),
@@ -451,6 +452,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
             issue_title="Publish a validated sample Level Catalog",
             position=2,
             total=26,
+            finished_issue_numbers=("0001",),
             stream=output,
             clock=clock,
             frame_seconds=60,
@@ -473,12 +475,50 @@ class IssueDashboardRenderingTests(unittest.TestCase):
 
         transition = output.getvalue()[transition_start:]
         plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transition)
-        self.assertIn("\x1b[10A", transition)
+        self.assertIn("\x1b[11A", transition)
         self.assertIn(
             "LAST RESULT · 0002 · PASS · pass 1 · total 00:00:05",
             plain,
         )
+        self.assertIn("FINISHED ISSUES (2) · 0001, 0002", plain)
         self.assertIn("CURRENT ISSUE · 0003 · 3/26 · 23 remaining", plain)
+
+    def test_failed_attempt_is_not_added_to_finished_issues(self) -> None:
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0002",
+            issue_title="Publish catalog",
+            position=2,
+            total=3,
+            stream=output,
+            frame_seconds=60,
+        )
+
+        dashboard.finish_issue("FAIL", "Needs rework.")
+        dashboard.show_issue(
+            issue_number="0002",
+            issue_title="Publish catalog",
+            position=2,
+            total=3,
+        )
+        dashboard.finish_issue("PASS", "Completed.")
+        transition_start = len(output.getvalue())
+        dashboard.show_issue(
+            issue_number="0003",
+            issue_title="Persist profile",
+            position=3,
+            total=3,
+        )
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        dashboard.close()
+
+        transition = re.sub(
+            r"\x1b\[[0-?]*[ -/]*[@-~]",
+            "",
+            output.getvalue()[transition_start:],
+        )
+        self.assertIn("FINISHED ISSUES (1) · 0002", transition)
+        self.assertNotIn("FINISHED ISSUES (2)", transition)
 
     def test_small_terminal_windows_rows_around_the_active_step(self) -> None:
         workflow = default_portable_workflow()

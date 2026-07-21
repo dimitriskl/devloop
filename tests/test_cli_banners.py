@@ -178,6 +178,45 @@ class IssueProgressLabelTests(unittest.TestCase):
         label = cli.issue_activity_label(1, 26, "0001")
         self.assertEqual(label, "0001 1/26 +25")
 
+    def test_tty_blocker_transition_does_not_write_outside_dashboard_region(self) -> None:
+        class TtyStream(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        output = TtyStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0004",
+            issue_title="Persist profile",
+            position=2,
+            total=23,
+            stream=output,
+            frame_seconds=60,
+        )
+
+        with redirect_stdout(output):
+            cli.report_blocker_resolution_start(dashboard, "0004", 1, 5)
+
+        self.assertEqual(output.getvalue(), "")
+
+    def test_redirected_blocker_transition_remains_append_only(self) -> None:
+        output = io.StringIO()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0004",
+            issue_title="Persist profile",
+            position=2,
+            total=23,
+            stream=output,
+            frame_seconds=60,
+        )
+
+        with redirect_stdout(output):
+            cli.report_blocker_resolution_start(dashboard, "0004", 1, 5)
+
+        self.assertEqual(
+            output.getvalue(),
+            "\nBlocker Resolution pass 1/5: 0004\n",
+        )
+
 
 class RunIssueSignatureTests(unittest.TestCase):
     def test_run_issue_accepts_progress_keyword(self) -> None:
