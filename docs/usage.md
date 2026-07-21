@@ -21,8 +21,9 @@ Ubuntu/macOS:
 ./bin/devloop-plan.sh --repo /path/to/project
 ```
 
-Without `--goal` or `--prd`, startup offers a new planning session or a catalog
-of unfinished PRDs. During planning, `/resume` opens the same catalog. Selecting
+Without `--goal` or `--prd`, startup opens a replacing menu with a new planning
+session, a catalog of unfinished PRDs, Workflow options (the same editor as
+`/options`), or Exit. During planning, `/resume` opens the same catalog. Selecting
 an entry goes to the development handoff and preserves the existing issue/pass
 resume behavior from its loop-state file.
 

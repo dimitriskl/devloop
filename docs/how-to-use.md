@@ -99,12 +99,15 @@ If `--repo` is omitted, Dev Loop asks for the target checkout. It remembers the
 last valid target in the user config folder. If the selected folder does not
 exist, Dev Loop can create it and initialize Git after asking.
 
-When no `--goal` or `--prd` is supplied, startup offers:
+When no `--goal` or `--prd` is supplied, startup opens a replacing terminal menu:
 
 1. **Start a new change**.
 2. **Resume an unfinished PRD**.
+3. **Workflow options** — opens the same Workflow Editor as `/options`.
+4. **Exit** — leave planning without starting a session.
 
-The resume list contains only issue packs with unfinished issues. Each entry
+Each submenu replaces the previous screen instead of appending to it. The resume
+list contains only issue packs with unfinished issues. Each entry
 shows completed and remaining counts, the active issue/status when a loop-state
 file exists, and last activity. Selecting one opens the normal development
 handoff; completed issues remain skipped and an interrupted active issue resumes

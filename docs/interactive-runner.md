@@ -32,8 +32,14 @@ Continue an existing PRD without reopening planning:
 
 ## Start Or Resume
 
-After the target checkout is selected, Dev Loop offers **Start a new change**
-or **Resume an unfinished PRD**. The resume catalog scans standard
+After the target checkout is selected, Dev Loop opens a replacing startup menu:
+
+- **Start a new change**
+- **Resume an unfinished PRD**
+- **Workflow options** (same editor as `/options`)
+- **Exit**
+
+The resume catalog scans standard
 `prd/<name>/<name>.md` plus `prd/<name>/issues/README.md` packages and supported
 flat local issue packs. Fully completed packs are omitted. Entries include
 completion counts, the active issue and status when known, and last activity.

@@ -243,7 +243,7 @@ Ubuntu/macOS:
 ```
 
 The session shows a stage banner (`analysis -> development -> review -> qa`).
-At startup choose **Start a new change** or **Resume an unfinished PRD**. Resume
+At startup the replacing menu offers **Start a new change**, **Resume an unfinished PRD**, **Workflow options** (same editor as `/options`), or **Exit**. Resume
 lists only PRD/issue packs with unfinished issues and shows completion counts,
 the active issue when known, and last activity. The same catalog is available
 through `/resume` during planning. Chat with Codex to sharpen a new change; when
