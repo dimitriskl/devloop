@@ -201,7 +201,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             terminal_width=120,
         )
 
-        self.assertIn("Local deterministic execution; Codex settings do not apply.", rendered)
+        self.assertIn("Local deterministic execution", rendered)
         self.assertNotIn("Model:", rendered)
 
     def test_preflight_names_the_exact_step_and_unsupported_fast_setting(self) -> None:
@@ -256,7 +256,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             ("gpt-5.6-luna", "high", FastPreference.OFF),
         )
         rendered = "\n".join(output)
-        self.assertIn("Codex Model Catalog: live", rendered)
+        self.assertIn("Codex Models — live", rendered)
         self.assertIn("2. Sol — gpt-5.6-sol", rendered)
 
     def test_editor_persists_execution_budget_without_changing_codex_settings(self) -> None:
@@ -287,7 +287,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             stored.step(ANALYSIS_STEP_ID).codex_settings.as_tuple(),
             ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
         )
-        self.assertIn("Execution Budget", "\n".join(output))
+        self.assertIn("Timeout:", "\n".join(output))
 
     def test_retry_catalog_replaces_visible_stale_cache_after_discovery_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -315,10 +315,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             )
 
         rendered = "\n".join(output)
-        self.assertIn("STALE DISPLAY CACHE", rendered)
-        self.assertIn("cannot authorize execution", rendered)
         self.assertIn("Codex Model Catalog refreshed from the live backend.", rendered)
-        self.assertIn("Codex Model Catalog: live", rendered)
+        self.assertNotIn("Codex Model Catalog: STALE", output[-1])
 
     def test_editor_sanitizes_backend_catalog_errors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

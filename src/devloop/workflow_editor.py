@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import math
+import shutil
 import uuid
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping
 
+from .cli_ui import (
+    editor_prompt,
+    fit_text_to_screen,
+    format_selected_step_line,
+    render_context_path,
+    render_grouped_commands,
+)
 from .lineeditor import display_width
+from .terminal_menu import clear_terminal_screen
 from .model_catalog import (
     CatalogDiscoveryError,
     CodexModel,
@@ -51,35 +60,39 @@ ConfigurationUpdates = Callable[[], Mapping[str, object]]
 ModelCatalogLoader = Callable[[], CodexModelCatalog]
 
 WIDE_EDITOR_MINIMUM_WIDTH = 96
-EDITOR_COMMANDS = (
-    "current",
-    "future",
-    "step number",
-    "select",
-    "rename",
-    "add",
-    "insert",
-    "duplicate",
-    "delete",
-    "type",
-    "move-up",
-    "move-down",
-    "position",
-    "model",
-    "reasoning",
-    "fast",
-    "budget",
-    "guidance",
-    "retry-catalog",
-    "route",
-    "bind",
-    "undo",
-    "reset-step",
-    "reset-workflow",
-    "capabilities",
-    "advanced",
-    "apply",
-    "cancel",
+EDITOR_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("View", ("current", "future", "graph", "advanced")),
+    ("Select step", ("step number", "select")),
+    (
+        "Edit step",
+        (
+            "rename",
+            "type",
+            "model",
+            "reasoning",
+            "fast",
+            "budget",
+            "guidance",
+            "capabilities",
+        ),
+    ),
+    (
+        "Workflow structure",
+        (
+            "add",
+            "insert",
+            "duplicate",
+            "delete",
+            "move-up",
+            "move-down",
+            "position",
+            "route",
+            "bind",
+        ),
+    ),
+    ("Catalog", ("retry-catalog",)),
+    ("Draft", ("undo", "reset-step", "reset-workflow")),
+    ("Finish", ("apply", "cancel")),
 )
 
 
@@ -828,6 +841,7 @@ def run_workflow_editor(
     read_line: ReadLine,
     write: WriteLine,
     terminal_width: int,
+    terminal_height: int | None = None,
     current_workflow: WorkflowDefinition | None = None,
     catalog: PortableStepComponentCatalog | None = None,
     open_capabilities: OpenCapabilities | None = None,
@@ -835,12 +849,14 @@ def run_workflow_editor(
     model_catalog_loader: ModelCatalogLoader | None = None,
 ) -> EditorResult:
     component_catalog = catalog or default_portable_component_catalog()
+    height = terminal_height or max(10, shutil.get_terminal_size(fallback=(100, 24)).lines)
     return _WorkflowEditorSession(
         store=WorkflowDefaultStore(configuration_path, component_catalog),
         catalog=component_catalog,
         read_line=read_line,
         write=write,
         terminal_width=terminal_width,
+        terminal_height=height,
         current_workflow=current_workflow,
         open_capabilities=open_capabilities,
         configuration_updates=configuration_updates,
@@ -860,6 +876,7 @@ class _WorkflowEditorSession:
         read_line: ReadLine,
         write: WriteLine,
         terminal_width: int,
+        terminal_height: int,
         current_workflow: WorkflowDefinition | None,
         open_capabilities: OpenCapabilities | None,
         configuration_updates: ConfigurationUpdates | None,
@@ -871,6 +888,7 @@ class _WorkflowEditorSession:
         self._read_line = read_line
         self._write = write
         self._terminal_width = terminal_width
+        self._terminal_height = terminal_height
         self._current_workflow = current_workflow
         self._open_capabilities = open_capabilities
         self._configuration_updates = configuration_updates
@@ -909,15 +927,23 @@ class _WorkflowEditorSession:
         )
         self._scope = EditorScope.FUTURE_RUNS
         self._show_advanced = False
+        self._show_graph = False
 
     def run(self) -> EditorResult:
         while True:
             self._render()
-            result = self._dispatch(self._read_line("workflow> ").strip())
+            result = self._dispatch(
+                self._read_line(self._prompt()).strip()
+            )
             if result is not None:
                 return result
 
+    def _prompt(self) -> str:
+        step = self._viewed_workflow().step(self._selected_step_id())
+        return editor_prompt(step.display_name)
+
     def _render(self) -> None:
+        clear_terminal_screen()
         if self._default_recovery_state is not WorkflowDefaultRecoveryState.NORMAL:
             self._write(
                 render_workflow_default_recovery(
@@ -936,8 +962,10 @@ class _WorkflowEditorSession:
                 self._selected_step_id(),
                 self._catalog,
                 terminal_width=self._terminal_width,
+                terminal_height=self._terminal_height,
                 current_workflow=self._current_workflow,
                 show_advanced=self._show_advanced,
+                show_graph=self._show_graph,
                 scope=self._scope,
                 model_catalog=self._model_catalog,
                 model_catalog_error=self._model_catalog_error,
@@ -970,6 +998,7 @@ class _WorkflowEditorSession:
             "route": self._route_outcome,
             "bind": self._bind_input,
             "advanced": self._toggle_advanced,
+            "graph": self._toggle_graph,
             "capabilities": self._open_capability_options,
             "undo": self._undo,
             "reset-step": self._reset_step,
@@ -984,7 +1013,14 @@ class _WorkflowEditorSession:
         handler = handlers.get(normalized)
         if handler is not None:
             return handler()
-        self._write("\n".join(_render_command_lines(self._terminal_width)))
+        self._write(
+            "\n".join(
+                _render_command_lines(
+                    self._terminal_width,
+                    max_height=self._terminal_height,
+                )
+            )
+        )
         return None
 
     def _dispatch_default_recovery(self, command: str) -> EditorResult | None:
@@ -1662,6 +1698,11 @@ class _WorkflowEditorSession:
     def _toggle_advanced(self) -> None:
         self._show_advanced = not self._show_advanced
 
+    def _toggle_graph(self) -> None:
+        self._show_graph = not self._show_graph
+        state = "shown" if self._show_graph else "hidden"
+        self._message(f"Graph preview {state}. Use graph again to toggle.")
+
     def _open_capability_options(self) -> None:
         if self._open_capabilities is None:
             self._message("Capability options are unavailable in this editor context.")
@@ -1748,19 +1789,142 @@ def render_workflow_default_recovery(
     )
 
 
+def _compact_detail_lines(
+    workflow: WorkflowDefinition,
+    selected: WorkflowStep,
+    component: PortableStepComponent,
+    catalog: PortableStepComponentCatalog,
+    *,
+    selected_position: int | None,
+    primary_path_length: int,
+    model_catalog: CodexModelCatalog | None,
+    model_catalog_error: str | None,
+) -> list[str]:
+    lines = [
+        f"Settings — {selected.display_name}",
+        f"Type: {selected.component_id} | Scope: {component.scope.value}",
+    ]
+    if component.is_codex_backed:
+        if selected.codex_settings is None:
+            lines.append("Codex settings: missing")
+        else:
+            lines.append(
+                "Model: "
+                f"{selected.codex_settings.model} | "
+                f"Effort: {selected.codex_settings.reasoning_effort} | "
+                f"Fast: {selected.codex_settings.fast.value.title()} | "
+                f"Timeout: {selected.execution_budget.timeout_seconds:g}s"
+            )
+        if model_catalog is None:
+            lines.append("Codex Model Catalog: unavailable")
+        elif not model_catalog.is_fresh:
+            lines.append("Codex Model Catalog: STALE — retry-catalog before apply")
+        if model_catalog_error:
+            lines.append(
+                "Catalog action: "
+                + sanitize_terminal_text(model_catalog_error, preserve_newlines=False)
+            )
+    else:
+        lines.append("Local deterministic execution")
+    capability_count = len(selected.capability_profile.capabilities)
+    required_count = sum(
+        1
+        for capability in selected.capability_profile.capabilities
+        if component.required_capability_reason(capability) is not None
+    )
+    lines.append(
+        f"Capabilities: {capability_count} ({required_count} required) — type capabilities"
+    )
+    if selected.guidance is None:
+        lines.append("Guidance: none — type guidance to edit")
+    else:
+        preview = selected.guidance.text.splitlines()[0]
+        lines.append(
+            f"Guidance: {selected.guidance.review_state.value} — {preview}"
+        )
+    if selected_position is None:
+        lines.append("Branch-only step — type select to pick branch steps")
+    else:
+        lines.append(f"Position: {selected_position}/{primary_path_length}")
+    unresolved = _unresolved_input_lines(workflow, selected, catalog)
+    if unresolved:
+        lines.extend(unresolved[:2])
+        if len(unresolved) > 2:
+            lines.append(f"… {len(unresolved) - 2} more unresolved inputs")
+    return lines
+
+
+def _editor_body_line_budget(
+    height: int,
+    *,
+    show_graph: bool,
+    command_line_count: int,
+    header_line_count: int,
+) -> int:
+    graph_reserve = max(4, height // 4) if show_graph else 0
+    fixed = header_line_count + command_line_count + graph_reserve + 3
+    return max(4, height - 1 - fixed)
+
+
+def _body_display_line_count(
+    primary_lines: list[str],
+    detail_lines: list[str],
+    *,
+    width: int,
+    wide_layout: bool,
+) -> int:
+    if wide_layout:
+        body = _render_columns(primary_lines, detail_lines, width)
+    else:
+        body = "\n".join(
+            _fit_to_width(line, width)
+            for line in (*primary_lines, "", *detail_lines)
+        )
+    return len(body.splitlines()) if body else 0
+
+
+def _trim_detail_lines_to_budget(
+    detail_lines: list[str],
+    *,
+    width: int,
+    primary_lines: list[str],
+    max_body_lines: int,
+    wide_layout: bool,
+) -> list[str]:
+    trimmed = list(detail_lines)
+    while (
+        trimmed
+        and _body_display_line_count(
+            primary_lines,
+            trimmed,
+            width=width,
+            wide_layout=wide_layout,
+        )
+        > max_body_lines
+    ):
+        trimmed.pop()
+    if trimmed != detail_lines:
+        hidden = len(detail_lines) - len(trimmed)
+        trimmed.append(f"… {hidden} settings hidden")
+    return trimmed
+
+
 def render_workflow_editor(
     workflow: WorkflowDefinition,
     selected_step_id: StepInstanceId,
     catalog: PortableStepComponentCatalog,
     *,
     terminal_width: int,
+    terminal_height: int = 24,
     current_workflow: WorkflowDefinition | None = None,
     show_advanced: bool = False,
+    show_graph: bool = False,
     scope: EditorScope = EditorScope.FUTURE_RUNS,
     model_catalog: CodexModelCatalog | None = None,
     model_catalog_error: str | None = None,
 ) -> str:
     width = max(1, terminal_width)
+    height = max(10, terminal_height)
     selected = workflow.step(selected_step_id)
     component = catalog.resolve(selected.component_id)
     primary_path = workflow.primary_path()
@@ -1772,92 +1936,83 @@ def render_workflow_editor(
         ),
         None,
     )
-    primary_lines = ["Primary Path"]
+    scope_label = (
+        "Current Run (read-only)"
+        if scope is EditorScope.CURRENT_RUN
+        else "Future Runs (editable)"
+    )
+    if selected_position is None:
+        location = "branch step"
+        position_label = "branch-only"
+    else:
+        location = f"step {selected_position} of {len(primary_path)}"
+        position_label = f"{selected_position}/{len(primary_path)}"
+    context_path = render_context_path(
+        scope_label,
+        selected.display_name,
+        position_label,
+    )
+    primary_lines = [
+        "Workflow Steps (enter step number or select)",
+    ]
     primary_lines.extend(
-        f"{index}. {'> ' if step.instance_id == selected_step_id else '  '}{step.display_name}"
+        format_selected_step_line(
+            index,
+            step.display_name,
+            selected=step.instance_id == selected_step_id,
+        )
         for index, step in enumerate(primary_path, start=1)
     )
-    detail_lines = [
-        "Selected Step",
-        f"Display name: {selected.display_name}",
-        f"Type: {selected.component_id}",
-        f"Scope: {component.scope.value} (component-owned, read-only)",
-        "Execution Budget",
-        f"Timeout: {selected.execution_budget.timeout_seconds:g} seconds",
-        (
-            "Checkpoint deadline: "
-            f"{selected.execution_budget.checkpoint_seconds:g} seconds"
-        ),
-    ]
-    if component.is_codex_backed:
-        if selected.codex_settings is None:
-            detail_lines.append("Codex settings: missing")
-        else:
-            detail_lines.extend(
-                (
-                    f"Model: {selected.codex_settings.model}",
-                    f"Reasoning effort: {selected.codex_settings.reasoning_effort}",
-                    f"Fast: {selected.codex_settings.fast.value.title()}",
-                )
-            )
-        if model_catalog is None:
-            detail_lines.append("Codex Model Catalog: unavailable")
-        elif model_catalog.is_fresh:
-            detail_lines.append(
-                f"Codex Model Catalog: live ({model_catalog.fetched_at})"
-            )
-        else:
-            detail_lines.append(
-                f"Codex Model Catalog: STALE DISPLAY CACHE ({model_catalog.fetched_at})"
-            )
-            detail_lines.append("Stale cache cannot authorize execution.")
-        if model_catalog_error:
-            safe_catalog_error = sanitize_terminal_text(
-                model_catalog_error,
-                preserve_newlines=False,
-            )
-            detail_lines.append(f"Catalog action: {safe_catalog_error}")
-    else:
-        detail_lines.append(
-            "Local deterministic execution; Codex settings do not apply."
+    header = [context_path]
+    if current_workflow is not None:
+        header.append(
+            f"Current Run hash: {canonical_workflow_hash(current_workflow)[:12]}…"
         )
-    detail_lines.append("Step Guidance")
-    detail_lines.append(f"Precedence: {STEP_GUIDANCE_PRECEDENCE}")
-    if selected.guidance is None:
-        detail_lines.append("Guidance: None")
-    else:
-        detail_lines.append(
-            f"Guidance state: {selected.guidance.review_state.value}"
-        )
+    if not show_graph:
+        header.append("Route map hidden — type graph to show")
+    command_lines = _render_command_lines(width, max_height=height)
+    body_budget = _editor_body_line_budget(
+        height,
+        show_graph=show_graph,
+        command_line_count=len(command_lines),
+        header_line_count=len(header),
+    )
+    if show_graph:
+        detail_lines = [
+            f"Selected: {selected.display_name}",
+            "Type graph again to return to step settings.",
+        ]
+    elif show_advanced:
+        detail_lines = [
+            f"Settings — {selected.display_name}",
+            f"Instance: {selected.instance_id}",
+        ]
         detail_lines.extend(
-            f"Guidance: {line}" for line in selected.guidance.text.splitlines()
+            _port_binding_lines(
+                workflow,
+                selected,
+                component,
+                catalog,
+            )
         )
-    detail_lines.append("Capabilities")
-    if not selected.capability_profile.capabilities:
-        detail_lines.append("Selected capabilities: None")
-    for capability in selected.capability_profile.capabilities:
-        required_reason = component.required_capability_reason(capability)
-        label = capability.kind.value.replace("_", " ").title()
-        if required_reason is None:
-            detail_lines.append(f"{label}: {capability.path} [enabled]")
-        else:
-            detail_lines.append(f"{label}: {capability.path} [required, locked]")
-            detail_lines.append(f"Required reason: {required_reason}")
-    if selected_position is None:
-        detail_lines.append("Branch location: branch-only (no global Position)")
     else:
-        detail_lines.append(
-            f"Position: {selected_position} of {len(primary_path)} (one-based)"
-        )
-    detail_lines.extend(_unresolved_input_lines(workflow, selected, catalog))
-    advanced_binding_lines: list[str] = []
-    if show_advanced:
-        detail_lines.extend(("Advanced", "Step Instance ID:", str(selected.instance_id)))
-        advanced_binding_lines = _port_binding_lines(
+        detail_lines = _compact_detail_lines(
             workflow,
             selected,
             component,
             catalog,
+            selected_position=selected_position,
+            primary_path_length=len(primary_path),
+            model_catalog=model_catalog,
+            model_catalog_error=model_catalog_error,
+        )
+    if not show_advanced:
+        detail_lines = _trim_detail_lines_to_budget(
+            detail_lines,
+            width=width,
+            primary_lines=primary_lines,
+            max_body_lines=body_budget,
+            wide_layout=width >= WIDE_EDITOR_MINIMUM_WIDTH,
         )
     if width >= WIDE_EDITOR_MINIMUM_WIDTH:
         body = _render_columns(primary_lines, detail_lines, width)
@@ -1866,49 +2021,35 @@ def render_workflow_editor(
             _fit_to_width(line, width)
             for line in (*primary_lines, "", *detail_lines)
         )
-    header = [
-        "Workflow Editor",
-    ]
-    if current_workflow is not None:
-        header.extend(
-            (
-                "Current Run (read-only)",
-                f"Current Run hash: {canonical_workflow_hash(current_workflow)[:12]}…",
-            )
-        )
-    header.extend(
-        (
-            "Future Runs (editable)",
-            "Edits affect newly created runs only.",
-            (
-                "Viewing Current Run settings."
-                if scope is EditorScope.CURRENT_RUN
-                else "Editing Future Runs settings."
+    fitted_header = tuple(_fit_to_width(line, width) for line in header)
+    graph_budget = max(6, height // 2) if show_graph else 0
+    graph_sections: tuple[str, ...] = ()
+    if show_graph:
+        graph_sections = (
+            "",
+            render_graph_preview(
+                workflow,
+                catalog,
+                terminal_width=width,
+                max_lines=graph_budget,
             ),
         )
-    )
-    fitted_header = tuple(_fit_to_width(line, width) for line in header)
-    graph_preview = render_graph_preview(
-        workflow,
-        catalog,
-        terminal_width=width,
-    )
-    advanced_bindings = "\n".join(
-        line
-        for advanced_line in advanced_binding_lines
-        for line in _wrap_to_width(advanced_line, width)
-    )
-    return "\n".join(
+    rendered = "\n".join(
         (
             *fitted_header,
             "",
             body,
             "",
-            *((advanced_bindings, "") if advanced_bindings else ()),
-            graph_preview,
+            *graph_sections,
             "",
-            *_render_command_lines(width),
+            *command_lines,
         )
+    )
+    return fit_text_to_screen(
+        rendered,
+        width=width,
+        max_height=height,
+        reserve_prompt=True,
     )
 
 
@@ -2085,9 +2226,10 @@ def render_graph_preview(
     catalog: PortableStepComponentCatalog,
     *,
     terminal_width: int,
+    max_lines: int | None = None,
 ) -> str:
     width = max(1, terminal_width)
-    lines = ["Graph Preview"]
+    lines = ["Route Map"]
     for step in workflow.steps:
         component = catalog.resolve(step.component_id)
         for outcome in StepOutcome:
@@ -2099,6 +2241,9 @@ def render_graph_preview(
                 target_id = step.transitions[outcome]
                 target = _step_destination_label(workflow, target_id)
             lines.append(f"{step.display_name} --{outcome.value}--> {target}")
+    if max_lines is not None and len(lines) > max_lines:
+        hidden = len(lines) - max_lines + 1
+        lines = [*lines[: max_lines - 1], f"… {hidden} routes hidden — widen terminal or hide graph"]
     return "\n".join(_fit_to_width(line, width) for line in lines)
 
 
@@ -2224,19 +2369,15 @@ def _wrap_column_lines(lines: list[str], width: int) -> list[str]:
     ]
 
 
-def _render_command_lines(width: int) -> list[str]:
-    lines: list[str] = []
-    current = "Commands:"
-    for command in EDITOR_COMMANDS:
-        separator = " " if current == "Commands:" else " | "
-        candidate = f"{current}{separator}{command}"
-        if display_width(candidate) <= width:
-            current = candidate
-            continue
-        lines.append(_fit_to_width(current, width))
-        current = f"  {command}"
-    lines.append(_fit_to_width(current, width))
-    return lines
+def _render_command_lines(width: int, *, max_height: int | None = None) -> list[str]:
+    command_budget = None
+    if max_height is not None:
+        command_budget = max(4, min(8, max_height // 3))
+    return render_grouped_commands(
+        EDITOR_COMMAND_GROUPS,
+        width=width,
+        max_lines=command_budget,
+    )
 
 
 def _write_message(write: WriteLine, message: str, width: int) -> None:

@@ -1292,6 +1292,10 @@ def resolve_run_workflow_with_repair(
                     40,
                     shutil.get_terminal_size(fallback=(100, 24)).columns,
                 ),
+                terminal_height=max(
+                    10,
+                    shutil.get_terminal_size(fallback=(100, 24)).lines,
+                ),
                 catalog=catalog,
                 model_catalog_loader=model_catalog_loader,
             )

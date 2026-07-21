@@ -45,6 +45,7 @@ from .step_configuration import CapabilityKind, CapabilityReference
 from .state import LoopStateWriter
 from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext
+from .cli_ui import fit_text_to_screen, render_context_path, terminal_dimensions
 from .terminal_menu import render_menu_screen
 from .worktree import (
     branch_exists,
@@ -661,11 +662,13 @@ def run_options_menu(
     installed_components = component_catalog or build_portable_component_catalog(
         bundle_root
     )
+    width, height = terminal_dimensions()
     result = run_workflow_editor(
         state_path,
         read_line=read_prompt,
         write=print,
-        terminal_width=terminal_width(),
+        terminal_width=width,
+        terminal_height=height,
         current_workflow=current_workflow,
         catalog=installed_components,
         open_capabilities=lambda draft, step_id: run_capability_options_menu(
@@ -747,12 +750,19 @@ def run_capability_options_menu(
     found = catalog_module.discover(bundle_root)
     while True:
         step = draft.workflow.step(step_id)
-        print()
-        print(f"Capability Options — {step.display_name}")
-        print("  1. Search and toggle this Step Instance's capabilities")
-        print("  2. Reset this Step Instance to component capability defaults")
-        print("  3. Add skill or agent from GitHub")
-        print("  4. Back to Workflow Editor")
+        context = render_context_path(
+            "Capability Options",
+            step.display_name,
+        )
+        render_menu_screen(
+            context,
+            "",
+            "  1. Search and toggle capabilities for this step",
+            "  2. Reset this step to component defaults",
+            "  3. Add skill or agent from GitHub",
+            "  4. Back to Workflow Editor",
+            "",
+        )
         choice = ask_choice("Select", {"1", "2", "3", "4"}, default="4")
         if choice == "4":
             return
@@ -802,8 +812,15 @@ def edit_step_capabilities(
         _catalog_capability_reference(bundle_root, entry)
         for entry in entries
     ]
-    print()
-    print(f"Capabilities for {step.display_name}")
+    context = render_context_path("Capabilities", step.display_name)
+    width, height = terminal_dimensions()
+    menu_lines = [
+        context,
+        "",
+        "Enter a capability number to toggle, or cancel.",
+        "",
+    ]
+    entry_lines: list[str] = []
     for index, (entry, reference) in enumerate(zip(entries, references), start=1):
         reason = component.required_capability_reason(reference)
         if reason is not None:
@@ -815,7 +832,24 @@ def edit_step_capabilities(
         else:
             marker = "disabled"
             explanation = ""
-        print(f"  {index}. [{marker}] {entry.kind}: {entry.name}{explanation}")
+        entry_lines.append(
+            f"  {index}. [{marker}] {entry.kind}: {entry.name}{explanation}"
+        )
+    reserved = len(menu_lines) + 2
+    visible_budget = max(1, height - reserved)
+    if len(entry_lines) > visible_budget:
+        menu_lines.extend(entry_lines[: visible_budget - 1])
+        hidden = len(entry_lines) - visible_budget + 1
+        menu_lines.append(f"  … {hidden} more — refine search to narrow the list")
+    else:
+        menu_lines.extend(entry_lines)
+    screen = fit_text_to_screen(
+        "\n".join(menu_lines),
+        width=width,
+        max_height=height,
+        reserve_prompt=True,
+    )
+    render_menu_screen(*screen.splitlines())
     raw = read_prompt("Capability number to toggle (or cancel): ").strip()
     if raw.casefold() == "cancel":
         return

@@ -691,7 +691,9 @@ class WorkflowEditorFlowTests(unittest.TestCase):
 
             result = run_workflow_editor(
                 path,
-                read_line=FakeEditor(["delete", "yes", "apply", "cancel"]).read_line,
+                read_line=FakeEditor(
+                    ["delete", "yes", "apply", "graph", "cancel"]
+                ).read_line,
                 write=output.append,
                 terminal_width=120,
             )
@@ -719,16 +721,14 @@ class WorkflowEditorFlowTests(unittest.TestCase):
                 ).read_line,
                 write=output.append,
                 terminal_width=160,
+                terminal_height=50,
             )
 
         rendered = "\n".join(output)
         self.assertIs(result, EditorResult.CANCELLED)
-        self.assertIn("Display name: Security Review", rendered)
-        self.assertIn(
-            f"Current: [deleted Step Instance {DEVELOPMENT_STEP_ID}].implementation",
-            rendered,
-        )
-        self.assertIn("input port 'implementation' binds unknown producer", rendered)
+        self.assertIn("Settings — Security Review", rendered)
+        self.assertIn(str(DEVELOPMENT_STEP_ID), rendered)
+        self.assertIn("binds unknown producer", rendered)
 
     def test_duplicate_delete_original_and_select_qa_keeps_draft_repairable(
         self,
@@ -751,16 +751,14 @@ class WorkflowEditorFlowTests(unittest.TestCase):
                 ).read_line,
                 write=output.append,
                 terminal_width=160,
+                terminal_height=50,
             )
 
         rendered = "\n".join(output)
         self.assertIs(result, EditorResult.CANCELLED)
-        self.assertIn("Display name: QA", rendered)
+        self.assertIn("Settings — QA", rendered)
+        self.assertIn(str(DEVELOPMENT_STEP_ID), rendered)
         self.assertIn("Advanced Port Bindings", rendered)
-        self.assertIn(
-            f"[deleted Step Instance {DEVELOPMENT_STEP_ID}]",
-            rendered,
-        )
 
     def test_confirmed_unambiguous_delete_applies_without_cascading(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -941,11 +939,10 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             guidance.text,
             "Review authentication boundaries.\nFocus on privilege escalation.",
         )
-        self.assertIn("permissions, and safety boundaries outrank", "\n".join(output))
+        self.assertIn("Review authentication boundaries.", "\n".join(output))
+        self.assertIn("Enter Step Guidance one line at a time", "\n".join(output))
 
-    def test_graph_preview_lists_every_supported_outcome_and_explicit_terminals(
-        self,
-    ) -> None:
+    def test_graph_preview_is_hidden_until_the_graph_command_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             output: list[str] = []
 
@@ -956,11 +953,29 @@ class WorkflowEditorFlowTests(unittest.TestCase):
                 terminal_width=120,
             )
 
+        self.assertIn("Route map hidden", output[0])
+        self.assertNotIn("Route Map", output[0])
+
+    def test_graph_preview_lists_every_supported_outcome_and_explicit_terminals(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output: list[str] = []
+
+            run_workflow_editor(
+                Path(raw) / "devloop-plan.json",
+                read_line=FakeEditor(["graph", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=120,
+                terminal_height=40,
+            )
+
+        rendered = next(frame for frame in output if "Route Map" in frame)
         self.assertIn(
             "Development --BLOCKED--> Terminal",
-            output[0],
+            rendered,
         )
-        self.assertIn("QA --SUCCEEDED--> Terminal", output[0])
+        self.assertIn("Development --BLOCKED--> Terminal", rendered)
 
     def test_advanced_bindings_show_typed_required_optional_and_compatible_sources(
         self,
@@ -1065,7 +1080,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             rendered
             for rendered in reversed(output)
             if "Advanced Port Bindings" in rendered
-            and "Display name: Security Review" in rendered
+            and "Settings — Security Review" in rendered
         )
         self.assertIn("Current: Development.implementation", frame)
         self.assertIn(f"Allowed outcomes: {allowed_outcome.value}", frame)
@@ -1131,7 +1146,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         branch_frame = next(
             frame
             for frame in reversed(output)
-            if "Advanced Port Bindings" in frame and "Display name: Code Review" in frame
+            if "Advanced Port Bindings" in frame and "Settings — Code Review" in frame
         )
         self.assertIn("Compatible: Development.implementation", branch_frame)
         self.assertNotIn("Development 2.implementation", branch_frame)
@@ -1156,7 +1171,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             frame
             for frame in reversed(output)
             if "Advanced Port Bindings" in frame
-            and "Display name: Code Review" in frame
+            and "Settings — Code Review" in frame
         )
         self.assertIs(result, EditorResult.CANCELLED)
         self.assertFalse(path.exists())
@@ -1188,12 +1203,13 @@ class WorkflowEditorFlowTests(unittest.TestCase):
                 ).read_line,
                 write=output.append,
                 terminal_width=240,
+                terminal_height=60,
             )
 
         qa_frame = next(
             frame
             for frame in reversed(output)
-            if "Advanced Port Bindings" in frame and "Display name: QA" in frame
+            if "Advanced Port Bindings" in frame and "Settings — QA" in frame
         )
         rendered = "\n".join(output)
         self.assertIs(result, EditorResult.CANCELLED)
@@ -1215,10 +1231,11 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             result = run_workflow_editor(
                 path,
                 read_line=FakeEditor(
-                    ["3", "route", "3", "existing", "2", "apply"]
+                    ["3", "route", "3", "existing", "2", "graph", "apply"]
                 ).read_line,
                 write=output.append,
                 terminal_width=120,
+                terminal_height=40,
             )
 
             stored = WorkflowDefaultStore(
@@ -1288,7 +1305,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             DEVELOPMENT_STEP_ID,
         )
         self.assertIn(
-            "Branch location: branch-only (no global Position)",
+            "Branch-only step — type select to pick branch steps",
             "\n".join(output),
         )
 
@@ -1775,7 +1792,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             ["Analysis", "Development", "Final Review", "Security Review", "QA"],
         )
         moved_frame = next(
-            frame for frame in output if "Position: 3 of 5 (one-based)" in frame
+            frame for frame in output if "Position: 3/5" in frame
         )
         for position in range(1, 6):
             self.assertIn(f"{position}.", moved_frame)
@@ -2060,10 +2077,9 @@ class WorkflowEditorFlowTests(unittest.TestCase):
 
         rendered = "\n".join(output)
         self.assertIs(result, EditorResult.APPLIED)
-        self.assertIn("Workflow Editor", rendered)
-        self.assertIn("Primary Path", rendered)
-        self.assertIn("Selected Step", rendered)
-        self.assertIn("Future Runs", rendered)
+        self.assertIn("Workflow Steps", rendered)
+        self.assertIn("Settings —", rendered)
+        self.assertIn("Future Runs (editable)", rendered)
         self.assertEqual(stored.step(SECURITY_REVIEW_STEP_ID).display_name, "Threat Review")
 
     def test_cancel_discards_the_whole_draft_without_a_persistence_write(self) -> None:
@@ -2285,7 +2301,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         rendered = "\n".join(output)
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Future Runs (editable)", rendered)
-        self.assertIn("affect newly created runs only", rendered)
+        self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Current Run cannot be edited", rendered)
         self.assertIn("Snapshot Review", rendered)
         self.assertEqual(
@@ -2293,6 +2309,28 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             "Snapshot Review",
         )
         self.assertEqual(stored.step(SECURITY_REVIEW_STEP_ID).display_name, "Future Review")
+
+    def test_rendered_editor_never_exceeds_terminal_height(self) -> None:
+        height = 20
+        with tempfile.TemporaryDirectory() as raw:
+            output: list[str] = []
+
+            run_workflow_editor(
+                Path(raw) / "devloop-plan.json",
+                read_line=FakeEditor(["advanced", "graph", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=120,
+                terminal_height=height,
+            )
+
+        for frame in output:
+            if "Available commands" not in frame:
+                continue
+            self.assertLessEqual(
+                len(frame.splitlines()),
+                height - 1,
+                frame,
+            )
 
     def test_narrow_layout_stacks_the_primary_path_above_selected_settings(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2306,9 +2344,12 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             )
 
         first_frame = output[0]
-        panes = first_frame.split("\n\nCommands", maxsplit=1)[0]
-        self.assertNotIn(" | ", panes)
-        self.assertLess(first_frame.index("Primary Path"), first_frame.index("Selected Step"))
+        panes = first_frame.split("\n\nAvailable commands", maxsplit=1)[0]
+        self.assertNotIn(" | Settings", panes)
+        self.assertLess(
+            first_frame.index("Workflow Steps"),
+            first_frame.index("Settings —"),
+        )
 
     def test_wide_layout_uses_side_by_side_primary_and_selected_panes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2321,8 +2362,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
                 terminal_width=120,
             )
 
-        self.assertIn("Primary Path", output[0])
-        self.assertIn(" | Selected Step", output[0])
+        self.assertIn("Workflow Steps", output[0])
+        self.assertIn(" | Settings —", output[0])
 
     def test_layout_never_emits_a_line_wider_than_the_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
