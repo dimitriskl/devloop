@@ -1,0 +1,261 @@
+# Install or update the portable Dev Loop bundle.
+#
+# Quick install:
+#   irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+#
+# Update an existing install:
+#   irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+#
+# Environment overrides:
+#   DEVLOOP_INSTALL_DIR  bundle location (skips prompt when set)
+#   DEVLOOP_BIN_DIR      command directory (default: %USERPROFILE%\.local\bin)
+#   DEVLOOP_REPO_URL     git clone URL (default: https://github.com/dimitriskl/devloop.git)
+#   DEVLOOP_REF          branch or tag (default: main)
+
+[CmdletBinding()]
+param(
+    [string] $InstallDir,
+    [string] $BinDir = $(if ($env:DEVLOOP_BIN_DIR) { $env:DEVLOOP_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }),
+    [string] $RepoUrl = $(if ($env:DEVLOOP_REPO_URL) { $env:DEVLOOP_REPO_URL } else { 'https://github.com/dimitriskl/devloop.git' }),
+    [string] $Ref = $(if ($env:DEVLOOP_REF) { $env:DEVLOOP_REF } else { 'main' }),
+    [switch] $NoSkills,
+    [switch] $NoBinLinks,
+    [switch] $Help
+)
+
+$ErrorActionPreference = 'Stop'
+$DefaultInstallDir = 'C:\devloop'
+
+function Write-InstallLog {
+    param([string] $Message)
+    Write-Host "devloop-install: $Message"
+}
+
+function Show-Usage {
+    @'
+Usage: devloop.ps1 [options]
+
+Install or update the portable Dev Loop bundle.
+
+Options:
+  -InstallDir PATH   Install directory (skips prompt; default: C:\devloop)
+  -BinDir PATH       Directory for devloop commands (default: %USERPROFILE%\.local\bin)
+  -Ref REF           Git branch or tag (default: main)
+  -RepoUrl URL       Git repository URL
+  -NoSkills          Skip copying bundled Codex skills and agents
+  -NoBinLinks         Skip creating devloop command launchers
+  -Help              Show this help
+
+Environment:
+  DEVLOOP_INSTALL_DIR, DEVLOOP_BIN_DIR, DEVLOOP_REPO_URL, DEVLOOP_REF
+
+Examples:
+  irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+  .\install\devloop.ps1 -Ref main
+'@ | Write-Host
+}
+
+function Assert-CommandAvailable {
+    param(
+        [string] $Name,
+        [string] $Hint
+    )
+
+    if ($null -eq (Get-Command $Name -ErrorAction SilentlyContinue)) {
+        throw "devloop-install: error: $Hint"
+    }
+}
+
+function Get-DevLoopPython {
+    foreach ($candidate in @('python', 'python3', 'py')) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($null -eq $command) {
+            continue
+        }
+
+        try {
+            & $candidate -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return $candidate
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    throw 'devloop-install: error: Python 3.10+ is required. Install Python and rerun this installer.'
+}
+
+function Resolve-InstallDir {
+    if ($env:DEVLOOP_INSTALL_DIR) {
+        return $env:DEVLOOP_INSTALL_DIR
+    }
+    if ($PSBoundParameters.ContainsKey('InstallDir')) {
+        if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+            return $DefaultInstallDir
+        }
+        return $InstallDir
+    }
+
+    $reply = Read-Host "Install directory [$DefaultInstallDir]"
+    if ([string]::IsNullOrWhiteSpace($reply)) {
+        return $DefaultInstallDir
+    }
+    return $reply
+}
+
+function Sync-Bundle {
+    if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
+        Write-InstallLog "Updating existing install at $InstallDir"
+        & git -C $InstallDir fetch --depth 1 origin $Ref
+        if ($LASTEXITCODE -ne 0) {
+            throw "devloop-install: error: git fetch failed for $InstallDir"
+        }
+        & git -C $InstallDir reset --hard FETCH_HEAD
+        if ($LASTEXITCODE -ne 0) {
+            throw "devloop-install: error: git reset failed for $InstallDir"
+        }
+        & git -C $InstallDir clean -fd
+        if ($LASTEXITCODE -ne 0) {
+            throw "devloop-install: error: git clean failed for $InstallDir"
+        }
+        return
+    }
+
+    if (Test-Path -LiteralPath $InstallDir) {
+        throw "devloop-install: error: Install directory exists but is not a git checkout: $InstallDir"
+    }
+
+    Write-InstallLog "Installing Dev Loop to $InstallDir"
+    $parent = Split-Path -Parent $InstallDir
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+
+    & git clone --depth 1 --branch $Ref $RepoUrl $InstallDir
+    if ($LASTEXITCODE -ne 0) {
+        if (Test-Path -LiteralPath $InstallDir) {
+            Remove-Item -LiteralPath $InstallDir -Recurse -Force
+        }
+        & git clone --depth 1 $RepoUrl $InstallDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "devloop-install: error: git clone failed for $RepoUrl"
+        }
+        & git -C $InstallDir checkout -f $Ref
+        if ($LASTEXITCODE -ne 0) {
+            throw "devloop-install: error: git checkout failed for ref $Ref"
+        }
+    }
+}
+
+function Install-BundledSkills {
+    if ($NoSkills) {
+        return
+    }
+
+    Write-InstallLog 'Installing bundled Codex skills and agent references'
+    & (Join-Path $InstallDir 'install\install-skills.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'devloop-install: error: install-skills.ps1 failed'
+    }
+}
+
+function Test-PathInUserPath {
+    param([string] $Directory)
+
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ([string]::IsNullOrWhiteSpace($userPath)) {
+        return $false
+    }
+
+    return ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }).Count -gt 0
+}
+
+function Add-BinDirToUserPath {
+    if (Test-PathInUserPath -Directory $BinDir) {
+        return
+    }
+
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $updated = if ([string]::IsNullOrWhiteSpace($userPath)) {
+        $BinDir
+    }
+    else {
+        "$BinDir;$userPath"
+    }
+    [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
+    Write-InstallLog "Added $BinDir to the user PATH. Open a new terminal to use devloop commands."
+}
+
+function New-CommandLauncher {
+    param(
+        [string] $Name,
+        [string] $ScriptPath
+    )
+
+    $launcher = Join-Path $BinDir "$Name.cmd"
+    $content = @"
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "$ScriptPath" %*
+"@
+  Set-Content -LiteralPath $launcher -Value $content -Encoding ASCII
+}
+
+function Install-CommandLaunchers {
+    if ($NoBinLinks) {
+        return
+    }
+
+    Write-InstallLog "Creating command launchers in $BinDir"
+    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    New-CommandLauncher -Name 'devloop' -ScriptPath (Join-Path $InstallDir 'bin\devloop.ps1')
+    New-CommandLauncher -Name 'devloop-plan' -ScriptPath (Join-Path $InstallDir 'bin\devloop-plan.ps1')
+    Add-BinDirToUserPath
+}
+
+function Show-NextSteps {
+    $python = Get-DevLoopPython
+    $pythonVersion = & $python --version 2>&1
+
+    Write-Host ''
+    Write-Host 'Dev Loop is installed at:'
+    Write-Host "  $InstallDir"
+    Write-Host ''
+    Write-Host 'Commands:'
+    Write-Host '  devloop --help'
+    Write-Host '  devloop-plan --help'
+    Write-Host ''
+
+    if (-not $NoBinLinks -and -not (Test-PathInUserPath -Directory $BinDir)) {
+        Write-Host 'Add this directory to your PATH:'
+        Write-Host "  $BinDir"
+        Write-Host ''
+    }
+
+    if ($null -eq (Get-Command codex -ErrorAction SilentlyContinue)) {
+        Write-Host 'Codex CLI was not found on PATH. Install and authenticate Codex before running Dev Loop:'
+        Write-Host '  codex --version'
+        Write-Host '  codex login'
+        Write-Host ''
+    }
+
+    Write-Host 'Optional isolated CodexCLI install from the bundle checkout:'
+    Write-Host "  cd `"$InstallDir`" && uv tool install ."
+    Write-Host ''
+    Write-Host "Verified Python:"
+    Write-Host "  $pythonVersion"
+}
+
+if ($Help) {
+    Show-Usage
+    return
+}
+
+Assert-CommandAvailable -Name 'git' -Hint 'Git is required. Install Git and rerun this installer.'
+[void](Get-DevLoopPython)
+$InstallDir = Resolve-InstallDir
+Sync-Bundle
+Install-BundledSkills
+Install-CommandLaunchers
+Show-NextSteps

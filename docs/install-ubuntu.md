@@ -1,35 +1,48 @@
 # Ubuntu Install
 
-For a plain setup guide, start with `docs/new-pc-setup.md`.
+Start with the [README Install section](../README.md#install-dev-loop).
 
-1. Copy the whole `devloop` folder to the target machine.
-2. Install Python 3.10 or later and make sure `python3 --version` prints a version.
-3. Install and authenticate Codex CLI.
-4. Install Git.
-5. Install .NET 10 SDK if the target repository or SQL MCP needs .NET builds.
-6. Make scripts executable:
+## Prerequisites
 
-```bash
-chmod +x ./bin/devloop.sh
-chmod +x ./bin/devloop-plan.sh
-chmod +x ./install/*.sh
+Install these before running the Dev Loop installer:
+
+- Python 3.10 or later
+- Git
+- Codex CLI, authenticated with `codex login`
+
+Optional: .NET 10 SDK if the target repository or SQL MCP needs .NET builds.
+
+## Download and run
+
+Download one installer script:
+
+```text
+https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh
 ```
 
-7. Install copied skills and agents if you want them available globally:
+Run it:
 
 ```bash
-chmod +x ./bin/devloop.sh
-chmod +x ./bin/devloop-plan.sh
-chmod +x ./install/*.sh
-./install/install-skills.sh
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh | bash
 ```
 
-Verify:
+The installer asks where to install Dev Loop. Press Enter for `~/devloop`, or
+type another path.
+
+Re-run the same command to update an existing install.
+
+## Verify
+
+Open a new terminal, then:
 
 ```bash
 python3 --version
 codex --version
 git --version
-./bin/devloop.sh --help
-./bin/devloop-plan.sh --help
+devloop --help
+devloop-plan --help
 ```
+
+## Manual setup
+
+If you prefer to copy the bundle yourself, use [new-pc-setup.md](new-pc-setup.md).

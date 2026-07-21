@@ -14,6 +14,97 @@
 
 Portable Codex development-loop runner for local PRD and issue packs.
 
+## Install Dev Loop
+
+You do **not** clone or download this repository by hand. Download **one
+installer script**, run it, and it pulls the bundle for you.
+
+### Install these first
+
+| Requirement | Check |
+| --- | --- |
+| Python 3.10+ | `python --version` or `python3 --version` |
+| Git | `git --version` |
+| Codex CLI, signed in | `codex --version` then `codex login` |
+
+Optional: .NET 10 SDK only if your target project or the SQL diagnostics MCP
+needs .NET builds.
+
+### Download and run
+
+| Platform | Installer script |
+| --- | --- |
+| Linux / macOS | [install/devloop.sh](https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh) |
+| Windows | [install/devloop.ps1](https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1) |
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh | bash
+```
+
+Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+```
+
+Prefer to download the script first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh -o devloop-install.sh
+chmod +x devloop-install.sh
+./devloop-install.sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 -OutFile devloop-install.ps1
+.\devloop-install.ps1
+```
+
+### What the installer does
+
+1. Asks where to install Dev Loop.
+2. Clones or updates the bundle from GitHub into that folder.
+3. Copies bundled Codex skills and agent references into your Codex home folder.
+4. Adds `devloop` and `devloop-plan` commands to your user PATH.
+
+Press Enter to accept the default install location:
+
+- Linux / macOS: `~/devloop`
+- Windows: `C:\devloop`
+
+Commands are linked into:
+
+- Linux / macOS: `~/.local/bin`
+- Windows: `%USERPROFILE%\.local\bin`
+
+### Update
+
+Run the same installer command again. Enter the same install path when prompted,
+or press Enter if you kept the default.
+
+Non-interactive install or update:
+
+```bash
+./devloop-install.sh --dir ~/devloop
+```
+
+```powershell
+.\devloop-install.ps1 -InstallDir C:\devloop
+```
+
+### Verify
+
+Open a new terminal after install, then:
+
+```bash
+devloop --help
+devloop-plan --help
+```
+
+More detail: [docs/new-pc-setup.md](docs/new-pc-setup.md).
+
 ## Two Separate Applications
 
 This repository contains two applications. They share some source packages but
@@ -96,20 +187,6 @@ The portable Dev Loop has two entrypoints:
 
 Use `devloop-plan` when you still need to decide what to build. Use `devloop`
 when `prd/<change>/<change>.md` and `prd/<change>/issues/README.md` already exist.
-
-## First Setup On A New PC
-
-Read this first:
-
-- `docs/new-pc-setup.md`
-- `docs/how-to-use.md`
-
-Main prerequisites:
-
-- Python 3.10 or later. The runner will not start without it.
-- Codex CLI installed and authenticated.
-- Git.
-- .NET 10 SDK only when the target repo or SQL MCP needs .NET builds.
 
 ## Quick Start: Existing PRD And Issues
 
