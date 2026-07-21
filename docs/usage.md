@@ -21,8 +21,9 @@ Ubuntu/macOS:
 ./bin/devloop-plan.sh --repo /path/to/project
 ```
 
-Without `--goal` or `--prd`, startup offers a new planning session or a catalog
-of unfinished PRDs. During planning, `/resume` opens the same catalog. Selecting
+Without `--goal` or `--prd`, startup opens a replacing menu with a new planning
+session, a catalog of unfinished PRDs, Workflow options (the same editor as
+`/options`), or Exit. During planning, `/resume` opens the same catalog. Selecting
 an entry goes to the development handoff and preserves the existing issue/pass
 resume behavior from its loop-state file.
 
@@ -93,10 +94,16 @@ Ubuntu/Linux:
 ./bin/devloop.sh --prd /home/you/repo/prd/feature/feature.md --issues /home/you/repo/prd/feature/issues/README.md --start-issue 0004
 ```
 
-Blocked issues are retried after the normal run. Each retry round starts a clean
-Codex attempt for one blocked issue at a time and passes only a compact blocker
-summary into the coder prompt. Defaults are three retry rounds and one pass per
-clean retry.
+Dependencies are read only from local Markdown links under each issue's
+`## Blocked by` heading. A dependency is ready only after its complete workflow
+is `COMPLETED`; index order breaks ties among ready issues. Descendants of a
+blocked issue are shown as `WAITING_ON_DEPENDENCY` and receive no Codex calls,
+while independent ready branches continue.
+
+After normal scheduling has no unused ready work, Blocker Resolution allocates
+one additional workflow pass per ready blocker per round, in issue-index order.
+The default and hard maximum are five additional passes per blocker. The graph
+is recomputed after every pass, so newly unlocked normal work runs immediately.
 
 ```powershell
 .\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --all --blocked-retry-rounds 5
@@ -107,6 +114,12 @@ Disable blocked retries:
 ```powershell
 .\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --all --no-blocked-retry
 ```
+
+If Codex reports exhausted usage, invalid authentication, or service
+unavailability, Dev Loop prints `RUN PAUSED` and stops all scheduling without
+charging the active issue. Restore availability and rerun the identical command
+to resume its persisted issue, workflow step, pass, phase, and remaining
+budgets.
 
 Preview prompts without invoking Codex:
 

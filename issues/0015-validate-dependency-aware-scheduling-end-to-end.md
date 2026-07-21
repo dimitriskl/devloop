@@ -60,3 +60,17 @@ writes a non-secret result log; do not launch it from an agent session.
 - User stories 32–34
 - User stories 37–40
 
+## Implementation Notes
+
+Completed: [x]
+
+Integrated the dependency scheduler with the portable Bash/PowerShell shared
+Python runner, dashboard, append-only output, loop JSON/Markdown state, resume,
+bounded exhaustion, and documentation. No CodexCLI implementation module was
+changed.
+
+Validation passed with the complete standard-library suite, redirected-bytecode
+Python compilation, Bash syntax, repeatable wrapper dry runs, issue-pack graph
+validation, and `git diff --check`. PowerShell (`pwsh`) is unavailable on this
+Ubuntu host, so no native PowerShell execution is claimed; both wrappers enter
+the same verified Python scheduler.

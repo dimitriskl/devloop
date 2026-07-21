@@ -4,11 +4,18 @@ import argparse
 import json
 import shutil
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .codex_runner import CodexRunner, RoleResult
+from .codex_runner import CodexRunner, RoleResult, RunWideBlockerError
 from .issue_pack import Issue, find_repo_root, parse_issue_index, select_issues
+from .issue_scheduler import (
+    DependencyScheduler,
+    IssueDependencyGraph,
+    SchedulingProjection,
+    SchedulingPhase,
+)
 from .lineeditor import LineEditor
 from .model_catalog import (
     CatalogDiscoveryError,
@@ -27,6 +34,7 @@ from .portable_workflow import (
     default_portable_component_catalog,
     default_portable_workflow,
     load_portable_workflow,
+    parse_issue_status,
     preflight_codex_execution_settings,
 )
 from .self_improvement_wiki import (
@@ -58,6 +66,207 @@ _PROMPT_EDITOR: LineEditor | None = None
 _MAX_ISSUE_IDENTIFIER_LENGTH = 64
 _MAX_ISSUE_TITLE_LENGTH = 160
 _MAX_ATTEMPT_LABEL_LENGTH = 80
+DEFAULT_BLOCKER_RESOLUTION_PASSES = 5
+
+
+@dataclass(frozen=True)
+class DependencyScheduleResult:
+    completed: bool
+    unresolved_blockers: tuple[str, ...] = ()
+    waiting_dependencies: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+def execute_dependency_schedule(
+    *,
+    issues: list[Issue],
+    graph: IssueDependencyGraph,
+    state_writer: LoopStateWriter,
+    execute_issue: Callable[[Issue, SchedulingPhase, int], RoleResult],
+    projection_callback: Callable[[SchedulingProjection], None] | None = None,
+    allow_blocker_resolution: bool = True,
+    blocker_resolution_passes: int = 5,
+    simulation: bool = False,
+) -> DependencyScheduleResult:
+    issue_by_number = {issue.number: issue for issue in issues}
+    scheduler = DependencyScheduler(
+        graph,
+        selected_issue_numbers=issue_by_number,
+        blocker_resolution_passes=blocker_resolution_passes,
+    )
+    selected_numbers = frozenset(issue_by_number)
+    session_completed = {
+        node.number for node in graph.nodes if node.issue.completed
+    }
+    session_completed.update(
+        issue.number
+        for issue in issues
+        if parse_issue_status(state_writer.issue_state(issue).get("status"))
+        is IssueStatus.COMPLETED
+    )
+    last_projection_signature: tuple[object, ...] | None = None
+    simulated_normal_attempted: set[str] = set()
+
+    while True:
+        normal_attempted = (
+            set(simulated_normal_attempted)
+            if simulation
+            else set(state_writer.normal_attempted_issues())
+        )
+        non_retryable: set[str] = set()
+        if not simulation:
+            for issue in issues:
+                status = parse_issue_status(
+                    state_writer.issue_state(issue).get("status")
+                )
+                if status in {
+                    IssueStatus.BLOCKED,
+                    IssueStatus.FAILED,
+                    IssueStatus.CHANGES_REQUESTED,
+                    IssueStatus.COMPLETED,
+                    IssueStatus.CANCELLED,
+                    IssueStatus.WAITING_FOR_INPUT,
+                }:
+                    normal_attempted.add(issue.number)
+                if status in {
+                    IssueStatus.CANCELLED,
+                    IssueStatus.WAITING_FOR_INPUT,
+                }:
+                    non_retryable.add(issue.number)
+
+        additional_passes = {} if simulation else state_writer.additional_passes()
+        projection = scheduler.project(
+            completed=session_completed,
+            normal_attempted=normal_attempted,
+            additional_passes=additional_passes,
+            non_retryable=non_retryable,
+            allow_blocker_resolution=allow_blocker_resolution,
+        )
+        state_writer.record_dependency_projection(
+            issues,
+            ready=(node.number for node in projection.ready),
+            waiting=dict(projection.waiting_dependencies),
+            phase=projection.phase,
+        )
+        projection_signature = (
+            projection.next_normal.number if projection.next_normal else None,
+            projection.next_blocker.number if projection.next_blocker else None,
+            projection.blocker_round,
+            tuple(node.number for node in projection.ready),
+            tuple(projection.waiting_dependencies.items()),
+            tuple(node.number for node in projection.exhausted_blockers),
+        )
+        if (
+            projection_callback is not None
+            and projection_signature != last_projection_signature
+        ):
+            projection_callback(projection)
+        last_projection_signature = projection_signature
+
+        active = None if simulation else state_writer.active_scheduling_attempt()
+        if active is not None:
+            active_issue = issue_by_number.get(active["issue"])
+            if active_issue is None:
+                raise ValueError(
+                    "Active scheduling attempt references an unselected issue."
+                )
+            active_status = parse_issue_status(
+                state_writer.issue_state(active_issue).get("status")
+            )
+            if active_status is IssueStatus.COMPLETED:
+                state_writer.complete_scheduling_attempt(
+                    active_issue,
+                    outcome=IssueStatus.COMPLETED,
+                )
+                session_completed.add(active_issue.number)
+                continue
+
+        if selected_numbers.issubset(session_completed):
+            return DependencyScheduleResult(completed=True)
+
+        if active is not None:
+            issue = issue_by_number.get(active["issue"])
+            assert issue is not None
+            phase = SchedulingPhase(active["phase"])
+            ordinal = active["ordinal"]
+        elif projection.next_normal is not None:
+            issue = issue_by_number[projection.next_normal.number]
+            phase = SchedulingPhase.NORMAL_SCHEDULING
+            ordinal = 1
+            if not simulation:
+                state_writer.reserve_scheduling_attempt(
+                    issue,
+                    phase=phase,
+                    ordinal=ordinal,
+                )
+        elif allow_blocker_resolution and projection.next_blocker is not None:
+            issue = issue_by_number[projection.next_blocker.number]
+            phase = SchedulingPhase.BLOCKER_RESOLUTION
+            ordinal = projection.blocker_round or 1
+            if not simulation:
+                state_writer.reserve_scheduling_attempt(
+                    issue,
+                    phase=phase,
+                    ordinal=ordinal,
+                )
+        else:
+            return DependencyScheduleResult(
+                completed=False,
+                unresolved_blockers=tuple(
+                    node.number
+                    for node in projection.ready
+                    if node.number in normal_attempted
+                ),
+                waiting_dependencies=projection.waiting_dependencies,
+            )
+
+        result = execute_issue(issue, phase, ordinal)
+        persisted_outcome = parse_issue_status(
+            state_writer.issue_state(issue).get("status")
+        )
+        if persisted_outcome in {
+            IssueStatus.CANCELLED,
+            IssueStatus.WAITING_FOR_INPUT,
+        }:
+            if not simulation:
+                state_writer.release_scheduling_attempt(
+                    issue,
+                    outcome=persisted_outcome,
+                )
+            continue
+        outcome = (
+            persisted_outcome
+            if persisted_outcome in {
+                IssueStatus.COMPLETED,
+                IssueStatus.CHANGES_REQUESTED,
+                IssueStatus.BLOCKED,
+                IssueStatus.FAILED,
+            }
+            else {
+                "PASS": IssueStatus.COMPLETED,
+                "FAIL": IssueStatus.FAILED,
+                "BLOCKED": IssueStatus.BLOCKED,
+            }.get(result.status.upper(), IssueStatus.BLOCKED)
+        )
+        if simulation:
+            simulated_normal_attempted.add(issue.number)
+        else:
+            state_writer.complete_scheduling_attempt(issue, outcome=outcome)
+        if outcome is IssueStatus.COMPLETED:
+            session_completed.add(issue.number)
+
+
+def report_unresolved_dependency_cut(result: DependencyScheduleResult) -> None:
+    blockers = ", ".join(result.unresolved_blockers) or "none"
+    print(
+        f"Blocker Resolution exhausted; unresolved root blockers: {blockers}",
+        file=sys.stderr,
+    )
+    for issue_number, dependencies in result.waiting_dependencies.items():
+        waiting_on = ", ".join(dependencies)
+        print(
+            f"  {issue_number} WAITING_ON_DEPENDENCY: {waiting_on}",
+            file=sys.stderr,
+        )
 
 
 def main(
@@ -91,7 +300,11 @@ def main(
 
     source_repo = find_repo_root(issues_index.parent)
     source_branch = git_current_branch(source_repo)
-    source_issues = parse_issue_index(issues_index)
+    try:
+        source_issues = parse_issue_index(issues_index)
+        source_issue_graph = IssueDependencyGraph(source_issues)
+    except ValueError as exc:
+        parser.error(f"Issue dependency preflight failed: {exc}")
 
     if not source_issues:
         parser.error(f"No local issue links were found in {issues_index}")
@@ -107,6 +320,11 @@ def main(
         run_all=args.all,
         start_issue=args.start_issue,
     )
+
+    try:
+        source_issue_graph.validate_selection(selected_source_issues)
+    except ValueError as exc:
+        parser.error(f"Issue selection preflight failed: {exc}")
 
     if not selected_source_issues:
         print("No pending issues selected.")
@@ -209,8 +427,26 @@ def main(
     )
     print(f"Loop state: {state_writer.board_path}")
 
-    overall_status = 0
-    blocked_issues: dict[str, Issue] = {}
+    persisted_issue_states = state_writer.state.get("issues", {})
+    seeded_issue_history = tuple(
+        statusui.IssueResultSummary(
+            issue_number=issue.number,
+            status=statusui.DashboardStatus.PASS,
+            pass_number=1,
+            elapsed_seconds=0.0,
+        )
+        for issue in source_issues
+        if issue.completed
+        or (
+            isinstance(persisted_issue_states, dict)
+            and isinstance(persisted_issue_states.get(issue.number), dict)
+            and parse_issue_status(
+                persisted_issue_states[issue.number].get("status")
+            )
+            is IssueStatus.COMPLETED
+        )
+    )
+
     delivery_dashboard = (
         None
         if args.dry_run
@@ -219,15 +455,46 @@ def main(
             issue_title=issues[0].title,
             position=1,
             total=len(issues),
+            issue_history=seeded_issue_history,
         )
     )
-    for position, issue in enumerate(issues, start=1):
-        issue_result = run_issue(
+    current_schedule_position = 1
+
+    def execute_scheduled_issue(
+        issue: Issue,
+        phase: SchedulingPhase,
+        ordinal: int,
+    ) -> RoleResult:
+        position = current_schedule_position
+        blocker_resolution = phase is SchedulingPhase.BLOCKER_RESOLUTION
+        attempt_label = (
+            f"blocker-resolution-{ordinal}" if blocker_resolution else None
+        )
+        if blocker_resolution:
+            report_blocker_resolution_start(
+                delivery_dashboard,
+                issue.number,
+                ordinal,
+                blocker_resolution_budget,
+            )
+        result = run_issue(
             issue=issue,
             runner=runner,
             state_writer=state_writer,
-            max_passes=args.max_passes,
-            progress=issue_progress_label(position, len(issues), issue.number),
+            max_passes=1 if blocker_resolution else args.max_passes,
+            initial_fix_list=(
+                build_clean_retry_fix_list(state_writer, issue, ordinal)
+                if blocker_resolution
+                else None
+            ),
+            attempt_label=attempt_label,
+            retry_round=ordinal if blocker_resolution else None,
+            progress=(
+                f"blocker resolution {ordinal}/{blocker_resolution_budget} · "
+                f"{issue_progress_label(position, len(issues), issue.number)}"
+                if blocker_resolution
+                else issue_progress_label(position, len(issues), issue.number)
+            ),
             activity_progress=issue_activity_label(
                 position,
                 len(issues),
@@ -238,35 +505,84 @@ def main(
             dashboard=delivery_dashboard,
             component_catalog=component_catalog,
         )
+        state_writer.clear_run_pause()
+        return result
 
-        if issue_result.status in {"BLOCKED", "FAIL"}:
-            blocked_issues[issue.number] = issue
-            overall_status = 2
-            if not args.all:
-                break
-        else:
-            blocked_issues.pop(issue.number, None)
+    blocker_resolution_budget = min(
+        DEFAULT_BLOCKER_RESOLUTION_PASSES,
+        args.blocked_retry_rounds,
+    )
 
-    if delivery_dashboard is not None:
-        delivery_dashboard.close()
-
-    if (
-        blocked_issues
-        and not args.no_blocked_retry
-        and args.blocked_retry_rounds > 0
-        and not args.dry_run
-    ):
-        remaining_blocked = retry_blocked_issues(
-            blocked_issues=list(blocked_issues.values()),
-            runner=runner,
-            state_writer=state_writer,
-            max_passes=args.blocked_retry_max_passes,
-            max_rounds=args.blocked_retry_rounds,
-            component_catalog=component_catalog,
+    def show_scheduler_projection(projection: SchedulingProjection) -> None:
+        nonlocal current_schedule_position
+        unresolved_count = len(projection.ready) + len(
+            projection.waiting_dependencies
         )
-        overall_status = 2 if remaining_blocked else 0
-    elif blocked_issues and args.no_blocked_retry:
-        print("Blocked issue retry skipped because --no-blocked-retry was set.", file=sys.stderr)
+        current_schedule_position = min(
+            len(issues),
+            max(1, len(issues) - unresolved_count + 1),
+        )
+        if projection.phase is SchedulingPhase.NORMAL_SCHEDULING:
+            phase_label = "NORMAL SCHEDULING"
+            assert projection.next_normal is not None
+            next_issue = projection.next_normal.number
+        elif projection.phase is SchedulingPhase.BLOCKER_RESOLUTION:
+            assert projection.next_blocker is not None
+            phase_label = (
+                "BLOCKER RESOLUTION · "
+                f"round {projection.blocker_round}/{blocker_resolution_budget}"
+            )
+            next_issue = projection.next_blocker.number
+        elif projection.phase is SchedulingPhase.COMPLETE:
+            phase_label = "COMPLETE"
+            next_issue = "none"
+        else:
+            phase_label = "EXHAUSTED"
+            next_issue = "none"
+        summary = (
+            f"SCHEDULER · {phase_label} · {len(projection.ready)} ready · "
+            f"{len(projection.waiting_dependencies)} waiting · next {next_issue}"
+        )
+        if delivery_dashboard is not None:
+            delivery_dashboard.show_scheduler_status(summary)
+            if delivery_dashboard.enabled:
+                return
+        print(summary)
+
+    schedule_result: DependencyScheduleResult | None = None
+    try:
+        schedule_result = execute_dependency_schedule(
+            issues=issues,
+            graph=source_issue_graph,
+            state_writer=state_writer,
+            execute_issue=execute_scheduled_issue,
+            projection_callback=show_scheduler_projection,
+            allow_blocker_resolution=(
+                not args.no_blocked_retry
+                and args.blocked_retry_rounds > 0
+                and not args.dry_run
+            ),
+            blocker_resolution_passes=blocker_resolution_budget,
+            simulation=args.dry_run,
+        )
+    except RunWideBlockerError as error:
+        state_writer.record_run_paused(error.blocker)
+        paused_status = statusui.render_status("BLOCKED", stream=sys.stderr)
+        print(
+            f"RUN PAUSED · {paused_status} · {error.blocker.kind.value} · "
+            f"{error.blocker.summary}",
+            file=sys.stderr,
+        )
+    finally:
+        if delivery_dashboard is not None:
+            delivery_dashboard.close()
+
+    if schedule_result is None:
+        return 75
+
+    overall_status = 0 if schedule_result.completed else 2
+    if not schedule_result.completed:
+        report_unresolved_dependency_cut(schedule_result)
 
     if args.self_improvement_wiki:
         if args.dry_run:
@@ -341,12 +657,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prd", required=True, help="Path to the parent PRD Markdown file.")
     parser.add_argument("--issues", required=True, help="Path to the local issue README/index Markdown file.")
     parser.add_argument("--preset", default="presets/generic-minimal.json", help="Preset JSON path. Relative paths are resolved from the bundle root.")
-    parser.add_argument("--all", action="store_true", help="Run every pending issue in dependency order.")
+    parser.add_argument("--all", action="store_true", help="Run dependency-ready issues until completion or bounded exhaustion.")
     parser.add_argument("--start-issue", help="Issue number or filename prefix to start from.")
     parser.add_argument("--max-passes", type=int, default=3, help="Maximum coder passes per issue.")
-    parser.add_argument("--blocked-retry-rounds", type=int, default=3, help="After the normal run, retry blocked issues this many clean rounds. Default: 3.")
-    parser.add_argument("--blocked-retry-max-passes", type=int, default=1, help="Maximum coder passes inside each clean blocked retry. Default: 1.")
-    parser.add_argument("--no-blocked-retry", action="store_true", help="Do not retry blocked issues at the end of the run.")
+    parser.add_argument("--blocked-retry-rounds", type=int, default=DEFAULT_BLOCKER_RESOLUTION_PASSES, help="Maximum fair Blocker Resolution passes per ready issue, capped at 5. Default: 5.")
+    parser.add_argument("--blocked-retry-max-passes", type=int, default=1, help="Deprecated compatibility option; each Blocker Resolution attempt always consumes one workflow pass.")
+    parser.add_argument("--no-blocked-retry", action="store_true", help="Disable Blocker Resolution.")
     parser.add_argument("--dry-run", action="store_true", help="Render prompts and state without invoking Codex or modifying issues.")
     parser.add_argument("--codex", default="codex", help="Codex executable path or command name.")
     parser.add_argument("--sandbox", default="workspace-write", help="Codex sandbox mode. Default: workspace-write.")
@@ -377,6 +693,20 @@ def issue_activity_label(position: int, total: int, issue_number: str) -> str:
     return (
         f"{_terminal_issue_identifier(issue_number)} "
         f"{position}/{total} +{after_current}"
+    )
+
+
+def report_blocker_resolution_start(
+    dashboard: statusui.IssueDashboard | None,
+    issue_number: str,
+    ordinal: int,
+    budget: int,
+) -> None:
+    if dashboard is not None and dashboard.enabled:
+        return
+    print(
+        f"\nBlocker Resolution pass {ordinal}/{budget}: "
+        f"{_terminal_issue_identifier(issue_number)}"
     )
 
 
@@ -412,9 +742,6 @@ def run_issue(
     display_issue_title = _terminal_issue_title(issue.title)
     resume_cursor = IssueResumeCursor()
     fix_list = list(initial_fix_list or [])
-    if attempt_label is None and initial_fix_list is None:
-        resume_cursor = state_writer.resume_issue(issue)
-        fix_list = list(resume_cursor.fix_list)
     start_pass = resume_cursor.pass_number
     last_coder = resume_cursor.coder_result
     last_review = resume_cursor.reviewer_result
@@ -422,7 +749,44 @@ def run_issue(
     portable_recovery: PortableWorkflowCheckpoint | None = None
     completed_execution = None
     portable_workflow: WorkflowDefinition | None = None
-    if not runner.dry_run and resume_cursor == IssueResumeCursor():
+    if (
+        not runner.dry_run
+        and resume_cursor == IssueResumeCursor()
+        and state_writer.has_resolved_workflow()
+    ):
+        portable_workflow = resolve_run_workflow(state_writer, catalog)
+        completed_execution = state_writer.completed_portable_workflow(
+            issue,
+            portable_workflow,
+        )
+        portable_recovery = state_writer.resume_portable_workflow(
+            issue,
+            portable_workflow,
+        )
+        if portable_recovery is None:
+            portable_recovery = state_writer.retry_portable_workflow(
+                issue,
+                portable_workflow,
+                pass_number=start_pass,
+            )
+    if (
+        attempt_label is None
+        and initial_fix_list is None
+        and resume_cursor == IssueResumeCursor()
+        and completed_execution is None
+        and portable_recovery is None
+    ):
+        resume_cursor = state_writer.resume_issue(issue)
+        start_pass = resume_cursor.pass_number
+        last_coder = resume_cursor.coder_result
+        last_review = resume_cursor.reviewer_result
+        last_qa = resume_cursor.qa_result
+        fix_list = list(resume_cursor.fix_list)
+    if (
+        not runner.dry_run
+        and resume_cursor == IssueResumeCursor()
+        and portable_workflow is None
+    ):
         portable_workflow = resolve_run_workflow(state_writer, catalog)
         completed_execution = state_writer.completed_portable_workflow(
             issue,
@@ -928,6 +1292,10 @@ def resolve_run_workflow_with_repair(
                     40,
                     shutil.get_terminal_size(fallback=(100, 24)).columns,
                 ),
+                terminal_height=max(
+                    10,
+                    shutil.get_terminal_size(fallback=(100, 24)).lines,
+                ),
                 catalog=catalog,
                 model_catalog_loader=model_catalog_loader,
             )
@@ -1282,6 +1650,7 @@ def map_issue_to_worktree(issue: Issue, source_repo: Path, target_repo: Path) ->
         title=issue.title,
         path=mapped_path,
         completed=Issue.is_completed_file(mapped_path),
+        dependencies=issue.dependencies,
     )
 
 

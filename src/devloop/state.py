@@ -10,8 +10,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
-from .codex_runner import RoleResult
+from .codex_runner import (
+    PORTABLE_LOG_MARKER,
+    PORTABLE_LOG_TOKEN_PATTERN,
+    PORTABLE_STEP_INSTANCE_ID_PATTERN,
+    RoleResult,
+)
+from .codex_events import RunWideBlocker, RunWideBlockerKind
 from .issue_pack import Issue
+from .issue_scheduler import SchedulingPhase
 from .portable_workflow import (
     DataContractId,
     InterruptedStepAttemptRecord,
@@ -26,6 +33,7 @@ from .portable_workflow import (
     StepRuntimeStatus,
     TypedStepOutput,
     WorkflowDefinition,
+    canonical_workflow_document_hash,
     canonical_workflow_hash,
     load_portable_workflow,
     parse_issue_status,
@@ -47,7 +55,20 @@ RESUMABLE_ROLE_ORDER = {
     ResumeRole.QA.value: 2,
 }
 NORMAL_ROLE_LOG_PATTERN = re.compile(
-    r"^(?P<issue>\d+)-(?P<role>coder|reviewer|qa)-pass(?P<pass>\d+)\.last-message\.json$"
+    r"^(?P<issue>\d+)-(?:(?:.*)-)?(?P<role>coder|reviewer|qa)-pass(?P<pass>\d+)\.last-message\.json$"
+)
+# Portable artifacts include an explicit marker and their canonical Step
+# Instance ID before the role; they belong to the generic checkpoint recovery
+# path, not legacy role recovery. The role itself is intentionally open-ended:
+# a custom role such as ``security-reviewer`` must not be reduced to the legacy
+# ``reviewer`` role by the fallback pattern below.
+PORTABLE_ROLE_LOG_PATTERN = re.compile(
+    rf"^(?P<issue>\d+)-attempt-{PORTABLE_LOG_TOKEN_PATTERN}"
+    rf"(?:-{PORTABLE_LOG_TOKEN_PATTERN})?-"
+    rf"{re.escape(PORTABLE_LOG_MARKER)}-"
+    rf"{PORTABLE_LOG_TOKEN_PATTERN}-"
+    rf"{PORTABLE_STEP_INSTANCE_ID_PATTERN}-"
+    rf"{PORTABLE_LOG_TOKEN_PATTERN}-pass\d+\.last-message\.json$"
 )
 
 
@@ -69,6 +90,12 @@ class LoopStateWriter:
         self.prd_state_path: Path | None = None
         self.prd_board_path: Path | None = None
         self.state = load_existing_state(self.state_path, issues_index)
+
+    def has_resolved_workflow(self) -> bool:
+        return (
+            "resolved_workflow" in self.state
+            or "resolved_workflow_hash" in self.state
+        )
 
     def record_resolved_workflow(
         self,
@@ -99,7 +126,7 @@ class LoopStateWriter:
             raise ValueError("Loop state has no resolved portable workflow.")
         workflow = load_portable_workflow(document, catalog)
         expected_hash = self.state.get("resolved_workflow_hash")
-        actual_hash = canonical_workflow_hash(workflow)
+        actual_hash = canonical_workflow_document_hash(document)
         if expected_hash != actual_hash:
             raise ValueError("Resolved portable workflow hash does not match its content.")
         return workflow
@@ -615,6 +642,271 @@ class LoopStateWriter:
         self.add_event("run-start", {"issues": issues, "dry_run": dry_run})
         self.flush()
 
+    def record_dependency_projection(
+        self,
+        issues: Iterable[Issue],
+        *,
+        ready: Iterable[str],
+        waiting: dict[str, tuple[str, ...]],
+        phase: SchedulingPhase | None = None,
+    ) -> None:
+        ready_numbers = frozenset(ready)
+        for issue in issues:
+            issue_state = self.issue_state(issue)
+            issue_state.update({"title": issue.title, "path": str(issue.path)})
+            current_status = parse_issue_status(issue_state.get("status"))
+            if issue.number in waiting:
+                if current_status in {
+                    None,
+                    IssueStatus.PENDING,
+                    IssueStatus.READY,
+                    IssueStatus.WAITING_ON_DEPENDENCY,
+                    IssueStatus.SKIPPED,
+                }:
+                    issue_state["status"] = IssueStatus.WAITING_ON_DEPENDENCY.value
+                    issue_state["waiting_on"] = list(waiting[issue.number])
+                continue
+            issue_state.pop("waiting_on", None)
+            if issue.number in ready_numbers and current_status in {
+                None,
+                IssueStatus.PENDING,
+                IssueStatus.READY,
+                IssueStatus.WAITING_ON_DEPENDENCY,
+                IssueStatus.SKIPPED,
+            }:
+                issue_state["status"] = IssueStatus.READY.value
+        scheduler_state = self.state.setdefault("dependency_scheduler", {})
+        if phase is not None:
+            scheduler_state["phase"] = phase.value
+        scheduler_state["ready"] = sorted(ready_numbers)
+        scheduler_state["waiting"] = {
+            issue_number: list(dependencies)
+            for issue_number, dependencies in waiting.items()
+        }
+        scheduler_state["updated_at"] = now()
+        self.add_event(
+            "dependency-projection",
+            {
+                "ready": sorted(ready_numbers),
+                "waiting": sorted(waiting),
+            },
+        )
+        self.flush()
+
+    def reserve_scheduling_attempt(
+        self,
+        issue: Issue,
+        *,
+        phase: SchedulingPhase,
+        ordinal: int,
+    ) -> None:
+        if ordinal < 1:
+            raise ValueError("Scheduling attempt ordinal must be positive.")
+        if phase not in {
+            SchedulingPhase.NORMAL_SCHEDULING,
+            SchedulingPhase.BLOCKER_RESOLUTION,
+        }:
+            raise ValueError("Only executable scheduling phases can reserve attempts.")
+        scheduler_state = self.state.setdefault("dependency_scheduler", {})
+        reservation = {
+            "issue": issue.number,
+            "phase": phase.value,
+            "ordinal": ordinal,
+        }
+        active = scheduler_state.get("active_attempt")
+        if active is not None and active != reservation:
+            raise ValueError("Another scheduling attempt is already active.")
+        scheduler_state["phase"] = phase.value
+        scheduler_state["active_attempt"] = reservation
+        scheduler_state["updated_at"] = now()
+        if active is None:
+            self.add_event("scheduling-attempt-reserved", reservation)
+        self.flush()
+
+    def active_scheduling_attempt(self) -> dict[str, Any] | None:
+        scheduler_state = self.state.get("dependency_scheduler", {})
+        if not isinstance(scheduler_state, dict):
+            raise ValueError("Dependency Scheduler state must be an object.")
+        active = scheduler_state.get("active_attempt")
+        if active is None:
+            return None
+        if not isinstance(active, dict):
+            raise ValueError("Active scheduling attempt must be an object.")
+        issue = active.get("issue")
+        phase = active.get("phase")
+        ordinal = active.get("ordinal")
+        if (
+            not isinstance(issue, str)
+            or not isinstance(phase, str)
+            or not isinstance(ordinal, int)
+            or ordinal < 1
+        ):
+            raise ValueError("Active scheduling attempt is invalid.")
+        parsed_phase = SchedulingPhase(phase)
+        if parsed_phase not in {
+            SchedulingPhase.NORMAL_SCHEDULING,
+            SchedulingPhase.BLOCKER_RESOLUTION,
+        }:
+            raise ValueError("Active scheduling attempt has a terminal phase.")
+        return {"issue": issue, "phase": phase, "ordinal": ordinal}
+
+    def normal_attempted_issues(self) -> frozenset[str]:
+        scheduler_state = self.state.get("dependency_scheduler", {})
+        if not isinstance(scheduler_state, dict):
+            raise ValueError("Dependency Scheduler state must be an object.")
+        values = scheduler_state.get("normal_attempted", [])
+        if not isinstance(values, list) or not all(
+            isinstance(value, str) for value in values
+        ):
+            raise ValueError("Normal scheduling attempt history must be a list of IDs.")
+        return frozenset(values)
+
+    def additional_passes(self) -> dict[str, int]:
+        scheduler_state = self.state.get("dependency_scheduler", {})
+        if not isinstance(scheduler_state, dict):
+            raise ValueError("Dependency Scheduler state must be an object.")
+        values = scheduler_state.get("additional_passes", {})
+        if not isinstance(values, dict):
+            raise ValueError("Blocker Resolution counters must be an object.")
+        parsed: dict[str, int] = {}
+        for issue_number, count in values.items():
+            if (
+                not isinstance(issue_number, str)
+                or not isinstance(count, int)
+                or count < 0
+            ):
+                raise ValueError("Blocker Resolution counters are invalid.")
+            parsed[issue_number] = count
+        return parsed
+
+    def complete_scheduling_attempt(
+        self,
+        issue: Issue,
+        *,
+        outcome: IssueStatus,
+    ) -> None:
+        active = self.active_scheduling_attempt()
+        if active is None or active["issue"] != issue.number:
+            raise ValueError(
+                f"No active scheduling attempt exists for issue {issue.number}."
+            )
+        scheduler_state = self.state.setdefault("dependency_scheduler", {})
+        phase = SchedulingPhase(active["phase"])
+        if phase is SchedulingPhase.NORMAL_SCHEDULING:
+            attempted = sorted(self.normal_attempted_issues())
+            if issue.number not in attempted:
+                attempted.append(issue.number)
+            scheduler_state["normal_attempted"] = attempted
+        else:
+            additional = self.additional_passes()
+            additional[issue.number] = max(
+                additional.get(issue.number, 0),
+                active["ordinal"],
+            )
+            scheduler_state["additional_passes"] = additional
+        scheduler_state.setdefault("attempt_history", []).append(
+            {**active, "outcome": outcome.value, "finished_at": now()}
+        )
+        scheduler_state.pop("active_attempt", None)
+        scheduler_state["updated_at"] = now()
+        self.add_event(
+            "scheduling-attempt-completed",
+            {**active, "status": outcome.value},
+        )
+        self.flush()
+
+    def release_scheduling_attempt(
+        self,
+        issue: Issue,
+        *,
+        outcome: IssueStatus,
+    ) -> None:
+        active = self.active_scheduling_attempt()
+        if active is None or active["issue"] != issue.number:
+            raise ValueError(
+                f"No active scheduling attempt exists for issue {issue.number}."
+            )
+        scheduler_state = self.state.setdefault("dependency_scheduler", {})
+        scheduler_state.setdefault("attempt_history", []).append(
+            {
+                **active,
+                "outcome": outcome.value,
+                "consumed": False,
+                "finished_at": now(),
+            }
+        )
+        scheduler_state.pop("active_attempt", None)
+        scheduler_state["updated_at"] = now()
+        self.add_event(
+            "scheduling-attempt-released",
+            {**active, "status": outcome.value},
+        )
+        self.flush()
+
+    def record_run_paused(self, blocker: RunWideBlocker) -> None:
+        active = self.active_scheduling_attempt()
+        if active is None:
+            raise ValueError("A Run-Wide Blocker requires an active scheduling attempt.")
+        issue_state = self.state.get("issues", {}).get(active["issue"], {})
+        if not isinstance(issue_state, dict):
+            raise ValueError("Paused issue state must be an object.")
+        pause = {
+            "kind": blocker.kind.value,
+            "summary": blocker.summary,
+            "issue": active["issue"],
+            "phase": active["phase"],
+            "ordinal": active["ordinal"],
+            "step_instance_id": issue_state.get("current_step_instance_id"),
+            "pass": issue_state.get("current_pass"),
+            "paused_at": now(),
+        }
+        previous = self.state.get("run_pause")
+        pause["occurrences"] = (
+            int(previous.get("occurrences", 0)) + 1
+            if isinstance(previous, dict)
+            else 1
+        )
+        self.state["run_pause"] = pause
+        scheduler_state = self.state.setdefault("dependency_scheduler", {})
+        scheduler_state["phase"] = SchedulingPhase.RUN_PAUSED.value
+        self.add_event(
+            "run-paused",
+            {
+                "issue": active["issue"],
+                "status": blocker.kind.value,
+                "phase": active["phase"],
+                "ordinal": active["ordinal"],
+            },
+        )
+        self.flush()
+
+    def run_pause(self) -> dict[str, Any] | None:
+        pause = self.state.get("run_pause")
+        if pause is None:
+            return None
+        if not isinstance(pause, dict):
+            raise ValueError("Run pause state must be an object.")
+        kind = pause.get("kind")
+        if not isinstance(kind, str):
+            raise ValueError("Run pause kind is invalid.")
+        RunWideBlockerKind(kind)
+        return dict(pause)
+
+    def clear_run_pause(self) -> None:
+        pause = self.run_pause()
+        if pause is None:
+            return
+        self.state.pop("run_pause", None)
+        self.add_event(
+            "run-resumed",
+            {
+                "issue": pause.get("issue", ""),
+                "phase": pause.get("phase", ""),
+                "ordinal": pause.get("ordinal"),
+            },
+        )
+        self.flush()
+
     def record_issue_start(
         self,
         issue: Issue,
@@ -1116,26 +1408,43 @@ def recover_role_passes(log_root: Path, issue: Issue) -> list[dict[str, Any]]:
     if not log_root.is_dir():
         return []
 
-    recovered: list[dict[str, Any]] = []
+    recovered_by_role_pass: dict[
+        tuple[int, str], tuple[tuple[int, str], dict[str, Any]]
+    ] = {}
     for path in log_root.glob(f"{issue.number}-*-pass*.last-message.json"):
+        if PORTABLE_ROLE_LOG_PATTERN.fullmatch(path.name):
+            continue
         match = NORMAL_ROLE_LOG_PATTERN.fullmatch(path.name)
         if not match or match.group("issue") != issue.number:
             continue
         try:
+            file_stat = path.stat()
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict):
             continue
-        recovered.append(
-            {
-                "role": match.group("role"),
-                "pass": int(match.group("pass")),
-                "result": result_summary(role_result_from_state(data)),
-                "timestamp": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
-                "recovered_from": str(path),
-            }
-        )
+        role = match.group("role")
+        pass_number = int(match.group("pass"))
+        candidate = {
+            "role": role,
+            "pass": pass_number,
+            "result": result_summary(role_result_from_state(data)),
+            "timestamp": datetime.fromtimestamp(file_stat.st_mtime).isoformat(
+                timespec="seconds"
+            ),
+            "recovered_from": str(path),
+        }
+        chronology = (file_stat.st_mtime_ns, path.name)
+        role_pass = (pass_number, role)
+        previous = recovered_by_role_pass.get(role_pass)
+        if previous is None or chronology > previous[0]:
+            recovered_by_role_pass[role_pass] = (chronology, candidate)
+
+    recovered = [
+        candidate
+        for _, candidate in recovered_by_role_pass.values()
+    ]
 
     recovered.sort(
         key=lambda entry: (
@@ -1156,12 +1465,21 @@ def render_board(state: dict[str, Any]) -> str:
         "",
         "## Task Board",
         "",
-        "| Issue | Title | Status |",
-        "| --- | --- | --- |",
+        "| Issue | Title | Status | Waiting on |",
+        "| --- | --- | --- | --- |",
     ]
 
     for number, item in state.get("issues", {}).items():
-        lines.append(f"| {number} | {item.get('title', '')} | {item.get('status', '')} |")
+        waiting_on = item.get("waiting_on", [])
+        waiting_text = (
+            ", ".join(waiting_on)
+            if isinstance(waiting_on, list)
+            else ""
+        )
+        lines.append(
+            f"| {number} | {item.get('title', '')} | "
+            f"{item.get('status', '')} | {waiting_text} |"
+        )
 
     lines.extend(["", "## Events", ""])
     for event in state.get("events", []):
@@ -1186,6 +1504,38 @@ def render_board(state: dict[str, Any]) -> str:
                 "",
                 f"Current round: `{blocked_retry.get('current_round', '')}`",
                 f"Remaining issues: `{', '.join(blocked_retry.get('remaining_issues', []))}`",
+            ]
+        )
+
+    dependency_scheduler = state.get("dependency_scheduler")
+    if isinstance(dependency_scheduler, dict):
+        waiting = dependency_scheduler.get("waiting", {})
+        additional = dependency_scheduler.get("additional_passes", {})
+        lines.extend(
+            [
+                "",
+                "## Dependency Scheduler",
+                "",
+                f"Phase: `{dependency_scheduler.get('phase', '')}`",
+                f"Ready: `{', '.join(dependency_scheduler.get('ready', []))}`",
+                f"Waiting: `{', '.join(waiting) if isinstance(waiting, dict) else ''}`",
+                f"Additional passes: `{json.dumps(additional, sort_keys=True)}`",
+            ]
+        )
+
+    run_pause = state.get("run_pause")
+    if isinstance(run_pause, dict):
+        lines.extend(
+            [
+                "",
+                "## Run Paused",
+                "",
+                f"Kind: `{run_pause.get('kind', '')}`",
+                f"Issue: `{run_pause.get('issue', '')}`",
+                f"Scheduling phase: `{run_pause.get('phase', '')}`",
+                f"Workflow step: `{run_pause.get('step_instance_id', '')}`",
+                f"Pass: `{run_pause.get('pass', '')}`",
+                f"Recovery: {run_pause.get('summary', '')}",
             ]
         )
 

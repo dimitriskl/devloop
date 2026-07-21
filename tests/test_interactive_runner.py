@@ -8,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+from devloop import catalog as catalog_module
 from devloop import cli, interactive_runner
 from devloop.codex_runner import RoleResult
 from devloop.interactive_runner import HandoffParams, PlanningArtifacts
@@ -25,10 +26,12 @@ from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FastPreference,
     SECURITY_REVIEW_STEP_ID,
+    StepComponentId,
     canonical_workflow_hash,
     default_portable_component_catalog,
     default_portable_workflow,
     load_portable_workflow,
+    validate_portable_workflow_for_apply,
 )
 from devloop.state import LoopStateWriter
 from devloop.templates import BundleContext, load_preset
@@ -376,27 +379,45 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                     output.getvalue(),
                 )
 
-    def test_new_run_executes_a_replacement_analysis_step_with_a_new_id(
+    def test_new_run_executes_an_installed_replacement_analysis_step(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             state_path = root / "devloop-plan.json"
-            component_catalog = default_portable_component_catalog()
+            replacement_component_id = "example.custom-planner"
+            component_catalog = build_portable_component_catalog(
+                root,
+                {
+                    "custom-planner": {
+                        "step_adapter": "analysis",
+                        "component_id": replacement_component_id,
+                        "display_name": "Custom Planner",
+                        "skills": [],
+                        "agents": [],
+                    }
+                },
+            )
             draft = WorkflowDraft(
                 default_portable_workflow(),
                 component_catalog,
             )
-            duplicate = draft.duplicate(ANALYSIS_STEP_ID)
+            draft.change_type(
+                ANALYSIS_STEP_ID,
+                StepComponentId(replacement_component_id),
+            )
             draft.set_guidance(
-                duplicate.step_instance_id,
+                ANALYSIS_STEP_ID,
                 "Replacement planning guidance.",
             )
-            draft.delete(draft.preview_delete(ANALYSIS_STEP_ID))
+            applied = validate_portable_workflow_for_apply(
+                draft.workflow,
+                component_catalog,
+            )
             replacement = WorkflowDefaultStore(
                 state_path,
                 component_catalog,
-            ).replace(draft.workflow)
+            ).replace(applied)
             live_catalog = CodexModelCatalog(
                 models=(
                     CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
@@ -447,10 +468,13 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 result = interactive_runner._run_planning(parser, args)
 
         self.assertEqual(result, 0)
-        self.assertNotEqual(replacement.start_step_id, ANALYSIS_STEP_ID)
         self.assertEqual(
             replacement.start_step_id,
-            duplicate.step_instance_id,
+            ANALYSIS_STEP_ID,
+        )
+        self.assertEqual(
+            replacement.step(ANALYSIS_STEP_ID).component_id,
+            StepComponentId(replacement_component_id),
         )
         run_chat.assert_called_once()
         self.assertIn(
@@ -1493,8 +1517,71 @@ class PlanStateTests(unittest.TestCase):
             data = json.loads(state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(data["target_repo"], str(repo))
+        self.assertTrue(data["target_repo_confirmed"])
         self.assertEqual(data["selection"], {"planning_skills": ["grill-with-docs"]})
         self.assertEqual(data["last_worktree_parent"], str(root / "worktrees"))
+
+    def test_load_last_target_repo_ignores_legacy_target_without_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            legacy_repo = root / "repo"
+            legacy_repo.mkdir()
+            state_path = root / "devloop-plan.json"
+            state_path.write_text(
+                json.dumps({"target_repo": str(legacy_repo)}),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(interactive_runner, "plan_state_path", return_value=state_path):
+                self.assertIsNone(interactive_runner.load_last_target_repo())
+
+    def test_first_run_prompts_without_default_when_planner_state_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_path = Path(raw) / "devloop-plan.json"
+            repo = Path(raw) / "repo"
+            repo.mkdir()
+            prompts: list[str] = []
+
+            def capture_prompt(prompt: str) -> str:
+                prompts.append(prompt)
+                return str(repo)
+
+            with mock.patch.object(interactive_runner, "plan_state_path", return_value=state_path), \
+                 mock.patch.object(interactive_runner, "ask_required", side_effect=capture_prompt), \
+                 mock.patch.object(interactive_runner, "git_repo_root", return_value=repo), \
+                 mock.patch.object(interactive_runner, "save_last_target_repo") as save_target:
+                selected = interactive_runner.choose_target_repo(None)
+
+        self.assertEqual(selected, repo)
+        self.assertEqual(prompts, ["Target project root"])
+        save_target.assert_called_once_with(repo)
+
+    def test_confirmed_target_is_offered_as_default_on_later_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            repo.mkdir()
+            state_path = root / "devloop-plan.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "target_repo": str(repo),
+                        "target_repo_confirmed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            prompts: list[str] = []
+
+            with mock.patch.object(interactive_runner, "plan_state_path", return_value=state_path), \
+                 mock.patch.object(interactive_runner, "read_prompt", side_effect=lambda prompt: prompts.append(prompt) or ""), \
+                 mock.patch.object(interactive_runner, "git_repo_root", return_value=repo), \
+                 mock.patch.object(interactive_runner, "save_last_target_repo") as save_target:
+                selected = interactive_runner.choose_target_repo(None)
+
+        self.assertEqual(selected, repo)
+        self.assertEqual(prompts, [f"Target project root [{repo}]: "])
+        save_target.assert_called_once_with(repo)
 
     def test_default_worktree_path_uses_remembered_parent_when_supplied(self) -> None:
         root = Path("E:/LocalCode/eConnectorV2")
@@ -1664,14 +1751,127 @@ class ResumePlanningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             artifacts = self.make_prd_pair(root, "resume-me", completed=(False,))
+            bundle_root = Path(__file__).resolve().parents[1]
+            state_path = root / "devloop-plan.json"
+            selection = catalog_module.Selection.defaults()
             with mock.patch.object(
+                interactive_runner,
+                "render_menu_screen",
+            ), mock.patch.object(
                 interactive_runner,
                 "ask_choice",
                 side_effect=["2", "1"],
             ):
-                selected = interactive_runner.choose_startup_artifacts(root)
+                selected = interactive_runner.choose_startup_artifacts(
+                    root,
+                    bundle_root=bundle_root,
+                    selection=selection,
+                    state_path=state_path,
+                )
 
-        self.assertEqual(selected, artifacts)
+        self.assertEqual(selected.artifacts, artifacts)
+        self.assertFalse(selected.exit_requested)
+
+    def test_startup_workflow_options_opens_editor_and_returns_to_main_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bundle_root = Path(__file__).resolve().parents[1]
+            state_path = root / "devloop-plan.json"
+            selection = catalog_module.Selection.defaults()
+            with mock.patch.object(
+                interactive_runner,
+                "render_menu_screen",
+            ) as render_menu, mock.patch.object(
+                interactive_runner,
+                "ask_choice",
+                side_effect=["3", "1"],
+            ), mock.patch.object(
+                interactive_runner,
+                "run_options_menu",
+            ) as run_options_menu:
+                selected = interactive_runner.choose_startup_artifacts(
+                    root,
+                    bundle_root=bundle_root,
+                    selection=selection,
+                    state_path=state_path,
+                )
+
+        self.assertFalse(selected.exit_requested)
+        self.assertIsNone(selected.artifacts)
+        run_options_menu.assert_called_once()
+        self.assertGreaterEqual(render_menu.call_count, 2)
+
+    def test_startup_exit_quits_without_starting_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bundle_root = Path(__file__).resolve().parents[1]
+            state_path = root / "devloop-plan.json"
+            selection = catalog_module.Selection.defaults()
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(root)])
+            bundle = mock.Mock(root=bundle_root)
+            with mock.patch.object(
+                interactive_runner.BundleContext,
+                "from_file",
+                return_value=bundle,
+            ), mock.patch.object(
+                interactive_runner,
+                "plan_state_path",
+                return_value=state_path,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_target_repo",
+                return_value=root,
+            ), mock.patch.object(
+                interactive_runner,
+                "render_menu_screen",
+            ), mock.patch.object(
+                interactive_runner,
+                "ask_choice",
+                return_value="q",
+            ), mock.patch.object(
+                interactive_runner,
+                "apply_branch_strategy",
+            ) as apply_branch_strategy, mock.patch.object(
+                interactive_runner,
+                "run_planning_chat",
+            ) as run_planning_chat:
+                result = interactive_runner._run_planning(parser, args)
+
+        self.assertEqual(result, 0)
+        apply_branch_strategy.assert_not_called()
+        run_planning_chat.assert_not_called()
+
+    def test_startup_resume_menu_replaces_screen(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_prd_pair(root, "resume-me", completed=(False,))
+            bundle_root = Path(__file__).resolve().parents[1]
+            state_path = root / "devloop-plan.json"
+            selection = catalog_module.Selection.defaults()
+            with mock.patch.object(
+                interactive_runner,
+                "render_menu_screen",
+            ) as render_menu, mock.patch.object(
+                interactive_runner,
+                "ask_choice",
+                side_effect=["2", "b", "1"],
+            ):
+                selected = interactive_runner.choose_startup_artifacts(
+                    root,
+                    bundle_root=bundle_root,
+                    selection=selection,
+                    state_path=state_path,
+                )
+
+        self.assertFalse(selected.exit_requested)
+        self.assertIsNone(selected.artifacts)
+        resume_calls = [
+            call
+            for call in render_menu.call_args_list
+            if "Unfinished PRDs" in call.args
+        ]
+        self.assertEqual(len(resume_calls), 1)
 
     def test_startup_resume_skips_new_analysis_and_enters_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

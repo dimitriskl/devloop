@@ -6,18 +6,18 @@ PRD: `/home/dimitris/code/devloop/issues/configurable-workflow-steps.md`
 
 ## Task Board
 
-| Issue | Title | Status |
-| --- | --- | --- |
-| 0001 | Run Two Review Instances Through a v2 Workflow | COMPLETED |
-| 0002 | Resume and Rework Arbitrary Step Instances | Completed |
-| 0003 | Edit and Persist Future Workflow Defaults | Completed |
-| 0004 | Build and Reorder the Primary Path | BLOCKED |
-| 0005 | Edit Outcome Routes and Typed Port Bindings | BLOCKED |
-| 0006 | Choose Per-Step Codex Execution Settings | BLOCKED |
-| 0007 | Give Each Step Its Own Capabilities and Guidance | BLOCKED |
-| 0008 | Make Workflow Step Transformations Safe | BLOCKED |
-| 0009 | Show Dynamic Progress Across Every Terminal Surface | BLOCKED |
-| 0010 | Validate and Release the Configurable Workflow Experience | BLOCKED |
+| Issue | Title | Status | Waiting on |
+| --- | --- | --- | --- |
+| 0001 | Run Two Review Instances Through a v2 Workflow | COMPLETED |  |
+| 0002 | Resume and Rework Arbitrary Step Instances | Completed |  |
+| 0003 | Edit and Persist Future Workflow Defaults | Completed |  |
+| 0004 | Build and Reorder the Primary Path | CHANGES_REQUESTED |  |
+| 0005 | Edit Outcome Routes and Typed Port Bindings | BLOCKED |  |
+| 0006 | Choose Per-Step Codex Execution Settings | COMPLETED |  |
+| 0007 | Give Each Step Its Own Capabilities and Guidance | CHANGES_REQUESTED |  |
+| 0008 | Make Workflow Step Transformations Safe | BLOCKED |  |
+| 0009 | Show Dynamic Progress Across Every Terminal Surface | COMPLETED |  |
+| 0010 | Validate and Release the Configurable Workflow Experience | BLOCKED |  |
 
 ## Events
 
@@ -187,14 +187,90 @@ PRD: `/home/dimitris/code/devloop/issues/configurable-workflow-steps.md`
 - 2026-07-16T13:03:58 `issue-start` issue=0009 status= retry_round=3 attempt=clean-retry-3
 - 2026-07-16T13:04:01 `issue-start` issue=0010 status= retry_round=3 attempt=clean-retry-3
 - 2026-07-16T13:04:06 `self-improvement-wiki` issue= status=BLOCKED
+- 2026-07-16T14:34:25 `run-start` issue= status= issues=0004, 0005, 0006, 0007, 0008, 0009, 0010
+- 2026-07-16T14:34:26 `dependency-projection` issue= status=
+- 2026-07-16T14:34:26 `scheduling-attempt-reserved` issue=0004 status=
+- 2026-07-16T14:34:26 `issue-start` issue=0004 status= retry_round=1 attempt=blocker-resolution-1
+- 2026-07-16T14:47:07 `scheduling-attempt-completed` issue=0004 status=CHANGES_REQUESTED
+- 2026-07-16T14:47:07 `dependency-projection` issue= status=
+- 2026-07-16T14:47:07 `scheduling-attempt-reserved` issue=0006 status=
+- 2026-07-16T14:47:07 `issue-start` issue=0006 status= retry_round=1 attempt=blocker-resolution-1
+- 2026-07-16T15:00:28 `scheduling-attempt-completed` issue=0006 status=CHANGES_REQUESTED
+- 2026-07-16T15:00:28 `dependency-projection` issue= status=
+- 2026-07-16T15:00:28 `scheduling-attempt-reserved` issue=0007 status=
+- 2026-07-16T15:00:28 `issue-start` issue=0007 status= retry_round=1 attempt=blocker-resolution-1
+- 2026-07-16T15:10:51 `scheduling-attempt-completed` issue=0007 status=CHANGES_REQUESTED
+- 2026-07-16T15:10:51 `dependency-projection` issue= status=
+- 2026-07-16T15:10:51 `scheduling-attempt-reserved` issue=0009 status=
+- 2026-07-16T15:10:51 `issue-start` issue=0009 status= retry_round=1 attempt=blocker-resolution-1
+- 2026-07-16T15:26:34 `issue-completed` issue=0009 status= retry_round=1 attempt=blocker-resolution-1
+- 2026-07-16T15:26:34 `scheduling-attempt-completed` issue=0009 status=COMPLETED
+- 2026-07-16T15:26:34 `dependency-projection` issue= status=
+- 2026-07-16T15:26:34 `scheduling-attempt-reserved` issue=0004 status=
+- 2026-07-16T15:26:34 `issue-start` issue=0004 status= retry_round=2 attempt=blocker-resolution-2
+- 2026-07-16T15:36:52 `scheduling-attempt-completed` issue=0004 status=CHANGES_REQUESTED
+- 2026-07-16T15:36:52 `dependency-projection` issue= status=
+- 2026-07-16T15:36:52 `scheduling-attempt-reserved` issue=0006 status=
+- 2026-07-16T15:36:52 `issue-start` issue=0006 status= retry_round=2 attempt=blocker-resolution-2
+- 2026-07-16T15:51:33 `scheduling-attempt-completed` issue=0006 status=CHANGES_REQUESTED
+- 2026-07-16T15:51:33 `dependency-projection` issue= status=
+- 2026-07-16T15:51:33 `scheduling-attempt-reserved` issue=0007 status=
+- 2026-07-16T15:51:33 `issue-start` issue=0007 status= retry_round=2 attempt=blocker-resolution-2
+- 2026-07-16T16:04:36 `scheduling-attempt-completed` issue=0007 status=CHANGES_REQUESTED
+- 2026-07-16T16:04:36 `dependency-projection` issue= status=
+- 2026-07-16T16:04:36 `scheduling-attempt-reserved` issue=0004 status=
+- 2026-07-16T16:04:36 `issue-start` issue=0004 status= retry_round=3 attempt=blocker-resolution-3
+- 2026-07-16T16:17:02 `scheduling-attempt-completed` issue=0004 status=CHANGES_REQUESTED
+- 2026-07-16T16:17:02 `dependency-projection` issue= status=
+- 2026-07-16T16:17:02 `scheduling-attempt-reserved` issue=0006 status=
+- 2026-07-16T16:17:02 `issue-start` issue=0006 status= retry_round=3 attempt=blocker-resolution-3
+- 2026-07-16T16:24:10 `scheduling-attempt-completed` issue=0006 status=CHANGES_REQUESTED
+- 2026-07-16T16:24:10 `dependency-projection` issue= status=
+- 2026-07-16T16:24:10 `scheduling-attempt-reserved` issue=0007 status=
+- 2026-07-16T16:24:10 `issue-start` issue=0007 status= retry_round=3 attempt=blocker-resolution-3
+- 2026-07-16T16:37:07 `scheduling-attempt-completed` issue=0007 status=CHANGES_REQUESTED
+- 2026-07-16T16:37:07 `dependency-projection` issue= status=
+- 2026-07-16T16:37:07 `scheduling-attempt-reserved` issue=0004 status=
+- 2026-07-16T16:37:07 `issue-start` issue=0004 status= retry_round=4 attempt=blocker-resolution-4
+- 2026-07-16T16:55:21 `scheduling-attempt-completed` issue=0004 status=CHANGES_REQUESTED
+- 2026-07-16T16:55:21 `dependency-projection` issue= status=
+- 2026-07-16T16:55:21 `scheduling-attempt-reserved` issue=0006 status=
+- 2026-07-16T16:55:21 `issue-start` issue=0006 status= retry_round=4 attempt=blocker-resolution-4
+- 2026-07-16T17:07:42 `scheduling-attempt-completed` issue=0006 status=CHANGES_REQUESTED
+- 2026-07-16T17:07:42 `dependency-projection` issue= status=
+- 2026-07-16T17:07:42 `scheduling-attempt-reserved` issue=0007 status=
+- 2026-07-16T17:07:42 `issue-start` issue=0007 status= retry_round=4 attempt=blocker-resolution-4
+- 2026-07-16T17:18:15 `scheduling-attempt-completed` issue=0007 status=CHANGES_REQUESTED
+- 2026-07-16T17:18:15 `dependency-projection` issue= status=
+- 2026-07-16T17:18:15 `scheduling-attempt-reserved` issue=0004 status=
+- 2026-07-16T17:18:15 `issue-start` issue=0004 status= retry_round=5 attempt=blocker-resolution-5
+- 2026-07-16T17:33:46 `scheduling-attempt-completed` issue=0004 status=CHANGES_REQUESTED
+- 2026-07-16T17:33:46 `dependency-projection` issue= status=
+- 2026-07-16T17:33:46 `scheduling-attempt-reserved` issue=0006 status=
+- 2026-07-16T17:33:46 `issue-start` issue=0006 status= retry_round=5 attempt=blocker-resolution-5
+- 2026-07-16T17:50:13 `issue-completed` issue=0006 status= retry_round=5 attempt=blocker-resolution-5
+- 2026-07-16T17:50:13 `scheduling-attempt-completed` issue=0006 status=COMPLETED
+- 2026-07-16T17:50:13 `dependency-projection` issue= status=
+- 2026-07-16T17:50:13 `scheduling-attempt-reserved` issue=0007 status=
+- 2026-07-16T17:50:13 `issue-start` issue=0007 status= retry_round=5 attempt=blocker-resolution-5
+- 2026-07-16T17:59:57 `scheduling-attempt-completed` issue=0007 status=CHANGES_REQUESTED
+- 2026-07-16T17:59:57 `dependency-projection` issue= status=
+- 2026-07-16T18:03:04 `self-improvement-wiki` issue= status=PASS
 
 ## Blocked Retry
 
 Current round: `3`
 Remaining issues: `0004, 0005, 0006, 0007, 0008, 0009, 0010`
 
+## Dependency Scheduler
+
+Phase: `EXHAUSTED`
+Ready: `0004, 0007`
+Waiting: `0005, 0008, 0010`
+Additional passes: `{"0004": 5, "0006": 5, "0007": 5, "0009": 1}`
+
 ## Self-Improvement Wiki
 
 Path: `/home/dimitris/code/devloop/docs/devloop-self-improvement/wiki`
-Status: `BLOCKED`
-Summary: self-improvement compiler failed with exit code 1. See /home/dimitris/code/devloop/issues/.loop.logs/self-improvement-compiler.stderr.txt.
+Status: `PASS`
+Summary: Updated lessons-learned.md with five durable lessons from the run. Existing retry and context-preflight guidance was refreshed, and new lessons cover portable recovery identity, workflow-cycle exhaustion, and destination-specific text sanitization. No index update was needed.

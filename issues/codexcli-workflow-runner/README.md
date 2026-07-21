@@ -4,6 +4,12 @@ Source: local-only PRD `docs/prd/codexcli-workflow-runner.md`
 
 Release deadline: Friday, July 17, 2026. The release candidate must be complete Thursday evening, July 16.
 
+Development status: all eight Issues are implementation-complete. Issues 0006-0008
+retain unchecked authenticated, cross-platform, recording, and publication criteria;
+those are operator release gates rather than unfinished repository development. The
+release remains non-publishable while `docs/release-notes-v0.1.0.md` contains
+`PENDING` evidence.
+
 ## Execution Contract
 
 - Start every Issue in a fresh Codex context.

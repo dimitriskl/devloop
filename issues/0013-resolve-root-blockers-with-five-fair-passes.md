@@ -59,3 +59,15 @@ execution blockers plus every directly or transitively waiting descendant.
 - User story 35
 - User story 40
 
+## Implementation Notes
+
+Completed: [x]
+
+Implemented bounded Blocker Resolution with five additional passes per ready
+blocker, fair `(passes used, index order)` selection, crash-safe reservations,
+non-consuming cancellation/human-input release, immediate normal-work unlock,
+and unresolved dependency-cut reporting.
+
+Validation covers multiple blockers, first-pass recovery, fifth-pass recovery,
+exhaustion, interruption/reload accounting, cancellation, and descendants that
+receive no Codex calls while blocked.

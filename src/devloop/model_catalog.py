@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from .terminal_text import has_unsafe_terminal_controls
+from .subprocess_utils import (
+    process_tree_creation_kwargs,
+    register_process_tree,
+    terminate_process,
+)
 
 
 MODEL_LIST_METHOD = "model/list"
@@ -474,6 +479,7 @@ class _AppServerCatalogSession:
         self._process: subprocess.Popen[str] | None = None
         self._messages: queue.Queue[tuple[str, str]] = queue.Queue()
         self._next_request_id = 1
+        self._reader_threads: list[threading.Thread] = []
 
     def __enter__(self) -> _AppServerCatalogSession:
         try:
@@ -487,36 +493,44 @@ class _AppServerCatalogSession:
                 errors="replace",
                 bufsize=1,
                 cwd=self._cwd,
+                **process_tree_creation_kwargs(),
             )
         except OSError as error:
             raise CatalogDiscoveryError(
                 f"Could not start Codex Model Catalog discovery: {error}"
             ) from error
+        register_process_tree(self._process)
         assert self._process.stdout is not None
         assert self._process.stderr is not None
-        threading.Thread(
-            target=self._read_stream,
-            args=("stdout", self._process.stdout),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self._read_stream,
-            args=("stderr", self._process.stderr),
-            daemon=True,
-        ).start()
+        self._reader_threads = [
+            threading.Thread(
+                target=self._read_stream,
+                args=("stdout", self._process.stdout),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self._read_stream,
+                args=("stderr", self._process.stderr),
+                daemon=True,
+            ),
+        ]
+        for reader in self._reader_threads:
+            reader.start()
         return self
 
     def __exit__(self, *args: object) -> None:
         process = self._process
         self._process = None
-        if process is None or process.poll() is not None:
+        if process is None:
             return
-        process.terminate()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
+        terminate_process(process)
+        for reader in self._reader_threads:
+            reader.join(timeout=1)
+        self._reader_threads = []
+        for stream in (process.stdin, process.stdout, process.stderr):
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
     def initialize(self) -> None:
         self._request(

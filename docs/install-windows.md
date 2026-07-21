@@ -1,26 +1,48 @@
 # Windows Install
 
-For a plain setup guide, start with `docs/new-pc-setup.md`.
+Start with the [README Install section](../README.md#install-dev-loop).
 
-1. Copy the whole `devloop` folder to the target machine.
-2. Install Python 3.10 or later and make sure `python --version` prints a version.
-3. Install and authenticate Codex CLI.
-4. Install Git.
-5. Install .NET 10 SDK if the target repository or SQL MCP needs .NET builds.
-6. Install copied skills and agents if you want them available globally:
+## Prerequisites
 
-```powershell
-.\install\install-skills.ps1
+Install these before running the Dev Loop installer:
+
+- Python 3.10 or later
+- Git
+- Codex CLI, authenticated with `codex login`
+
+Optional: .NET 10 SDK if the target repository or SQL MCP needs .NET builds.
+
+## Download and run
+
+Download one installer script:
+
+```text
+https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1
 ```
 
-7. Optionally build and configure MCP servers with `docs/mcp-setup.md`.
+Run it:
 
-Verify:
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+```
+
+The installer asks where to install Dev Loop. Press Enter for `C:\devloop`, or
+type another path.
+
+Re-run the same command to update an existing install.
+
+## Verify
+
+Open a new terminal, then:
 
 ```powershell
 python --version
 codex --version
 git --version
-.\bin\devloop.ps1 --help
-.\bin\devloop-plan.ps1 --help
+devloop --help
+devloop-plan --help
 ```
+
+## Manual setup
+
+If you prefer to copy the bundle yourself, use [new-pc-setup.md](new-pc-setup.md).

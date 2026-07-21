@@ -21,7 +21,13 @@ from .portable_workflow import (
     default_execution_budget,
 )
 from .statusui import Stage, WaitingIndicator, format_duration as _format_duration
-from .subprocess_utils import ProcessExecutionBudget, reap_process_after_terminal_event
+from .subprocess_utils import (
+    ProcessExecutionBudget,
+    process_tree_creation_kwargs,
+    register_process_tree,
+    reap_process_after_terminal_event,
+    terminate_process,
+)
 from .terminal_text import sanitize_terminal_text
 
 TurnRunner = Callable[[Sequence[str], Path], "tuple[int, str]"]
@@ -219,11 +225,13 @@ def run_streaming(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **process_tree_creation_kwargs(),
         )
     except FileNotFoundError:
         message = f"Codex executable not found: {command[0]}. Is Codex CLI installed and on PATH?"
         print(message, file=sys.stderr)
         return 127, message
+    register_process_tree(process)
     captured: list[str] = []
     assert process.stdout is not None
     waiting_indicator = WaitingIndicator(
@@ -281,17 +289,13 @@ def run_streaming(
     except KeyboardInterrupt:
         # Do not let the child linger: terminate it, drain any buffered output,
         # then report the conventional 130 exit code with the partial output.
-        process.terminate()
+        terminate_process(process)
         try:
             remainder = process.stdout.read()
             if remainder:
                 captured.append(remainder)
         except Exception:
             pass
-        try:
-            process.wait(timeout=5)
-        except Exception:
-            process.kill()
         return 130, "".join(captured)
     finally:
         if budget is not None:

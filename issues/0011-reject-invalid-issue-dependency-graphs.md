@@ -55,3 +55,14 @@ None - can start immediately.
 - User stories 35–36
 - User story 39
 
+## Implementation Notes
+
+Completed: [x]
+
+Implemented explicit `## Blocked by` parsing, validated graph nodes, actionable
+unknown/out-of-pack/duplicate/self/cycle diagnostics, selected-subset preflight,
+and dependency preservation across worktree mapping. Invalid packs stop before
+the Codex runner is constructed.
+
+Validation: dependency parser/graph tests, CLI preflight integration, wrapper
+dry run, Python compilation, Bash syntax, and the complete test suite.

@@ -30,3 +30,20 @@ Start this Issue in a fresh Codex context. Use `gpt-5.6-sol` with ultra reasonin
 
 - [Issue 0002: Publish a resumable analysis PRD Package](./0002-publish-resumable-analysis-prd-package.md)
 - [Issue 0005: Process rework and dependent Issues](./0005-process-rework-and-dependent-issues.md)
+
+## Implementation Notes
+
+Completed: 2026-07-16T22:24:20+03:00 (development scope)
+
+The shared Textual shell, distinct standard Step Views, read-only Issue Board,
+fixed typed status bar, transactional capability profiles, contextual commands,
+approval and stop modals, run-scoped capability snapshots, and multilingual/terminal
+layout coverage are implemented. The real UI gate drives those views and actions
+through production application services and the installed App Server rather than a
+fake executable backend.
+
+Sandbox-safe evidence passed with 483 standard-library tests, Python compilation,
+shell syntax checks, and whitespace validation. The two unchecked criteria require
+the operator-run authenticated UI and release-quality gates. They remain explicit
+publication blockers in `docs/release-checklist-v0.1.0.md`; no execution is claimed
+from this managed development session.

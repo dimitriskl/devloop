@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from dataclasses import replace
@@ -379,6 +381,166 @@ class PortableWorkflowDefinitionTests(unittest.TestCase):
             self.assertIn("[redacted]", persisted)
             for fragment in secret_fragments:
                 self.assertNotIn(fragment, persisted)
+
+    def test_doubled_quoted_secret_cannot_reach_persisted_configuration_or_context(
+        self,
+    ) -> None:
+        secret_fragments = ("review-secret-alpha", "review-secret-omega")
+        persisted_surfaces = _persist_guidance_surfaces(
+            "Check password assignment: "
+            "password: 'review-secret-alpha''review-secret-omega'.",
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Check password assignment:", persisted)
+            self.assertIn("[redacted]", persisted)
+            for fragment in secret_fragments:
+                self.assertNotIn(fragment, persisted)
+
+    def test_concatenated_quoted_secret_cannot_reach_configuration_or_context(
+        self,
+    ) -> None:
+        secret_fragments = (
+            "concat-secret-alpha",
+            "concat-secret-omega",
+        )
+        persisted_surfaces = _persist_guidance_surfaces(
+            "Inspect login handling.\n"
+            'password: "concat-secret-alpha" + "concat-secret-omega"\n'
+            "Keep this safe instruction.",
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect login handling.", persisted)
+            self.assertIn("Keep this safe instruction.", persisted)
+            self.assertIn("[redacted]", persisted)
+            for fragment in secret_fragments:
+                self.assertNotIn(fragment, persisted)
+
+    def test_unterminated_quoted_secret_cannot_reach_persisted_configuration_or_context(
+        self,
+    ) -> None:
+        secret = "unterminated-review-secret"
+        persisted_surfaces = _persist_guidance_surfaces(
+            f'Inspect login flow.\npassword: "{secret}',
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect login flow.", persisted)
+            self.assertIn("[redacted]", persisted)
+            self.assertNotIn(secret, persisted)
+
+    def test_unterminated_private_key_cannot_reach_configuration_or_context(
+        self,
+    ) -> None:
+        secret = "unterminated-private-key-secret"
+        persisted_surfaces = _persist_guidance_surfaces(
+            "Inspect key handling.\n"
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            f"{secret}"
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect key handling.", persisted)
+            self.assertIn("[redacted-private-key]", persisted)
+            self.assertNotIn(secret, persisted)
+
+    def test_mismatched_private_key_end_cannot_reach_configuration_or_context(
+        self,
+    ) -> None:
+        secret_fragments = (
+            "mismatched-private-key-secret",
+            "secret-after-mismatched-private-key-end",
+        )
+        persisted_surfaces = _persist_guidance_surfaces(
+            "Inspect key handling.\n"
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            f"{secret_fragments[0]}\n"
+            "-----END EC PRIVATE KEY-----\n"
+            f"{secret_fragments[1]}"
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect key handling.", persisted)
+            self.assertIn("[redacted-private-key]", persisted)
+            for secret in secret_fragments:
+                self.assertNotIn(secret, persisted)
+
+    def test_newline_separated_secret_assignment_cannot_reach_configuration_or_context(
+        self,
+    ) -> None:
+        secret = "next-line-review-secret"
+        persisted_surfaces = _persist_guidance_surfaces(
+            f'Inspect login flow.\n"password":\n  "{secret}"',
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect login flow.", persisted)
+            self.assertIn("[redacted]", persisted)
+            self.assertNotIn(secret, persisted)
+
+    def test_malformed_secret_key_quoting_cannot_reach_configuration_or_context(
+        self,
+    ) -> None:
+        secret = "malformed-key-review-secret"
+        persisted_surfaces = _persist_guidance_surfaces(
+            f'Inspect login flow.\npassword" : {secret}',
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("Inspect login flow.", persisted)
+            self.assertIn("[redacted]", persisted)
+            self.assertNotIn(secret, persisted)
+
+    def test_early_quote_secret_cannot_reach_persisted_configuration_or_context(
+        self,
+    ) -> None:
+        secret = "don't-leak-this"
+        persisted_surfaces = _persist_guidance_surfaces(
+            f"password: '{secret}'",
+        )
+
+        for persisted in persisted_surfaces:
+            self.assertIn("[redacted]", persisted)
+            self.assertNotIn(secret, persisted)
+
+    def test_maximum_length_adversarial_quoted_guidance_is_bounded(self) -> None:
+        guidance = 'password: "' + "\\" * 3_987 + "x"
+        started_at = time.monotonic()
+
+        redacted = StepGuidance(guidance).text
+
+        self.assertLess(time.monotonic() - started_at, 1.0)
+        self.assertIn("[redacted]", redacted)
+
+    def test_guidance_bound_is_enforced_after_secret_redaction(self) -> None:
+        guidance = "password: x\n" * 333
+
+        with self.assertRaisesRegex(ValueError, "cannot exceed 4000 characters"):
+            StepGuidance(guidance)
+
+    def test_oversized_private_key_guidance_is_rejected_before_redaction(self) -> None:
+        guidance = (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            + "x" * (MAX_STEP_GUIDANCE_CHARACTERS + 100_000)
+            + "\n-----END OPENSSH PRIVATE KEY-----"
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot exceed 4000 characters"):
+            StepGuidance(guidance)
+
+    def test_near_match_secret_assignment_scales_linearly(self) -> None:
+        def elapsed_for(length: int) -> float:
+            guidance = ("a-" * ((length - 20) // 2)) + 'secret" : mismatch'
+            guidance = guidance[:length]
+            started_at = time.perf_counter()
+            StepGuidance(guidance)
+            return time.perf_counter() - started_at
+
+        short_elapsed = elapsed_for(400)
+        long_elapsed = elapsed_for(3_800)
+
+        self.assertLess(long_elapsed, short_elapsed * 20 + 0.02)
 
     def test_block_secret_after_blank_line_cannot_reach_configuration_or_context(
         self,
@@ -1865,6 +2027,38 @@ class PortableWorkflowExecutionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "hash does not match"):
                 LoopStateWriter(index).resolved_workflow(catalog)
+
+    def test_state_round_trip_accepts_an_intact_legacy_sparse_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            index = root / "README.md"
+            index.write_text("# Issues\n", encoding="utf-8")
+            workflow = default_portable_workflow()
+            document = workflow.to_dict()
+            for step in document["steps"]:
+                step.pop("capability_profile")
+                step.pop("codex_settings")
+                step.pop("execution_budget")
+            canonical_document = json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            writer = LoopStateWriter(index)
+            writer.state["resolved_workflow"] = document
+            writer.state["resolved_workflow_hash"] = hashlib.sha256(
+                canonical_document.encode("utf-8")
+            ).hexdigest()
+            writer.flush()
+
+            restored = LoopStateWriter(index).resolved_workflow(
+                default_portable_component_catalog()
+            )
+
+            self.assertEqual(restored.to_dict(), workflow.to_dict())
+            persisted = json.loads(writer.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["resolved_workflow"], document)
 
     def test_recording_workflow_refuses_to_overwrite_a_tampered_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

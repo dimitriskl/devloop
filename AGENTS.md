@@ -41,6 +41,16 @@ Builds the optional .NET SQL MCP server.
 ```
 Copies bundled skills and agents globally.
 
+```bash
+./install/devloop.sh
+```
+Installs or updates the portable Dev Loop bundle on Linux/macOS. Re-run to update.
+
+```powershell
+.\install\devloop.ps1
+```
+Installs or updates the portable Dev Loop bundle on Windows. Re-run to update.
+
 ## Coding Style & Naming Conventions
 
 Python targets 3.10+. Core workflow, domain, state-machine, and execution-backend modules use the standard library and must not depend on presentation-framework types. The terminal presentation layer uses a pinned Textual version and its required transitive dependencies. Follow the existing style: 4-space indentation, `from __future__ import annotations`, typed signatures, `Path` for filesystem paths, and small dataclasses for structured results. Keep filenames lowercase with underscores. C# MCP code uses nullable reference types and implicit usings.

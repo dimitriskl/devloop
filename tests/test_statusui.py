@@ -55,6 +55,17 @@ class TerminalUnicodeSafetyTests(unittest.TestCase):
 
         self.assertEqual(sanitized, multilingual_text)
 
+    def test_sanitizer_discards_unterminated_control_strings(self) -> None:
+        unterminated_osc = "prefix " + ("\x1b]unterminated " * 2_048)
+        unterminated_dcs = "prefix " + ("\x1bPunterminated " * 2_048)
+
+        self.assertEqual(
+            sanitize_terminal_text("Planning response."),
+            "Planning response.",
+        )
+        self.assertEqual(sanitize_terminal_text(unterminated_osc), "prefix ")
+        self.assertEqual(sanitize_terminal_text(unterminated_dcs), "prefix ")
+
     def test_progress_surface_preserves_rtl_joining_and_joined_emoji(self) -> None:
         multilingual_text = "بررسی می\u200cروم 👩\u200d💻"
         progress = statusui.project_workflow_progress(
@@ -237,11 +248,13 @@ class IssueDashboardRenderingTests(unittest.TestCase):
             active_step_instance_id=HOSTILE_TERMINAL_TEXT,
             activity=replace(progress.activity, safe_text=HOSTILE_TERMINAL_TEXT),
             issue_title=HOSTILE_TERMINAL_TEXT,
-            last_result=statusui.IssueResultSummary(
-                issue_number=HOSTILE_TERMINAL_TEXT,
-                status=statusui.DashboardStatus.PASS,
-                pass_number=1,
-                elapsed_seconds=1,
+            issue_history=(
+                statusui.IssueResultSummary(
+                    issue_number=HOSTILE_TERMINAL_TEXT,
+                    status=statusui.DashboardStatus.PASS,
+                    pass_number=1,
+                    elapsed_seconds=1,
+                ),
             ),
         )
 
@@ -253,6 +266,14 @@ class IssueDashboardRenderingTests(unittest.TestCase):
                     issue_title=HOSTILE_TERMINAL_TEXT,
                     position=9,
                     total=10,
+                    issue_history=(
+                        statusui.IssueResultSummary(
+                            issue_number=HOSTILE_TERMINAL_TEXT,
+                            status=statusui.DashboardStatus.PASS,
+                            pass_number=1,
+                            elapsed_seconds=0.0,
+                        ),
+                    ),
                     stream=output,
                     frame_seconds=60,
                     terminal_size=lambda **_: os.terminal_size((1200, 40)),
@@ -356,6 +377,32 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         self.assertIn("WORKING   REVIEW      · pass 1 · 00:00:42", rendered)
         self.assertIn("WAITING   QA          · pass 1 · 00:00:00", rendered)
 
+    def test_dashboard_shows_dependency_scheduler_summary(self) -> None:
+        snapshot = statusui.IssueDashboardSnapshot(
+            issue_number="0003",
+            issue_title="Independent work",
+            position=3,
+            total=8,
+            pass_number=1,
+            active_stage=Stage.DEVELOPMENT,
+            scheduler_summary=(
+                "SCHEDULER · NORMAL SCHEDULING · 2 ready · 5 waiting"
+            ),
+        )
+
+        rendered = statusui.render_issue_dashboard(
+            snapshot,
+            width=79,
+            color=False,
+            unicode=True,
+            frame="⠋",
+        )
+
+        self.assertIn(
+            "SCHEDULER · NORMAL SCHEDULING · 2 ready · 5 waiting",
+            rendered,
+        )
+
     def test_dashboard_freezes_each_step_clock_on_transition(self) -> None:
         class Clock:
             value = 0.0
@@ -400,7 +447,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         self.assertIn("WAITING   REVIEW      · pass 2 · 00:00:08", rendered)
         self.assertIn("WAITING   QA          · pass 2 · 00:00:05", rendered)
 
-    def test_next_issue_reuses_card_region_and_shows_only_last_result(self) -> None:
+    def test_next_issue_reuses_card_region_and_shows_run_summary(self) -> None:
         class Clock:
             value = 0.0
 
@@ -414,6 +461,14 @@ class IssueDashboardRenderingTests(unittest.TestCase):
             issue_title="Publish a validated sample Level Catalog",
             position=2,
             total=26,
+            issue_history=(
+                statusui.IssueResultSummary(
+                    issue_number="0001",
+                    status=statusui.DashboardStatus.PASS,
+                    pass_number=1,
+                    elapsed_seconds=0.0,
+                ),
+            ),
             stream=output,
             clock=clock,
             frame_seconds=60,
@@ -436,12 +491,49 @@ class IssueDashboardRenderingTests(unittest.TestCase):
 
         transition = output.getvalue()[transition_start:]
         plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transition)
-        self.assertIn("\x1b[10A", transition)
-        self.assertIn(
-            "LAST RESULT · 0002 · PASS · pass 1 · total 00:00:05",
-            plain,
-        )
+        self.assertIn("\x1b[11A", transition)
+        self.assertIn("RUN · 0001 · 0002", plain)
+        self.assertNotIn("LAST RESULT", plain)
+        self.assertNotIn("FINISHED ISSUES", plain)
         self.assertIn("CURRENT ISSUE · 0003 · 3/26 · 23 remaining", plain)
+
+    def test_failed_retry_does_not_add_issue_to_run_summary_until_pass(self) -> None:
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0002",
+            issue_title="Publish catalog",
+            position=2,
+            total=3,
+            stream=output,
+            frame_seconds=60,
+        )
+
+        dashboard.finish_issue("FAIL", "Needs rework.")
+        dashboard.show_issue(
+            issue_number="0002",
+            issue_title="Publish catalog",
+            position=2,
+            total=3,
+        )
+        dashboard.finish_issue("PASS", "Completed.")
+        transition_start = len(output.getvalue())
+        dashboard.show_issue(
+            issue_number="0003",
+            issue_title="Persist profile",
+            position=3,
+            total=3,
+        )
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        dashboard.close()
+
+        transition = re.sub(
+            r"\x1b\[[0-?]*[ -/]*[@-~]",
+            "",
+            output.getvalue()[transition_start:],
+        )
+        self.assertIn("RUN · 0002", transition)
+        self.assertNotIn("RUN · 0002 · 0002", transition)
+        self.assertNotIn("FINISHED ISSUES", transition)
 
     def test_small_terminal_windows_rows_around_the_active_step(self) -> None:
         workflow = default_portable_workflow()
@@ -601,7 +693,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         dashboard.show_workflow_progress(completed)
 
         transition = output.getvalue()[transition_start:]
-        self.assertEqual(transition.count("\x1b[2K"), 14)
+        self.assertEqual(transition.count("\x1b[2K"), 12)
         self.assertTrue(transition.endswith("\x1b[4A\r"))
 
 

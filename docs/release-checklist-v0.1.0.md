@@ -5,6 +5,16 @@ Windows and Linux. Do not tag or publish while any required gate is incomplete.
 Release operators need `uv`, `pipx`, Git, and an installed Codex CLI on PATH.
 The scripts check these commands before starting any long-running gate.
 
+## Development closure
+
+Repository development for Issues 0001-0008 is complete. The credential-free source
+checks available in the managed workspace passed on July 16, 2026: 483
+standard-library tests, Python compilation, Bash syntax, and whitespace validation.
+The remaining items in this checklist are release operations and evidence collection,
+not deferred implementation. They must still pass before publication; development
+completion does not authorize replacing `PENDING` values or claiming Windows,
+authenticated App Server, installation, recording, or GitHub release evidence.
+
 ## Credential-free gate
 
 Run `.\install\run-verification-tier.ps1 -Tier fast` on Windows or

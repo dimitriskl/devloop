@@ -45,6 +45,8 @@ from .step_configuration import CapabilityKind, CapabilityReference
 from .state import LoopStateWriter
 from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext
+from .cli_ui import fit_text_to_screen, render_context_path, terminal_dimensions
+from .terminal_menu import render_menu_screen
 from .worktree import (
     branch_exists,
     build_worktree_add_command,
@@ -60,6 +62,7 @@ from .workflow_defaults import (
 
 PLAN_STATE_FILE = PORTABLE_PLANNER_CONFIGURATION_FILE
 TARGET_REPO_STATE_KEY = "target_repo"
+TARGET_REPO_CONFIRMED_KEY = "target_repo_confirmed"
 LAST_WORKTREE_PARENT_STATE_KEY = "last_worktree_parent"
 _PROMPT_EDITOR: LineEditor | None = None
 
@@ -73,6 +76,18 @@ ARTIFACT_FRESHNESS_SLACK_SECONDS = 5
 class PlanningArtifacts:
     prd_path: Path
     issues_index: Path
+
+
+@dataclass(frozen=True)
+class StartupMenuResult:
+    artifacts: PlanningArtifacts | None = None
+    exit_requested: bool = False
+
+
+@dataclass(frozen=True)
+class ResumeMenuResult:
+    artifacts: PlanningArtifacts | None = None
+    exit_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,8 +145,17 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
     repo_root = choose_target_repo(args.repo)
     if not args.goal:
-        resumed_artifacts = choose_startup_artifacts(repo_root)
-        if resumed_artifacts is not None:
+        startup_result = choose_startup_artifacts(
+            repo_root,
+            bundle_root=bundle.root,
+            selection=selection,
+            state_path=state_path,
+            codex=args.codex,
+        )
+        if startup_result.exit_requested:
+            return 0
+        if startup_result.artifacts is not None:
+            resumed_artifacts = startup_result.artifacts
             print()
             print(f"Target checkout: {repo_root}")
             print(f"Current branch: {current_branch(repo_root) or 'unknown'}")
@@ -229,7 +253,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             model_catalog_loader=model_catalog_adapter.discover,
         ),
         status_summary=lambda: _status_summary(repo_root, selection),
-        resume_artifacts=lambda: choose_resume_artifacts(repo_root),
+        resume_artifacts=lambda: choose_resume_artifacts(repo_root).artifacts,
     )
 
     artifacts = run_planning_chat(
@@ -349,40 +373,105 @@ def _manual_artifacts() -> PlanningArtifacts:
     return PlanningArtifacts(prd_path=prd_path, issues_index=issues_index)
 
 
-def choose_startup_artifacts(repo_root: Path) -> PlanningArtifacts | None:
+def choose_startup_artifacts(
+    repo_root: Path,
+    *,
+    bundle_root: Path,
+    selection: "catalog_module.Selection",
+    state_path: Path,
+    codex: str = "codex",
+) -> StartupMenuResult:
+    component_catalog = build_portable_component_catalog(bundle_root)
+    model_catalog_adapter = CodexModelCatalogAdapter(codex, cwd=repo_root)
     while True:
         candidates = find_resume_candidates(repo_root)
-        print()
-        print("Dev Loop planning")
-        print("  1. Start a new change")
-        print(f"  2. Resume an unfinished PRD ({len(candidates)} found)")
-        choice = ask_choice("Select", {"1", "2"}, default="1")
+        render_menu_screen(
+            "Dev Loop planning",
+            "",
+            "  1. Start a new change",
+            f"  2. Resume an unfinished PRD ({len(candidates)} found)",
+            "  3. Workflow options",
+            "",
+            "  q. Exit",
+            "",
+        )
+        choice = ask_choice("Select", {"1", "2", "3", "q"}, default="1")
+        if choice == "q":
+            return StartupMenuResult(exit_requested=True)
         if choice == "1":
-            return None
-        selected = choose_resume_artifacts(repo_root, candidates)
-        if selected is not None:
-            return selected
+            return StartupMenuResult()
+        if choice == "3":
+            run_options_menu(
+                bundle_root,
+                selection,
+                state_path,
+                component_catalog=component_catalog,
+                model_catalog_loader=model_catalog_adapter.discover,
+            )
+            continue
+        resume_result = choose_resume_artifacts(
+            repo_root,
+            candidates,
+            allow_exit=True,
+        )
+        if resume_result.exit_requested:
+            return StartupMenuResult(exit_requested=True)
+        if resume_result.artifacts is not None:
+            return StartupMenuResult(artifacts=resume_result.artifacts)
 
 
 def choose_resume_artifacts(
     repo_root: Path,
     candidates: list[ResumeCandidate] | None = None,
-) -> PlanningArtifacts | None:
+    *,
+    allow_exit: bool = False,
+) -> ResumeMenuResult:
     available = find_resume_candidates(repo_root) if candidates is None else candidates
-    print()
     if not available:
-        print("No unfinished PRD issue packs were found in this project.")
-        return None
+        empty_lines = [
+            "Dev Loop planning",
+            "",
+            "No unfinished PRD issue packs were found in this project.",
+            "",
+        ]
+        if allow_exit:
+            empty_lines.append("  q. Exit")
+        empty_lines.append("")
+        render_menu_screen(*empty_lines)
+        prompt = (
+            "Press Enter to return, or q to exit: "
+            if allow_exit
+            else "Press Enter to return to the main menu: "
+        )
+        while True:
+            raw = read_prompt(prompt).strip().casefold()
+            if raw in {"", "b"}:
+                return ResumeMenuResult()
+            if allow_exit and raw == "q":
+                return ResumeMenuResult(exit_requested=True)
+            if allow_exit:
+                print("Expected Enter, b, or q.", file=sys.stderr)
+            else:
+                print("Press Enter to return to the main menu.", file=sys.stderr)
 
-    print("Unfinished PRDs")
+    lines = ["Dev Loop planning", "", "Unfinished PRDs", ""]
     for index, candidate in enumerate(available, start=1):
-        print(f"  {index}. {format_resume_candidate(candidate)}")
-    print("  b. Back")
+        lines.append(f"  {index}. {format_resume_candidate(candidate)}")
+    footer = ["", "  b. Back"]
+    if allow_exit:
+        footer.append("  q. Exit")
+    footer.append("")
+    lines.extend(footer)
+    render_menu_screen(*lines)
     choices = {str(index) for index in range(1, len(available) + 1)} | {"b"}
+    if allow_exit:
+        choices.add("q")
     choice = ask_choice("Select PRD to resume", choices, default="1")
     if choice == "b":
-        return None
-    return available[int(choice) - 1].artifacts
+        return ResumeMenuResult()
+    if choice == "q":
+        return ResumeMenuResult(exit_requested=True)
+    return ResumeMenuResult(artifacts=available[int(choice) - 1].artifacts)
 
 
 def format_resume_candidate(candidate: ResumeCandidate) -> str:
@@ -438,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def choose_target_repo(repo_arg: str | None) -> Path:
+    if repo_arg is not None and not repo_arg.strip():
+        repo_arg = None
     default = load_last_target_repo()
     while True:
         raw = repo_arg
@@ -446,7 +537,13 @@ def choose_target_repo(repo_arg: str | None) -> Path:
                 raw = ask_required("Target project root")
             else:
                 raw = read_prompt(f"Target project root [{default}]: ").strip()
-        candidate = (Path(raw).expanduser() if raw else default).resolve()
+        if raw:
+            candidate = Path(raw).expanduser().resolve()
+        elif default is not None:
+            candidate = default
+        else:
+            repo_arg = None
+            continue
         created = ensure_target_directory(candidate)
         if not candidate.is_dir():
             repo_arg = None
@@ -495,7 +592,11 @@ def ensure_target_directory(path: Path) -> bool:
 
 
 def load_last_target_repo() -> Path | None:
-    raw = load_plan_state().get(TARGET_REPO_STATE_KEY)
+    state = load_plan_state()
+    if state.get(TARGET_REPO_CONFIRMED_KEY) is not True:
+        return None
+
+    raw = state.get(TARGET_REPO_STATE_KEY)
     if not isinstance(raw, str) or not raw.strip():
         return None
 
@@ -507,6 +608,7 @@ def load_last_target_repo() -> Path | None:
 
 def save_last_target_repo(repo_root: Path) -> None:
     save_plan_state_value(TARGET_REPO_STATE_KEY, str(repo_root), "target project default")
+    save_plan_state_value(TARGET_REPO_CONFIRMED_KEY, True, "target project confirmation")
 
 
 def load_last_worktree_parent() -> Path | None:
@@ -560,11 +662,13 @@ def run_options_menu(
     installed_components = component_catalog or build_portable_component_catalog(
         bundle_root
     )
+    width, height = terminal_dimensions()
     result = run_workflow_editor(
         state_path,
         read_line=read_prompt,
         write=print,
-        terminal_width=terminal_width(),
+        terminal_width=width,
+        terminal_height=height,
         current_workflow=current_workflow,
         catalog=installed_components,
         open_capabilities=lambda draft, step_id: run_capability_options_menu(
@@ -646,12 +750,19 @@ def run_capability_options_menu(
     found = catalog_module.discover(bundle_root)
     while True:
         step = draft.workflow.step(step_id)
-        print()
-        print(f"Capability Options — {step.display_name}")
-        print("  1. Search and toggle this Step Instance's capabilities")
-        print("  2. Reset this Step Instance to component capability defaults")
-        print("  3. Add skill or agent from GitHub")
-        print("  4. Back to Workflow Editor")
+        context = render_context_path(
+            "Capability Options",
+            step.display_name,
+        )
+        render_menu_screen(
+            context,
+            "",
+            "  1. Search and toggle capabilities for this step",
+            "  2. Reset this step to component defaults",
+            "  3. Add skill or agent from GitHub",
+            "  4. Back to Workflow Editor",
+            "",
+        )
         choice = ask_choice("Select", {"1", "2", "3", "4"}, default="4")
         if choice == "4":
             return
@@ -701,8 +812,15 @@ def edit_step_capabilities(
         _catalog_capability_reference(bundle_root, entry)
         for entry in entries
     ]
-    print()
-    print(f"Capabilities for {step.display_name}")
+    context = render_context_path("Capabilities", step.display_name)
+    width, height = terminal_dimensions()
+    menu_lines = [
+        context,
+        "",
+        "Enter a capability number to toggle, or cancel.",
+        "",
+    ]
+    entry_lines: list[str] = []
     for index, (entry, reference) in enumerate(zip(entries, references), start=1):
         reason = component.required_capability_reason(reference)
         if reason is not None:
@@ -714,7 +832,24 @@ def edit_step_capabilities(
         else:
             marker = "disabled"
             explanation = ""
-        print(f"  {index}. [{marker}] {entry.kind}: {entry.name}{explanation}")
+        entry_lines.append(
+            f"  {index}. [{marker}] {entry.kind}: {entry.name}{explanation}"
+        )
+    reserved = len(menu_lines) + 2
+    visible_budget = max(1, height - reserved)
+    if len(entry_lines) > visible_budget:
+        menu_lines.extend(entry_lines[: visible_budget - 1])
+        hidden = len(entry_lines) - visible_budget + 1
+        menu_lines.append(f"  … {hidden} more — refine search to narrow the list")
+    else:
+        menu_lines.extend(entry_lines)
+    screen = fit_text_to_screen(
+        "\n".join(menu_lines),
+        width=width,
+        max_height=height,
+        reserve_prompt=True,
+    )
+    render_menu_screen(*screen.splitlines())
     raw = read_prompt("Capability number to toggle (or cancel): ").strip()
     if raw.casefold() == "cancel":
         return

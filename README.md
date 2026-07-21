@@ -14,6 +14,97 @@
 
 Portable Codex development-loop runner for local PRD and issue packs.
 
+## Install Dev Loop
+
+You do **not** clone or download this repository by hand. Download **one
+installer script**, run it, and it pulls the bundle for you.
+
+### Install these first
+
+| Requirement | Check |
+| --- | --- |
+| Python 3.10+ | `python --version` or `python3 --version` |
+| Git | `git --version` |
+| Codex CLI, signed in | `codex --version` then `codex login` |
+
+Optional: .NET 10 SDK only if your target project or the SQL diagnostics MCP
+needs .NET builds.
+
+### Download and run
+
+| Platform | Installer script |
+| --- | --- |
+| Linux / macOS | [install/devloop.sh](https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh) |
+| Windows | [install/devloop.ps1](https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1) |
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh | bash
+```
+
+Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+```
+
+Prefer to download the script first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh -o devloop-install.sh
+chmod +x devloop-install.sh
+./devloop-install.sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 -OutFile devloop-install.ps1
+.\devloop-install.ps1
+```
+
+### What the installer does
+
+1. Asks where to install Dev Loop.
+2. Clones or updates the bundle from GitHub into that folder.
+3. Copies bundled Codex skills and agent references into your Codex home folder.
+4. Adds `devloop` and `devloop-plan` commands to your user PATH.
+
+Press Enter to accept the default install location:
+
+- Linux / macOS: `~/devloop`
+- Windows: `C:\devloop`
+
+Commands are linked into:
+
+- Linux / macOS: `~/.local/bin`
+- Windows: `%USERPROFILE%\.local\bin`
+
+### Update
+
+Run the same installer command again. Enter the same install path when prompted,
+or press Enter if you kept the default.
+
+Non-interactive install or update:
+
+```bash
+./devloop-install.sh --dir ~/devloop
+```
+
+```powershell
+.\devloop-install.ps1 -InstallDir C:\devloop
+```
+
+### Verify
+
+Open a new terminal after install, then:
+
+```bash
+devloop --help
+devloop-plan --help
+```
+
+More detail: [docs/new-pc-setup.md](docs/new-pc-setup.md).
+
 ## Two Separate Applications
 
 This repository contains two applications. They share some source packages but
@@ -50,6 +141,40 @@ target project checkout. It contains the runner, prompts, output schemas, copied
 Codex skills, Codex agent references, MCP setup templates, and setup
 documentation.
 
+Try the standard workflow without rebuilding from scratch:
+
+```bash
+uv tool install .
+./examples/release-demo/run-demo.sh   # Linux
+# .\examples\release-demo\run-demo.ps1  # Windows
+```
+
+Submit the request in `examples/release-demo/feature-request.md`. The script
+creates a disposable Git repository and opens `codexcli` against it.
+
+## Built with Codex and GPT-5.6
+
+Dev Loop was built and runs through the **Codex CLI / Codex App Server** for
+session management, tool use, approvals, and workflow execution. Each workflow
+step calls **GPT-5.6** models through Codex; we did not call the OpenAI API
+directly.
+
+| Step | Role | CodexCLI (`codexcli`) | Portable Dev Loop (`devloop`) |
+| --- | --- | --- | --- |
+| Analysis | Planning and PRD | `gpt-5.6-sol` / xhigh | `gpt-5.6-sol` / xhigh |
+| Development | Implementation | `gpt-5.6-sol` / xhigh | `gpt-5.6-luna` / high |
+| Code review | Independent review | `gpt-5.6-sol` / xhigh | `gpt-5.6-sol` / xhigh |
+| QA | Verification | `gpt-5.6-sol` / xhigh | `gpt-5.6-terra` / high |
+
+**Codex** provides orchestration: the App Server protocol, fresh role threads,
+permission prompts, `/resume`, and structured workflow state. **GPT-5.6** provides
+the reasoning for each step. Models are selected through Codex CLI (`-m
+gpt-5.6-sol`, etc.) and locked per component in CodexCLI execution profiles.
+
+During development of this repository, Codex was used for implementation,
+refactoring, and release verification. GPT-5.6 models executed analysis,
+development, review, and QA turns through the installed Codex App Server.
+
 ## What You Can Run
 
 The portable Dev Loop has two entrypoints:
@@ -62,20 +187,6 @@ The portable Dev Loop has two entrypoints:
 
 Use `devloop-plan` when you still need to decide what to build. Use `devloop`
 when `prd/<change>/<change>.md` and `prd/<change>/issues/README.md` already exist.
-
-## First Setup On A New PC
-
-Read this first:
-
-- `docs/new-pc-setup.md`
-- `docs/how-to-use.md`
-
-Main prerequisites:
-
-- Python 3.10 or later. The runner will not start without it.
-- Codex CLI installed and authenticated.
-- Git.
-- .NET 10 SDK only when the target repo or SQL MCP needs .NET builds.
 
 ## Quick Start: Existing PRD And Issues
 
@@ -98,12 +209,18 @@ Ubuntu/Linux:
 ```
 
 The default run processes one pending issue. Add `--all` to continue through
-all pending issues in dependency order.
+all dependency-ready issues. Declare prerequisites as local Markdown links
+under an issue's `## Blocked by` heading. Index order is priority among ready
+issues; it never creates an implicit dependency.
 
-If any issue blocks, the runner retries blocked issues at the end with clean
-Codex attempts and compact blocker context. Tune this with
-`--blocked-retry-rounds`, `--blocked-retry-max-passes`, or disable it with
-`--no-blocked-retry`.
+If a ready issue blocks, its descendants become `WAITING_ON_DEPENDENCY` and
+receive no Codex calls while independent ready work continues. When normal
+work is exhausted, Blocker Resolution gives each unresolved ready blocker one
+additional workflow pass per round, up to five total. Use
+`--blocked-retry-rounds` to lower that cap or `--no-blocked-retry` to disable
+Blocker Resolution. `--blocked-retry-max-passes` remains accepted for command
+compatibility, but an additional attempt always consumes exactly one workflow
+pass.
 
 After a real run, Dev Loop compiles the most important durable lessons into its
 own self-improvement wiki at `docs/devloop-self-improvement/wiki/`. The role
@@ -126,7 +243,7 @@ Ubuntu/macOS:
 ```
 
 The session shows a stage banner (`analysis -> development -> review -> qa`).
-At startup choose **Start a new change** or **Resume an unfinished PRD**. Resume
+At startup the replacing menu offers **Start a new change**, **Resume an unfinished PRD**, **Workflow options** (same editor as `/options`), or **Exit**. Resume
 lists only PRD/issue packs with unfinished issues and shows completion counts,
 the active issue when known, and last activity. The same catalog is available
 through `/resume` during planning. Chat with Codex to sharpen a new change; when
@@ -235,6 +352,7 @@ in this repository.
 
 All detailed documentation is under `docs/`:
 
+- `docs/hackathon-submission.md`
 - `docs/how-to-use.md`
 - `docs/new-pc-setup.md`
 - `docs/install-windows.md`

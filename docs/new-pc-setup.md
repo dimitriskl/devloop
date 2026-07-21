@@ -1,6 +1,99 @@
 # New PC Setup
 
-This guide sets up the Dev Loop bundle on a new machine.
+This guide expands the [README Install section](../README.md#install-dev-loop).
+
+You do not copy the repository manually unless you choose the manual path at
+the end of this guide. The normal install is one downloaded script plus the
+prerequisites below.
+
+## Prerequisites
+
+Install these before running the Dev Loop installer:
+
+| Requirement | Check |
+| --- | --- |
+| Python 3.10+ | `python --version` or `python3 --version` |
+| Git | `git --version` |
+| Codex CLI, signed in | `codex --version` then `codex login` |
+
+Optional: .NET 10 SDK only if the target repository or SQL diagnostics MCP
+needs .NET builds.
+
+If Windows opens the Microsoft Store instead of printing a Python version,
+install Python from python.org and disable the Windows App Execution Alias for
+Python.
+
+## Quick Install
+
+Download one installer script:
+
+| Platform | URL |
+| --- | --- |
+| Linux / macOS | https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh |
+| Windows | https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 |
+
+Linux and macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh | bash
+```
+
+Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
+```
+
+The installer asks where to install Dev Loop. Press Enter to accept the default,
+or type another path. It then clones or updates the bundle, copies bundled Codex
+skills and agent references, and adds `devloop` and `devloop-plan` commands to
+your user PATH.
+
+Defaults when you press Enter:
+
+- Linux/macOS bundle: `~/devloop`
+- Linux/macOS commands: `~/.local/bin`
+- Windows bundle: `C:\devloop`
+- Windows commands: `%USERPROFILE%\.local\bin`
+
+Re-run the same command to update an existing install. The installer prompts for
+the install directory again; press Enter if it is already at the default path.
+
+Non-interactive install:
+
+```bash
+./devloop-install.sh --dir ~/devloop
+```
+
+```powershell
+.\devloop-install.ps1 -InstallDir C:\devloop
+```
+
+Download first instead of piping:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh -o devloop-install.sh
+chmod +x devloop-install.sh
+./devloop-install.sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 -OutFile devloop-install.ps1
+.\devloop-install.ps1
+```
+
+## Verify
+
+Open a new terminal after install, then:
+
+```bash
+devloop --help
+devloop-plan --help
+```
+
+## Manual Setup
+
+If you prefer to copy the bundle yourself, continue with the steps below.
 
 ## 1. Copy The Bundle
 

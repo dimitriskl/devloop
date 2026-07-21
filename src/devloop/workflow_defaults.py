@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from .portable_workflow import (
     PortableStepComponentCatalog,
     WorkflowDefinition,
+    canonical_workflow_document_hash,
     canonical_workflow_hash,
     default_portable_workflow,
     load_portable_workflow,
@@ -77,7 +78,7 @@ class WorkflowDefaultStore:
             raise ValueError("The User Workflow Default must be a JSON object.")
         workflow = load_portable_workflow(document, self._catalog)
         expected_hash = data.get(USER_WORKFLOW_DEFAULT_HASH_KEY)
-        actual_hash = canonical_workflow_hash(workflow)
+        actual_hash = canonical_workflow_document_hash(document)
         if expected_hash != actual_hash:
             raise ValueError("The User Workflow Default hash does not match its content.")
         return workflow

@@ -103,7 +103,8 @@ class WorkflowProgress:
     issue_title: str = ""
     issue_position: int = 0
     issue_total: int = 0
-    last_result: IssueResultSummary | None = None
+    issue_history: tuple[IssueResultSummary, ...] = ()
+    scheduler_summary: str = ""
 
     @property
     def by_step_instance_id(self) -> Mapping[str, WorkflowStepProgress]:
@@ -140,7 +141,8 @@ def project_workflow_progress(
     issue_title: str = "",
     issue_position: int = 0,
     issue_total: int = 0,
-    last_result: IssueResultSummary | None = None,
+    issue_history: Iterable[IssueResultSummary] = (),
+    scheduler_summary: str = "",
 ) -> WorkflowProgress:
     runtime_list = list(runtime_states)
     attempt_list = list(attempts)
@@ -254,7 +256,8 @@ def project_workflow_progress(
         issue_title=_safe_progress_text(issue_title),
         issue_position=max(0, issue_position),
         issue_total=max(0, issue_total),
-        last_result=last_result,
+        issue_history=_safe_issue_history(issue_history),
+        scheduler_summary=_safe_progress_text(scheduler_summary),
     )
 
 
@@ -270,6 +273,43 @@ def _safe_optional_progress_text(
     if value is None:
         return None
     return _safe_progress_text(value, max_length=max_length)
+
+
+def _safe_issue_numbers(issue_numbers: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            _safe_progress_text(number, max_length=64)
+            for number in issue_numbers
+        )
+    )
+
+
+def _safe_issue_history(
+    history: Iterable[IssueResultSummary],
+) -> tuple[IssueResultSummary, ...]:
+    normalized: list[IssueResultSummary] = []
+    seen: set[str] = set()
+    for entry in history:
+        safe_entry = _terminal_safe_result_summary(entry)
+        if safe_entry is None or safe_entry.issue_number in seen:
+            continue
+        seen.add(safe_entry.issue_number)
+        normalized.append(safe_entry)
+    return tuple(normalized)
+
+
+def _issue_history_from_numbers(
+    issue_numbers: Iterable[str],
+) -> tuple[IssueResultSummary, ...]:
+    return _safe_issue_history(
+        IssueResultSummary(
+            issue_number=number,
+            status=DashboardStatus.PASS,
+            pass_number=1,
+            elapsed_seconds=0.0,
+        )
+        for number in issue_numbers
+    )
 
 
 def _terminal_safe_step_progress(
@@ -332,7 +372,11 @@ def _terminal_safe_workflow_progress(
             ),
         ),
         issue_title=_safe_progress_text(projection.issue_title, max_length=160),
-        last_result=_terminal_safe_result_summary(projection.last_result),
+        issue_history=_safe_issue_history(projection.issue_history),
+        scheduler_summary=_safe_progress_text(
+            projection.scheduler_summary,
+            max_length=200,
+        ),
     )
 
 
@@ -424,24 +468,15 @@ def render_workflow_progress(
     lines: list[str] = []
     colored_statuses: list[tuple[int, DashboardStatus]] = []
 
-    if projection.last_result is not None:
-        last_result = projection.last_result
+    if projection.issue_history:
         lines.append(
-            _fit_plain_text(
-                separator.join(
-                    (
-                        "LAST RESULT",
-                        last_result.issue_number,
-                        last_result.status.value,
-                        f"pass {last_result.pass_number}",
-                        f"total {format_duration(last_result.elapsed_seconds)}",
-                    )
-                ),
-                safe_width,
+            _render_issue_history_line(
+                projection.issue_history,
+                width=safe_width,
+                color=color,
                 unicode=unicode,
             )
         )
-        colored_statuses.append((len(lines) - 1, last_result.status))
     lines.append(rule)
 
     def append_steps(
@@ -506,7 +541,8 @@ def render_workflow_progress(
             issue_budget,
         )
 
-    append_steps("WORKFLOW", workflow_steps, hidden_workflow)
+    if not _workflow_steps_are_complete(projection.workflow_steps):
+        append_steps("WORKFLOW", workflow_steps, hidden_workflow)
     if issue_steps:
         issue_id = issue_steps[0].issue_id
         if issue_id is None:
@@ -547,6 +583,25 @@ def render_workflow_progress(
             )
             colored_statuses = [
                 (index + 1 if index > heading_index else index, status)
+                for index, status in colored_statuses
+            ]
+        if projection.scheduler_summary:
+            heading_index = next(
+                index
+                for index, line in enumerate(lines)
+                if line.startswith(issue_heading)
+            )
+            insert_index = heading_index + (2 if projection.issue_title else 1)
+            lines.insert(
+                insert_index,
+                _fit_plain_text(
+                    projection.scheduler_summary,
+                    safe_width,
+                    unicode=unicode,
+                ),
+            )
+            colored_statuses = [
+                (index + 1 if index >= insert_index else index, status)
                 for index, status in colored_statuses
             ]
 
@@ -660,11 +715,12 @@ class IssueDashboardSnapshot:
     stage_durations: Mapping[Stage, float] = field(default_factory=dict)
     step_progress: tuple[WorkflowStepProgress, ...] = ()
     workflow_progress: WorkflowProgress | None = None
-    last_result: IssueResultSummary | None = None
+    issue_history: tuple[IssueResultSummary, ...] = ()
     elapsed_seconds: float = 0.0
     inactivity_seconds: float = 0.0
     activity: str = "Waiting for the first Codex update."
     max_step_rows: int | None = None
+    scheduler_summary: str = ""
 
 
 def format_duration(seconds: float) -> str:
@@ -694,8 +750,12 @@ def render_issue_dashboard(
             if snapshot.workflow_progress is not None
             else None
         ),
-        last_result=_terminal_safe_result_summary(snapshot.last_result),
+        issue_history=_safe_issue_history(snapshot.issue_history),
         activity=_safe_progress_text(snapshot.activity, max_length=300),
+        scheduler_summary=_safe_progress_text(
+            snapshot.scheduler_summary,
+            max_length=200,
+        ),
     )
     frame = _safe_progress_text(frame, max_length=4)
     safe_width = max(1, width)
@@ -743,32 +803,31 @@ def render_issue_dashboard(
 
     plain_lines: list[str] = []
     colored_statuses: list[tuple[int, DashboardStatus]] = []
-    if snapshot.last_result is not None:
-        last_result = snapshot.last_result
+    if snapshot.issue_history:
+        plain_lines.append(
+            _render_issue_history_line(
+                snapshot.issue_history,
+                width=safe_width,
+                color=color,
+                unicode=unicode,
+            )
+        )
+    plain_lines.append(rule_character * safe_width)
+    plain_lines.extend(
+        (
+            _fit_plain_text(header, safe_width, unicode=unicode),
+            _fit_plain_text(snapshot.issue_title, safe_width, unicode=unicode),
+        )
+    )
+    if snapshot.scheduler_summary:
         plain_lines.append(
             _fit_plain_text(
-                separator.join(
-                    (
-                        "LAST RESULT",
-                        last_result.issue_number,
-                        last_result.status.value,
-                        f"pass {last_result.pass_number}",
-                        f"total {format_duration(last_result.elapsed_seconds)}",
-                    )
-                ),
+                snapshot.scheduler_summary,
                 safe_width,
                 unicode=unicode,
             )
         )
-        colored_statuses.append((len(plain_lines) - 1, last_result.status))
-    plain_lines.extend(
-        (
-            rule_character * safe_width,
-            _fit_plain_text(header, safe_width, unicode=unicode),
-            _fit_plain_text(snapshot.issue_title, safe_width, unicode=unicode),
-            "",
-        )
-    )
+    plain_lines.append("")
     if snapshot.step_progress:
         for step in snapshot.step_progress:
             plain_lines.append(
@@ -838,6 +897,61 @@ def _stage_elapsed_seconds(
             snapshot.stage_durations.get(stage, 0.0) + snapshot.elapsed_seconds,
         )
     return max(0.0, snapshot.stage_durations.get(stage, 0.0))
+
+
+def _workflow_steps_are_complete(
+    steps: tuple[WorkflowStepProgress, ...],
+) -> bool:
+    return bool(steps) and all(
+        step.status is DashboardStatus.PASS for step in steps
+    )
+
+
+def _color_issue_number(
+    issue_number: str,
+    status: DashboardStatus,
+    *,
+    color: bool,
+) -> str:
+    if not color:
+        return issue_number
+    issue_color = (
+        _PASS_COLOR
+        if status is DashboardStatus.PASS
+        else _FAIL_COLOR
+    )
+    return f"{issue_color}{issue_number}{_RESET}"
+
+
+def _render_issue_history_line(
+    history: tuple[IssueResultSummary, ...],
+    *,
+    width: int,
+    color: bool,
+    unicode: bool,
+) -> str:
+    separator = " · " if unicode else " - "
+    prefix = f"RUN{separator}"
+    plain_line = _fit_plain_text(
+        prefix + separator.join(entry.issue_number for entry in history),
+        width,
+        unicode=unicode,
+    )
+    if not color:
+        return plain_line
+    colored_line = plain_line
+    for entry in history:
+        colored_token = _color_issue_number(
+            entry.issue_number,
+            entry.status,
+            color=True,
+        )
+        colored_line = colored_line.replace(
+            entry.issue_number,
+            colored_token,
+            1,
+        )
+    return colored_line
 
 
 def _fit_plain_text(text: str, width: int, *, unicode: bool) -> str:
@@ -914,7 +1028,7 @@ def _live_workflow_progress(
     issue_title: str,
     issue_position: int,
     issue_total: int,
-    last_result: IssueResultSummary | None,
+    issue_history: tuple[IssueResultSummary, ...] = (),
 ) -> WorkflowProgress | None:
     if progress is None:
         return None
@@ -942,7 +1056,7 @@ def _live_workflow_progress(
         issue_title=_safe_progress_text(issue_title),
         issue_position=max(0, issue_position),
         issue_total=max(0, issue_total),
-        last_result=last_result,
+        issue_history=issue_history,
     )
 
 
@@ -979,6 +1093,8 @@ class IssueDashboard:
         issue_title: str,
         position: int,
         total: int,
+        finished_issue_numbers: Iterable[str] = (),
+        issue_history: Iterable[IssueResultSummary] = (),
         stream: TextIO | None = None,
         clock: Callable[[], float] = time.monotonic,
         frame_seconds: float = WAITING_FRAME_SECONDS,
@@ -1007,8 +1123,20 @@ class IssueDashboard:
         }
         self._step_progress: tuple[WorkflowStepProgress, ...] = ()
         self._workflow_progress: WorkflowProgress | None = None
-        self._visible_last_result: IssueResultSummary | None = None
+        self._scheduler_summary = ""
         self._pending_last_result: IssueResultSummary | None = None
+        self._issue_history = list(_safe_issue_history(issue_history))
+        for number in _safe_issue_numbers(finished_issue_numbers):
+            if any(entry.issue_number == number for entry in self._issue_history):
+                continue
+            self._issue_history.append(
+                IssueResultSummary(
+                    issue_number=number,
+                    status=DashboardStatus.PASS,
+                    pass_number=1,
+                    elapsed_seconds=0.0,
+                )
+            )
         self._active_stage = Stage.DEVELOPMENT
         self._pass_number = 1
         self._activity = "Waiting for the first Codex update."
@@ -1055,10 +1183,19 @@ class IssueDashboard:
         position: int,
         total: int,
     ) -> None:
+        was_animating = self._thread is not None
         self._stop_animation()
         with self._lock:
-            self._visible_last_result = self._pending_last_result
-            self._issue_number = _safe_progress_text(issue_number, max_length=64)
+            normalized_issue_number = _safe_progress_text(
+                issue_number,
+                max_length=64,
+            )
+            if (
+                self._pending_last_result is not None
+                and self._pending_last_result.issue_number != normalized_issue_number
+            ):
+                self._promote_pending_to_history()
+            self._issue_number = normalized_issue_number
             self._issue_title = _safe_progress_text(issue_title)
             self._position = position
             self._total = total
@@ -1072,6 +1209,21 @@ class IssueDashboard:
             self._activity = "Waiting for the first Codex update."
             self._started_at = self._clock()
             self._last_activity_at = None
+            self._render_locked()
+        if was_animating:
+            self._start_animation()
+
+    def _promote_pending_to_history(self) -> None:
+        pending = self._pending_last_result
+        if pending is None:
+            return
+        for index, entry in enumerate(self._issue_history):
+            if entry.issue_number == pending.issue_number:
+                self._issue_history[index] = pending
+                self._pending_last_result = None
+                return
+        self._issue_history.append(pending)
+        self._pending_last_result = None
 
     def finish_issue(self, status: str, activity: str = "") -> None:
         self._stop_animation()
@@ -1103,7 +1255,10 @@ class IssueDashboard:
                 if self._workflow_progress is not None
                 else None
             )
-            self._workflow_progress = progress
+            self._workflow_progress = replace(
+                progress,
+                scheduler_summary=self._scheduler_summary,
+            )
             active = progress.active_step
             if active is not None and (
                 previous_active is None
@@ -1114,6 +1269,19 @@ class IssueDashboard:
                 self._started_at = self._clock()
                 self._last_activity_at = None
                 self._activity = "Waiting for the first Codex update."
+            self._render_locked()
+
+    def show_scheduler_status(self, summary: str) -> None:
+        with self._lock:
+            self._scheduler_summary = _safe_progress_text(
+                summary,
+                max_length=200,
+            )
+            if self._workflow_progress is not None:
+                self._workflow_progress = replace(
+                    self._workflow_progress,
+                    scheduler_summary=self._scheduler_summary,
+                )
             self._render_locked()
 
     def restore_role(self, stage: Stage, status: str) -> None:
@@ -1227,13 +1395,14 @@ class IssueDashboard:
                     issue_title=self._issue_title,
                     issue_position=self._position,
                     issue_total=self._total,
-                    last_result=self._visible_last_result,
+                    issue_history=tuple(self._issue_history),
                 ),
-                last_result=self._visible_last_result,
+                issue_history=tuple(self._issue_history),
                 elapsed_seconds=elapsed_seconds,
                 inactivity_seconds=inactivity_seconds,
                 activity=self._activity,
-                max_step_rows=max(1, terminal_size.lines - 10),
+                max_step_rows=max(1, terminal_size.lines - 11),
+                scheduler_summary=self._scheduler_summary,
             ),
             width=width,
             color=_use_color(self._stream),
@@ -1376,7 +1545,6 @@ class WaitingIndicator:
             issue_title="",
             issue_position=0,
             issue_total=0,
-            last_result=None,
         )
         if progress is None:
             return self._status_line(frame)

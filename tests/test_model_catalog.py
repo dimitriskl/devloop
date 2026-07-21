@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any, Mapping
@@ -42,6 +44,32 @@ class _FailingCatalogSession:
 
 
 class CodexModelCatalogAdapterTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
+    def test_catalog_timeout_kills_child_retaining_inherited_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            executable = root / "codex"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import subprocess, sys\n"
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'], "
+                "stdout=sys.stdout, stderr=sys.stderr)\n"
+                "import time; time.sleep(5)\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            adapter = CodexModelCatalogAdapter(
+                str(executable),
+                cwd=root,
+                timeout_seconds=0.2,
+            )
+            started_at = time.monotonic()
+
+            with self.assertRaisesRegex(CatalogDiscoveryError, "Timed out"):
+                adapter.discover()
+
+        self.assertLess(time.monotonic() - started_at, 2.0)
+
     def test_discovery_uses_the_target_repository_configuration_context(self) -> None:
         target_repo = Path("/target/repository")
         received_cwds: list[Path] = []

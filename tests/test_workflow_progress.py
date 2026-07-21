@@ -258,7 +258,7 @@ class WorkflowProgressProjectionTests(unittest.TestCase):
             frame="/",
         )
 
-        self.assertIn("WORKFLOW", rendered)
+        self.assertNotIn("WORKFLOW", rendered)
         self.assertIn("CURRENT ISSUE - 0009", rendered)
         self.assertIn("Security Review", rendered)
         self.assertIn("Final Review", rendered)
