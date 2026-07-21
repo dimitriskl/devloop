@@ -248,11 +248,13 @@ class IssueDashboardRenderingTests(unittest.TestCase):
             active_step_instance_id=HOSTILE_TERMINAL_TEXT,
             activity=replace(progress.activity, safe_text=HOSTILE_TERMINAL_TEXT),
             issue_title=HOSTILE_TERMINAL_TEXT,
-            last_result=statusui.IssueResultSummary(
-                issue_number=HOSTILE_TERMINAL_TEXT,
-                status=statusui.DashboardStatus.PASS,
-                pass_number=1,
-                elapsed_seconds=1,
+            issue_history=(
+                statusui.IssueResultSummary(
+                    issue_number=HOSTILE_TERMINAL_TEXT,
+                    status=statusui.DashboardStatus.PASS,
+                    pass_number=1,
+                    elapsed_seconds=1,
+                ),
             ),
         )
 
@@ -264,7 +266,14 @@ class IssueDashboardRenderingTests(unittest.TestCase):
                     issue_title=HOSTILE_TERMINAL_TEXT,
                     position=9,
                     total=10,
-                    finished_issue_numbers=(HOSTILE_TERMINAL_TEXT,),
+                    issue_history=(
+                        statusui.IssueResultSummary(
+                            issue_number=HOSTILE_TERMINAL_TEXT,
+                            status=statusui.DashboardStatus.PASS,
+                            pass_number=1,
+                            elapsed_seconds=0.0,
+                        ),
+                    ),
                     stream=output,
                     frame_seconds=60,
                     terminal_size=lambda **_: os.terminal_size((1200, 40)),
@@ -438,7 +447,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         self.assertIn("WAITING   REVIEW      · pass 2 · 00:00:08", rendered)
         self.assertIn("WAITING   QA          · pass 2 · 00:00:05", rendered)
 
-    def test_next_issue_reuses_card_region_and_shows_only_last_result(self) -> None:
+    def test_next_issue_reuses_card_region_and_shows_run_summary(self) -> None:
         class Clock:
             value = 0.0
 
@@ -452,7 +461,14 @@ class IssueDashboardRenderingTests(unittest.TestCase):
             issue_title="Publish a validated sample Level Catalog",
             position=2,
             total=26,
-            finished_issue_numbers=("0001",),
+            issue_history=(
+                statusui.IssueResultSummary(
+                    issue_number="0001",
+                    status=statusui.DashboardStatus.PASS,
+                    pass_number=1,
+                    elapsed_seconds=0.0,
+                ),
+            ),
             stream=output,
             clock=clock,
             frame_seconds=60,
@@ -476,14 +492,12 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         transition = output.getvalue()[transition_start:]
         plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transition)
         self.assertIn("\x1b[11A", transition)
-        self.assertIn(
-            "LAST RESULT · 0002 · PASS · pass 1 · total 00:00:05",
-            plain,
-        )
-        self.assertIn("FINISHED ISSUES (2) · 0001, 0002", plain)
+        self.assertIn("RUN · 0001 · 0002", plain)
+        self.assertNotIn("LAST RESULT", plain)
+        self.assertNotIn("FINISHED ISSUES", plain)
         self.assertIn("CURRENT ISSUE · 0003 · 3/26 · 23 remaining", plain)
 
-    def test_failed_attempt_is_not_added_to_finished_issues(self) -> None:
+    def test_failed_retry_does_not_add_issue_to_run_summary_until_pass(self) -> None:
         output = FakeStream()
         dashboard = statusui.IssueDashboard(
             issue_number="0002",
@@ -517,8 +531,9 @@ class IssueDashboardRenderingTests(unittest.TestCase):
             "",
             output.getvalue()[transition_start:],
         )
-        self.assertIn("FINISHED ISSUES (1) · 0002", transition)
-        self.assertNotIn("FINISHED ISSUES (2)", transition)
+        self.assertIn("RUN · 0002", transition)
+        self.assertNotIn("RUN · 0002 · 0002", transition)
+        self.assertNotIn("FINISHED ISSUES", transition)
 
     def test_small_terminal_windows_rows_around_the_active_step(self) -> None:
         workflow = default_portable_workflow()
@@ -678,7 +693,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         dashboard.show_workflow_progress(completed)
 
         transition = output.getvalue()[transition_start:]
-        self.assertEqual(transition.count("\x1b[2K"), 14)
+        self.assertEqual(transition.count("\x1b[2K"), 12)
         self.assertTrue(transition.endswith("\x1b[4A\r"))
 
 

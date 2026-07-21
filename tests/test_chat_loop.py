@@ -788,11 +788,13 @@ class RunPlanningChatTests(unittest.TestCase):
             issue_steps=(issue_step, *progress.issue_steps[1:]),
             activity=replace(progress.activity, safe_text=HOSTILE_TERMINAL_TEXT),
             issue_title=HOSTILE_TERMINAL_TEXT,
-            last_result=IssueResultSummary(
-                issue_number=HOSTILE_TERMINAL_TEXT,
-                status=DashboardStatus.PASS,
-                pass_number=1,
-                elapsed_seconds=1,
+            issue_history=(
+                IssueResultSummary(
+                    issue_number=HOSTILE_TERMINAL_TEXT,
+                    status=DashboardStatus.PASS,
+                    pass_number=1,
+                    elapsed_seconds=1,
+                ),
             ),
         )
         callbacks = ChatCallbacks(

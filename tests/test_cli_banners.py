@@ -982,7 +982,7 @@ class RunIssueSignatureTests(unittest.TestCase):
                 )
 
         rendered = output.getvalue()
-        self.assertIn("WORKFLOW", rendered)
+        self.assertNotIn("WORKFLOW", rendered)
         self.assertIn("CURRENT ISSUE · 0001", rendered)
         self.assertIn("Security Review", rendered)
         self.assertIn("Final Review", rendered)
@@ -1105,8 +1105,9 @@ class RunIssueSignatureTests(unittest.TestCase):
                 dashboard.close()
 
         transition = output.getvalue()[transition_start:]
-        self.assertIn("LAST RESULT · 0001 · \x1b[1;32mPASS", transition)
+        self.assertIn("RUN · \x1b[1;32m0001\x1b[0m", transition)
         self.assertIn("CURRENT ISSUE · 0002 · 2/2 · 0 remaining", transition)
+        self.assertNotIn("LAST RESULT", transition)
         self.assertNotIn("[0001] Completed.", output.getvalue())
 
 

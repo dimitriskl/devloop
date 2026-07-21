@@ -428,8 +428,13 @@ def main(
     print(f"Loop state: {state_writer.board_path}")
 
     persisted_issue_states = state_writer.state.get("issues", {})
-    finished_issue_numbers = tuple(
-        issue.number
+    seeded_issue_history = tuple(
+        statusui.IssueResultSummary(
+            issue_number=issue.number,
+            status=statusui.DashboardStatus.PASS,
+            pass_number=1,
+            elapsed_seconds=0.0,
+        )
         for issue in source_issues
         if issue.completed
         or (
@@ -450,7 +455,7 @@ def main(
             issue_title=issues[0].title,
             position=1,
             total=len(issues),
-            finished_issue_numbers=finished_issue_numbers,
+            issue_history=seeded_issue_history,
         )
     )
     current_schedule_position = 1
