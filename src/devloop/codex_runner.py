@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, TextIO
 
 from .codex_events import (
     CodexTurnOutcome,
+    RunWideBlocker,
+    classify_run_wide_blocker,
     codex_turn_outcome,
     parse_codex_event,
     render_safe_codex_activity,
@@ -23,10 +27,13 @@ from .issue_pack import Issue
 from .portable_text import normalize_single_line_display_name
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage, WaitingIndicator
-from .step_configuration import STEP_GUIDANCE_PRECEDENCE
+from .step_configuration import STEP_GUIDANCE_PRECEDENCE, StepGuidance
 from .subprocess_utils import (
+    AttemptExecutionBudget,
     ProcessExecutionBudget,
     output_text,
+    process_tree_creation_kwargs,
+    register_process_tree,
     reap_process_after_terminal_event,
     run_captured_text,
     terminate_process,
@@ -40,6 +47,18 @@ if TYPE_CHECKING:
 _LEGACY_APPROVAL_FLAG: bool | None = None
 CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
 STREAM_THREAD_JOIN_SECONDS = 1.0
+PORTABLE_LOG_MARKER = "portable-step"
+PORTABLE_LOG_TOKEN_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+PORTABLE_STEP_INSTANCE_ID_PATTERN = (
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
+LOG_ATTEMPT_TOKEN_MAX_LENGTH = 24
+LOG_FALLBACK_ATTEMPT_TOKEN_MAX_LENGTH = 16
+LOG_FALLBACK_ROLE_TOKEN_MAX_LENGTH = 12
+LOG_TOKEN_HASH_LENGTH = 8
+MAX_PORTABLE_LOG_PATH_LENGTH = 259
+LONGEST_ROLE_LOG_SUFFIX = ".last-message.json"
 FAST_CLI_SERVICE_TIER = "fast"
 STANDARD_CLI_SERVICE_TIER = "default"
 ROLE_STAGES = {
@@ -52,6 +71,12 @@ DEVLOOP_RUN_GOAL = (
     "and tested so the finished product has as few bugs and deficiencies as practical."
 )
 ActivityCallback = Callable[[str | None], None]
+
+
+class RunWideBlockerError(RuntimeError):
+    def __init__(self, blocker: RunWideBlocker) -> None:
+        super().__init__(blocker.summary)
+        self.blocker = blocker
 
 
 def resolve_codex_executable(codex: str) -> str:
@@ -171,6 +196,7 @@ def run_streaming_codex_command(
     activity_context: str = "",
     activity_callback: ActivityCallback | None = None,
     execution_budget: ExecutionBudget | None = None,
+    attempt_budget: AttemptExecutionBudget | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -182,7 +208,9 @@ def run_streaming_codex_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **process_tree_creation_kwargs(),
     )
+    register_process_tree(process)
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
@@ -206,6 +234,7 @@ def run_streaming_codex_command(
             process,
             timeout_seconds=execution_budget.timeout_seconds,
             checkpoint_seconds=execution_budget.checkpoint_seconds,
+            attempt_budget=attempt_budget,
         )
         if execution_budget is not None
         else None
@@ -461,13 +490,17 @@ class CodexRunner:
             step_guidance=step_guidance,
         )
 
-        attempt_slug = slugify_log_token(attempt_label)
         prefix_parts = [slugify_log_token(issue.number) or "issue"]
-        if attempt_slug:
-            prefix_parts.append(attempt_slug)
+        attempt_identity = step_attempt_id or prompt_session_id or str(uuid.uuid4())
+        attempt_slug = compact_log_identity_token(attempt_identity)
+        prefix_parts.append(f"attempt-{attempt_slug or uuid.uuid4()}")
+        attempt_label_slug = slugify_log_token(attempt_label)
+        if attempt_label_slug:
+            prefix_parts.append(attempt_label_slug)
         if step_instance_id:
             prefix_parts.extend(
                 [
+                    PORTABLE_LOG_MARKER,
                     slugify_log_token(step_display_name) or "step",
                     slugify_log_token(step_instance_id) or "instance",
                 ]
@@ -475,7 +508,15 @@ class CodexRunner:
         prefix_parts.extend(
             [slugify_log_token(role) or "role", f"pass{pass_number}"]
         )
-        prefix = "-".join(prefix_parts)
+        prefix = _fit_role_log_prefix(
+            log_root=self.log_root,
+            readable_prefix="-".join(prefix_parts),
+            issue_slug=prefix_parts[0],
+            attempt_identity=attempt_identity,
+            step_instance_id=step_instance_id,
+            role=role,
+            pass_number=pass_number,
+        )
         prompt_path = _confined_log_path(
             self.log_root / f"{prefix}.prompt.md",
             self.log_root,
@@ -521,6 +562,13 @@ class CodexRunner:
         self.write_log_text(stdout_path, result.stdout)
         self.write_log_text(stderr_path, result.stderr)
 
+        run_wide_blocker = classify_run_wide_blocker(
+            output_text(result.stdout),
+            output_text(result.stderr),
+        )
+        if run_wide_blocker is not None:
+            raise RunWideBlockerError(run_wide_blocker)
+
         if result.returncode != 0:
             return RoleResult(
                 status="BLOCKED",
@@ -546,6 +594,14 @@ class CodexRunner:
         attempt = 1
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        attempt_budget = (
+            AttemptExecutionBudget(
+                timeout_seconds=execution_budget.timeout_seconds,
+                checkpoint_seconds=execution_budget.checkpoint_seconds,
+            )
+            if execution_budget is not None
+            else None
+        )
 
         while True:
             result = run_streaming_codex_command(
@@ -556,13 +612,27 @@ class CodexRunner:
                 activity_context=activity_context,
                 activity_callback=activity_callback,
                 execution_budget=execution_budget,
+                attempt_budget=attempt_budget,
             )
             current_stdout = output_text(result.stdout)
             current_stderr = output_text(result.stderr)
+            if attempt_budget is not None and (current_stdout or current_stderr):
+                attempt_budget.notify_activity()
             stdout_parts.append(current_stdout)
             stderr_parts.append(current_stderr)
             result.stdout = "".join(stdout_parts)
             result.stderr = "".join(stderr_parts)
+
+            if attempt_budget is not None:
+                expiration = attempt_budget.expiration()
+                if expiration is not None:
+                    result.returncode = 124
+                    if expiration not in result.stderr:
+                        result.stderr += f"{expiration}\n"
+                    return result
+
+            if classify_run_wide_blocker(current_stdout, current_stderr) is not None:
+                return result
 
             if result.returncode == 0 or not is_retryable_codex_connection_failure(current_stderr):
                 return result
@@ -579,7 +649,17 @@ class CodexRunner:
             result.stderr = "".join(stderr_parts)
             self.write_log_text(stdout_path, result.stdout, log_root=log_root)
             self.write_log_text(stderr_path, result.stderr, log_root=log_root)
-            time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
+            if attempt_budget is None:
+                time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
+            else:
+                expiration = attempt_budget.wait_for_retry(
+                    CODEX_CONNECTION_RETRY_DELAY_SECONDS
+                )
+                if expiration is not None:
+                    result.returncode = 124
+                    if expiration not in result.stderr:
+                        result.stderr += f"{expiration}\n"
+                    return result
             attempt += 1
 
     def render_dry_run_prompts(
@@ -762,7 +842,11 @@ class CodexRunner:
                 if agent_paths is not None
                 else role_config.get("agents", [])
             ),
-            "STEP_GUIDANCE": step_guidance or "No additional Step Guidance.",
+            "STEP_GUIDANCE": (
+                StepGuidance(step_guidance).text
+                if step_guidance
+                else "No additional Step Guidance."
+            ),
             "STEP_GUIDANCE_PRECEDENCE": STEP_GUIDANCE_PRECEDENCE,
             "FIX_LIST": fix_list or ["None"],
             "CODER_RESULT": json.dumps(result_to_dict(coder_result), indent=2),
@@ -831,7 +915,79 @@ def slugify_log_token(value: str | None) -> str:
     if not value:
         return ""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug[:48]
+    # Truncation can expose the separator that was previously followed by
+    # characters outside the length limit, so normalize the boundary again.
+    return slug[:48].strip("-")
+
+
+def compact_log_identity_token(
+    value: str,
+    max_length: int = LOG_ATTEMPT_TOKEN_MAX_LENGTH,
+) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    if slug and len(slug) <= max_length:
+        return slug
+
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:LOG_TOKEN_HASH_LENGTH]
+    if max_length <= LOG_TOKEN_HASH_LENGTH:
+        return digest[:max_length]
+
+    prefix_length = max_length - LOG_TOKEN_HASH_LENGTH - 1
+    prefix = slug[:prefix_length].rstrip("-")
+    return f"{prefix}-{digest}" if prefix else digest
+
+
+def _fit_role_log_prefix(
+    *,
+    log_root: Path,
+    readable_prefix: str,
+    issue_slug: str,
+    attempt_identity: str,
+    step_instance_id: str | None,
+    role: str,
+    pass_number: int,
+) -> str:
+    if _role_log_prefix_fits(log_root, readable_prefix):
+        return readable_prefix
+
+    prefix_parts = [
+        issue_slug,
+        (
+            "attempt-"
+            + compact_log_identity_token(
+                attempt_identity,
+                LOG_FALLBACK_ATTEMPT_TOKEN_MAX_LENGTH,
+            )
+        ),
+    ]
+    if step_instance_id:
+        prefix_parts.extend(
+            [
+                PORTABLE_LOG_MARKER,
+                "step",
+                slugify_log_token(step_instance_id) or "instance",
+            ]
+        )
+    prefix_parts.extend(
+        [
+            compact_log_identity_token(role, LOG_FALLBACK_ROLE_TOKEN_MAX_LENGTH),
+            f"pass{pass_number}",
+        ]
+    )
+    compact_prefix = "-".join(prefix_parts)
+    if _role_log_prefix_fits(log_root, compact_prefix):
+        return compact_prefix
+
+    raise OSError(
+        "Dev Loop's issue-local log path is too long for portable Windows "
+        f"writes even after filename compaction: {log_root}. "
+        "Choose a shorter implementation worktree path."
+    )
+
+
+def _role_log_prefix_fits(log_root: Path, prefix: str) -> bool:
+    longest_path = (log_root / f"{prefix}{LONGEST_ROLE_LOG_SUFFIX}").resolve()
+    return len(str(longest_path)) <= MAX_PORTABLE_LOG_PATH_LENGTH
 
 
 def _confined_log_path(path: Path, log_root: Path) -> Path:
