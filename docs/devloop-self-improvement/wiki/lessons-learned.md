@@ -12,13 +12,13 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: Preflight every non-repository prerequisite, show which acceptance gates are unavailable, and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
 - Last seen: 2026-07-21
 
-## Retry External Blockers Only After State Changes
+## Retry Equivalent Blockers Only After State Changes
 
-- Applies to: blocked retry rounds, coder scheduling and long-running issue packs
-- Lesson: A clean Codex attempt cannot fix a proven external prerequisite, so unchanged quota, authentication, connectivity, platform, permission, or publication blockers should not consume another retry round.
-- Evidence: Issue 0003 received five fresh dependency-scheduler attempts on July 21; every attempt reproduced the same missing MAUI workload, device-tooling, and Apple-host blocker while repository-only verification kept passing.
-- Action: Fingerprint external blockers and the relevant environment or account state, skip equivalent retries until that state changes, and leave one concise operator action on the loop board.
-- Last seen: 2026-07-21
+- Applies to: blocked retry rounds, role-output validation, external prerequisites and long-running issue packs
+- Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round.
+- Evidence: Issue 0003 received five attempts on July 21 that reproduced the same missing platform prerequisites. On July 22, Issue 0001 timed out once and then five blocker-resolution attempts returned the same invalid role-schema result while seven dependent issues remained waiting.
+- Action: Fingerprint normalized blocker reasons with their relevant environment or contract state; after an equivalent retry, stop until that state or guidance changes, surface a concise validation diagnostic, and leave one operator or runner action on the loop board.
+- Last seen: 2026-07-22
 
 ## Validate Every Component Of Derived Data
 
