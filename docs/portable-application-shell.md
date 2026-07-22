@@ -146,6 +146,8 @@ event dump.
   retry.
 - The latest important event is visible in the normal view. F4 opens complete
   durable logs filtered to the selected Issue, Step, attempt, or post-run task.
+- From Completion Review, F4 starts with every reviewed issue, its final status,
+  and the recorded failure or dependency reason before the captured activity.
 - The log viewer supports follow mode, scrolling, search, copy, and switching
   between summary, stdout, stderr, and structured events when available.
 - Codex JSONL, Git output, worktree commands, validation commands, and

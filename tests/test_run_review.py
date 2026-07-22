@@ -101,6 +101,33 @@ class RunReviewTests(unittest.TestCase):
             ((RunReviewAction.EXIT.value, "Exit Dev Loop"),),
         )
 
+    def test_review_uses_the_latest_failed_pass_reason_as_fallback(self) -> None:
+        issue = Issue("0004", "Failed", Path("0004.md"), False)
+        review = build_run_review(
+            [issue],
+            {
+                "0004": {
+                    "status": "FAILED",
+                    "passes": [
+                        {
+                            "role": "qa",
+                            "result": {
+                                "status": "FAIL",
+                                "summary": "Focused verification failed.",
+                            },
+                        }
+                    ],
+                }
+            },
+            loop_state_path=Path("README.loop.md"),
+            rerun_available=True,
+        )
+
+        rendered = render_run_review(review, RunReviewAction.EXIT)
+
+        self.assertIn("FAILED     0004", rendered)
+        self.assertIn("Focused verification failed.", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

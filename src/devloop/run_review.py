@@ -172,6 +172,26 @@ def _issue_detail(status: IssueStatus, state: Mapping[str, Any]) -> str:
                 value,
                 max_length=ISSUE_DETAIL_MAX_LENGTH,
             )
+    passes = state.get("passes")
+    if isinstance(passes, list):
+        for pass_entry in reversed(passes):
+            if not isinstance(pass_entry, dict):
+                continue
+            result = pass_entry.get("result")
+            if not isinstance(result, dict) or result.get("status") == "PASS":
+                continue
+            detail = result.get("summary")
+            if not detail:
+                for key in ("fix_list", "findings", "residual_risks"):
+                    values = result.get(key)
+                    if isinstance(values, list) and values:
+                        detail = values[0]
+                        break
+            if detail:
+                return compact_terminal_text(
+                    detail,
+                    max_length=ISSUE_DETAIL_MAX_LENGTH,
+                )
     return ""
 
 

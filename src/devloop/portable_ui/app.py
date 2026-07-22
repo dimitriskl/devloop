@@ -35,6 +35,8 @@ DEFAULT_ACTION_BAR = (
     "F1 Help | F2 Primary | F3 View | F4 Logs | F5 Context | "
     "F9 Actions | Esc Back"
 )
+CAPTURED_ACTIVITY_TITLE = "Captured Activity"
+COMPLETION_REVIEW_LOG_TITLE = "Completion Review and Captured Activity"
 
 
 class PortableTextOverlay(ModalScreen[None]):
@@ -62,13 +64,19 @@ class PortableTextOverlay(ModalScreen[None]):
 class PortableLogOverlay(ModalScreen[None]):
     BINDINGS = [Binding("escape", "close", "Close", show=False)]
 
-    def __init__(self, lines: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        lines: tuple[str, ...],
+        *,
+        title: str = CAPTURED_ACTIVITY_TITLE,
+    ) -> None:
         super().__init__()
         self._lines = lines
+        self._title = title
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="portable-overlay"):
-            yield Static("Captured Activity", classes="portable-overlay-title")
+            yield Static(self._title, classes="portable-overlay-title")
             yield Input(placeholder="Filter logs", id="portable-log-filter")
             yield RichLog(
                 id="portable-log-content",
@@ -294,6 +302,7 @@ class PortableApplicationShell(App[None]):
         self.operation_result: int | None = None
         self._workflow_complete = False
         self._captured_output: list[str] = []
+        self._completion_review_content: str | None = None
         self._activity_feed = PortableActivityFeed()
         self._latest_screen_content = render_logo().rstrip()
         self._input_history: tuple[str, ...] = ()
@@ -464,6 +473,8 @@ class PortableApplicationShell(App[None]):
                 preserve_newlines=True,
             )
             self._latest_screen_content = safe_content
+            if safe_content.lstrip().startswith(REVIEW_SCREEN_PATH):
+                self._completion_review_content = safe_content
             self.query_one("#portable-detail", Static).update(safe_content)
             heading = next(
                 (line.strip() for line in safe_content.splitlines() if line.strip()),
@@ -706,8 +717,16 @@ class PortableApplicationShell(App[None]):
         self._respond_to_shortcut("f5")
 
     def action_logs(self) -> None:
-        lines = tuple(self._captured_output) or ("No captured output yet.",)
-        self.push_screen(PortableLogOverlay(lines))
+        captured_lines = list(self._captured_output)
+        if self._completion_review_content is not None:
+            captured_lines.insert(0, self._completion_review_content)
+        lines = tuple(captured_lines) or ("No captured output yet.",)
+        title = (
+            COMPLETION_REVIEW_LOG_TITLE
+            if self._completion_review_content is not None
+            else CAPTURED_ACTIVITY_TITLE
+        )
+        self.push_screen(PortableLogOverlay(lines, title=title))
 
     def action_actions(self) -> None:
         if self._respond_to_shortcut("f9"):

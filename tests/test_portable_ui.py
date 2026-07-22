@@ -269,6 +269,38 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Last workflow view", detail)
             self.assertIn("WORKFLOW FINISHED", status)
 
+    async def test_f4_starts_with_all_completion_review_failures(self) -> None:
+        bridge = PortableRuntimeBridge()
+
+        def operation() -> int:
+            bridge.show_screen(
+                "Dev Loop > Completion Review\n\n"
+                "WORKFLOW FINISHED - ATTENTION REQUIRED\n"
+                "Completed: 1/3    Remaining: 2\n\n"
+                "Issue review\n"
+                "COMPLETED  0001  Finished feature\n"
+                "BLOCKED    0002  Broken feature - Review found a defect.\n"
+                "WAITING    0003  Dependent feature - waiting on 0002"
+            )
+            return 2
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            await pilot.press("f4")
+
+            self.assertIsInstance(app.screen, PortableLogOverlay)
+            review_log = "\n".join(app.screen._lines)
+            self.assertIn("COMPLETED  0001", review_log)
+            self.assertIn("BLOCKED    0002", review_log)
+            self.assertIn("Review found a defect.", review_log)
+            self.assertIn("WAITING    0003", review_log)
+            self.assertIn("waiting on 0002", review_log)
+
     async def test_completion_review_can_rerun_unfinished_issues(self) -> None:
         bridge = PortableRuntimeBridge()
         selected_actions: list[RunReviewAction] = []
