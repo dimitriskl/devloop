@@ -31,7 +31,7 @@ type another path.
 
 Re-run the same command to update an existing install.
 
-Use `--no-bin-links` when you do not want command links.
+The installer does not create command links and does not modify PATH.
 
 ## Development checkout
 
@@ -50,14 +50,15 @@ The source checkout and project data are preserved.
 
 ## Verify
 
-Open a new terminal, then:
+Verify prerequisites, then run the installed scripts directly:
 
 ```bash
 python3 --version
 codex --version
 git --version
-devloop --help
-devloop-plan --help
+cd "$HOME/devloop/bin"
+./devloop.sh --help
+./devloop-plan.sh --help
 ```
 
 ## Manual setup

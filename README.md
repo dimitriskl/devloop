@@ -68,20 +68,15 @@ irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps
 2. Clones or updates the bundle from GitHub into that folder.
 3. Builds and validates an isolated `.venv` from the committed portable runtime lock.
 4. Copies bundled Codex skills and agent references into your Codex home folder.
-5. Adds `devloop` and `devloop-plan` commands to your user PATH.
 
 Press Enter to accept the default install location:
 
 - Linux / macOS: `~/devloop`
 - Windows: `C:\devloop`
 
-Commands are linked into:
-
-- Linux / macOS: `~/.local/bin`
-- Windows: `%USERPROFILE%\.local\bin`
-
-Use `--no-bin-links` on Linux/macOS or `-NoBinLinks` on Windows when you do
-not want command shortcuts or PATH changes.
+The installer never creates command shortcuts and never modifies PATH. Run the
+scripts from the installed `bin` directory, or add that directory to PATH
+yourself.
 
 ### Development checkout without global installation
 
@@ -105,11 +100,11 @@ Linux/macOS:
 
 ### Uninstall
 
-The uninstaller removes the bundle-local runtime, generated `devloop` and
-`devloop-plan` command shortcuts, an empty installer-added command directory
-from PATH, and unchanged copies of bundled Codex skills and agent references.
-It preserves the source checkout, target-project PRDs, worktrees, branches, and
-any personally modified skill or agent file.
+The uninstaller removes the bundle-local runtime and unchanged copies of
+bundled Codex skills and agent references. For compatibility with older
+versions, it also removes their generated command shortcuts and applicable PATH
+entry. It preserves the source checkout, target-project PRDs, worktrees,
+branches, and any personally modified skill or agent file.
 
 Windows:
 
@@ -143,11 +138,20 @@ irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps
 
 ### Verify
 
-Open a new terminal after install, then:
+Windows:
+
+```powershell
+Set-Location 'C:\devloop\bin'
+.\devloop.ps1 --help
+.\devloop-plan.ps1 --help
+```
+
+Linux/macOS:
 
 ```bash
-devloop --help
-devloop-plan --help
+cd "$HOME/devloop/bin"
+./devloop.sh --help
+./devloop-plan.sh --help
 ```
 
 More detail: [docs/new-pc-setup.md](docs/new-pc-setup.md).

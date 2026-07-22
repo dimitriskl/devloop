@@ -30,7 +30,14 @@ class BundleInstallerScriptTests(unittest.TestCase):
 
     def test_unix_installer_help_exits_zero(self) -> None:
         result = subprocess.run(
-            ["bash", str(INSTALL_SH), "--help"],
+            [
+                "bash",
+                str(INSTALL_SH),
+                "--bin-dir",
+                "ignored",
+                "--no-bin-links",
+                "--help",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -62,8 +69,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertTrue((install_dir / "bin" / "devloop.sh").is_file())
-            self.assertTrue((bin_dir / "devloop").is_symlink())
-            self.assertTrue((bin_dir / "devloop-plan").is_symlink())
+            self.assertFalse(bin_dir.exists())
 
     def test_unix_installer_updates_existing_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -80,7 +86,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
                 }
             )
             first = subprocess.run(
-                ["bash", str(INSTALL_SH), "--no-skills", "--no-bin-links"],
+                ["bash", str(INSTALL_SH), "--no-skills"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -93,7 +99,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
             marker.write_text("updated", encoding="utf-8")
 
             second = subprocess.run(
-                ["bash", str(INSTALL_SH), "--no-skills", "--no-bin-links"],
+                ["bash", str(INSTALL_SH), "--no-skills"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -108,7 +114,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
         env = os.environ.copy()
         env.pop("DEVLOOP_INSTALL_DIR", None)
         result = subprocess.run(
-            ["bash", str(INSTALL_SH), "--no-skills", "--no-bin-links"],
+            ["bash", str(INSTALL_SH), "--no-skills"],
             capture_output=True,
             text=True,
             check=False,
@@ -135,7 +141,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
                 }
             )
             result = subprocess.run(
-                ["bash", str(INSTALL_SH), "--no-skills", "--no-bin-links"],
+                ["bash", str(INSTALL_SH), "--no-skills"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -203,7 +209,15 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
 
     def test_windows_installer_help_exits_zero(self) -> None:
         result = subprocess.run(
-            [*self.powershell_command, "-File", str(INSTALL_PS1), "-Help"],
+            [
+                *self.powershell_command,
+                "-File",
+                str(INSTALL_PS1),
+                "-BinDir",
+                "ignored",
+                "-NoBinLinks",
+                "-Help",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -384,6 +398,7 @@ class PortableRuntimePackagingTests(unittest.TestCase):
         for launcher in launchers.values():
             self.assertIn(".venv", launcher)
             self.assertNotIn("devloop.logo", launcher)
+            self.assertIn("setup-development", launcher)
 
         for name, launcher in launchers.items():
             with self.subTest(name=name):
@@ -413,6 +428,19 @@ class PortableRuntimePackagingTests(unittest.TestCase):
             self.assertIn(".venv.next", installer)
             self.assertIn("requirements-portable.lock", installer)
             self.assertIn("textual.__version__", installer)
+
+    def test_installers_never_create_command_shortcuts_or_modify_path(self) -> None:
+        powershell_installer = INSTALL_PS1.read_text(encoding="utf-8")
+        shell_installer = INSTALL_SH.read_text(encoding="utf-8")
+
+        self.assertNotIn("SetEnvironmentVariable('Path'", powershell_installer)
+        self.assertNotIn(".cmd", powershell_installer)
+        self.assertNotIn("Install-CommandLaunchers", powershell_installer)
+
+        self.assertNotIn("DEVLOOP_BIN_DIR", shell_installer)
+        self.assertNotIn("ln -sf", shell_installer)
+        self.assertNotIn("LINK_COMMANDS", shell_installer)
+        self.assertNotIn("Linking commands", shell_installer)
 
     def test_development_setup_is_local_only_and_uninstall_is_available(self) -> None:
         setup_scripts = (

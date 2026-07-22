@@ -42,6 +42,10 @@ Verify the wrappers:
 .\bin\devloop.ps1 --help
 ```
 
+PowerShell does not search the current directory for bare command names. Even
+from `bin`, use `.\devloop-plan.ps1` or `.\devloop.ps1` unless you manually add
+the `bin` directory to PATH.
+
 On Ubuntu or macOS:
 
 ```bash

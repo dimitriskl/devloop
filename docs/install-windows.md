@@ -31,8 +31,7 @@ type another path.
 
 Re-run the same command to update an existing install.
 
-Use `-NoBinLinks` when running a downloaded installer if you do not want
-`devloop` command shortcuts or user PATH changes.
+The installer does not create command shortcuts and does not modify PATH.
 
 ## Development checkout
 
@@ -51,19 +50,21 @@ It creates only `.venv` inside the checkout.
 & '.\install\uninstall-devloop.ps1' -InstallDir 'C:\devloop'
 ```
 
-This removes the runtime, generated command shortcuts, applicable PATH entry,
-and unchanged installed capabilities. It preserves source and project data.
+This removes the runtime and unchanged installed capabilities. It also cleans
+up shortcuts and PATH changes made by older installer versions. It preserves
+source and project data.
 
 ## Verify
 
-Open a new terminal, then:
+Verify prerequisites, then run the installed scripts directly:
 
 ```powershell
 python --version
 codex --version
 git --version
-devloop --help
-devloop-plan --help
+Set-Location 'C:\devloop\bin'
+.\devloop.ps1 --help
+.\devloop-plan.ps1 --help
 ```
 
 ## Manual setup

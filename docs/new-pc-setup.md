@@ -46,15 +46,13 @@ irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps
 
 The installer asks where to install Dev Loop. Press Enter to accept the default,
 or type another path. It then clones or updates the bundle, copies bundled Codex
-skills and agent references, and adds `devloop` and `devloop-plan` commands to
-your user PATH.
+skills and agent references, and prepares its isolated runtime. It does not
+create command shortcuts or modify PATH.
 
 Defaults when you press Enter:
 
 - Linux/macOS bundle: `~/devloop`
-- Linux/macOS commands: `~/.local/bin`
 - Windows bundle: `C:\devloop`
-- Windows commands: `%USERPROFILE%\.local\bin`
 
 Re-run the same command to update an existing install. The installer prompts for
 the install directory again; press Enter if it is already at the default path.
@@ -84,11 +82,20 @@ irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps
 
 ## Verify
 
-Open a new terminal after install, then:
+Windows:
+
+```powershell
+Set-Location 'C:\devloop\bin'
+.\devloop.ps1 --help
+.\devloop-plan.ps1 --help
+```
+
+Linux/macOS:
 
 ```bash
-devloop --help
-devloop-plan --help
+cd "$HOME/devloop/bin"
+./devloop.sh --help
+./devloop-plan.sh --help
 ```
 
 ## Manual Setup
@@ -102,7 +109,8 @@ from `bin/`.
 
 To undo a normal installation, run the platform `install/uninstall-devloop`
 script. It removes installer-managed runtime, command, PATH, and unchanged
-capability artifacts while preserving source and project data.
+capability artifacts while preserving source and project data. Command and PATH
+cleanup applies to artifacts created by older installer versions.
 
 ## 1. Copy The Bundle
 

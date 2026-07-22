@@ -9,7 +9,6 @@
 #
 # Environment overrides:
 #   DEVLOOP_INSTALL_DIR  bundle location (skips prompt when set)
-#   DEVLOOP_BIN_DIR      command directory (default: ~/.local/bin)
 #   DEVLOOP_REPO_URL     git clone URL (default: https://github.com/dimitriskl/devloop.git)
 #   DEVLOOP_REF          branch or tag (default: main)
 
@@ -21,11 +20,9 @@ DEFAULT_INSTALL_DIR="$HOME/devloop"
 
 INSTALL_DIR=""
 INSTALL_DIR_SET=0
-BIN_DIR="${DEVLOOP_BIN_DIR:-$HOME/.local/bin}"
 REPO_URL="${DEVLOOP_REPO_URL:-$DEFAULT_REPO_URL}"
 REF="${DEVLOOP_REF:-$DEFAULT_REF}"
 INSTALL_SKILLS=1
-LINK_COMMANDS=1
 
 usage() {
   cat <<'EOF'
@@ -35,15 +32,13 @@ Install or update the portable Dev Loop bundle.
 
 Options:
   --dir PATH       Install directory (skips prompt; default: ~/devloop)
-  --bin-dir PATH   Directory for devloop commands (default: ~/.local/bin)
   --ref REF        Git branch or tag (default: main)
   --repo URL       Git repository URL
   --no-skills      Skip copying bundled Codex skills and agents
-  --no-bin-links   Skip creating devloop command links
   -h, --help       Show this help
 
 Environment:
-  DEVLOOP_INSTALL_DIR, DEVLOOP_BIN_DIR, DEVLOOP_REPO_URL, DEVLOOP_REF
+  DEVLOOP_INSTALL_DIR, DEVLOOP_REPO_URL, DEVLOOP_REF
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh | bash
@@ -81,18 +76,6 @@ find_python() {
   die "Python 3.10+ is required. Install Python and rerun this installer."
 }
 
-path_contains_dir() {
-  local dir="$1"
-  local entry
-  IFS=':' read -r -a path_entries <<< "${PATH:-}"
-  for entry in "${path_entries[@]}"; do
-    if [ "$entry" = "$dir" ]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -104,7 +87,7 @@ parse_args() {
         ;;
       --bin-dir)
         [ "$#" -ge 2 ] || die "--bin-dir requires a path"
-        BIN_DIR="$2"
+        # Accepted for compatibility; command links are never created.
         shift 2
         ;;
       --ref)
@@ -122,7 +105,7 @@ parse_args() {
         shift
         ;;
       --no-bin-links)
-        LINK_COMMANDS=0
+        # Accepted for compatibility; command links are never created.
         shift
         ;;
       -h|--help)
@@ -251,22 +234,6 @@ install_portable_runtime() {
   rm -rf "$previous"
 }
 
-link_command() {
-  local name="$1"
-  local target="$2"
-  mkdir -p "$BIN_DIR"
-  ln -sf "$target" "$BIN_DIR/$name"
-}
-
-link_commands() {
-  if [ "$LINK_COMMANDS" -eq 0 ]; then
-    return 0
-  fi
-  log "Linking commands into $BIN_DIR"
-  link_command devloop "$INSTALL_DIR/bin/devloop.sh"
-  link_command devloop-plan "$INSTALL_DIR/bin/devloop-plan.sh"
-}
-
 print_next_steps() {
   local python
   if [ "${DEVLOOP_TESTING:-0}" = "1" ]; then
@@ -280,19 +247,16 @@ print_next_steps() {
 Dev Loop is installed at:
   $INSTALL_DIR
 
-Commands:
-  devloop --help
-  devloop-plan --help
+Run from the bin directory:
+  cd "$INSTALL_DIR/bin"
+  ./devloop.sh --help
+  ./devloop-plan.sh --help
+
+The installer does not create shortcuts or modify PATH.
+To run the scripts from elsewhere, add this directory to PATH yourself:
+  $INSTALL_DIR/bin
 
 EOF
-
-  if [ "$LINK_COMMANDS" -eq 1 ] && ! path_contains_dir "$BIN_DIR"; then
-    cat <<EOF
-Add this directory to your PATH:
-  export PATH="$BIN_DIR:\$PATH"
-
-EOF
-  fi
 
   if ! command -v codex >/dev/null 2>&1; then
     cat <<EOF
@@ -324,7 +288,6 @@ main() {
   make_scripts_executable
   install_portable_runtime
   install_skills
-  link_commands
   print_next_steps
 }
 

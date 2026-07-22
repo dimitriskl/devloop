@@ -8,14 +8,13 @@
 #
 # Environment overrides:
 #   DEVLOOP_INSTALL_DIR  bundle location (skips prompt when set)
-#   DEVLOOP_BIN_DIR      command directory (default: %USERPROFILE%\.local\bin)
 #   DEVLOOP_REPO_URL     git clone URL (default: https://github.com/dimitriskl/devloop.git)
 #   DEVLOOP_REF          branch or tag (default: main)
 
 [CmdletBinding()]
 param(
     [string] $InstallDir,
-    [string] $BinDir = $(if ($env:DEVLOOP_BIN_DIR) { $env:DEVLOOP_BIN_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }),
+    [string] $BinDir,
     [string] $RepoUrl = $(if ($env:DEVLOOP_REPO_URL) { $env:DEVLOOP_REPO_URL } else { 'https://github.com/dimitriskl/devloop.git' }),
     [string] $Ref = $(if ($env:DEVLOOP_REF) { $env:DEVLOOP_REF } else { 'main' }),
     [switch] $NoSkills,
@@ -25,6 +24,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $DefaultInstallDir = 'C:\devloop'
+
+# BinDir and NoBinLinks remain accepted for older automation. They are ignored
+# because the installer never creates command launchers or modifies PATH.
+$null = $BinDir
+$null = $NoBinLinks
 
 function Write-InstallLog {
     param([string] $Message)
@@ -39,15 +43,13 @@ Install or update the portable Dev Loop bundle.
 
 Options:
   -InstallDir PATH   Install directory (skips prompt; default: C:\devloop)
-  -BinDir PATH       Directory for devloop commands (default: %USERPROFILE%\.local\bin)
   -Ref REF           Git branch or tag (default: main)
   -RepoUrl URL       Git repository URL
   -NoSkills          Skip copying bundled Codex skills and agents
-  -NoBinLinks         Skip creating devloop command launchers
   -Help              Show this help
 
 Environment:
-  DEVLOOP_INSTALL_DIR, DEVLOOP_BIN_DIR, DEVLOOP_REPO_URL, DEVLOOP_REF
+  DEVLOOP_INSTALL_DIR, DEVLOOP_REPO_URL, DEVLOOP_REF
 
 Examples:
   irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
@@ -336,59 +338,6 @@ function Install-PortableRuntime {
     }
 }
 
-function Test-PathInUserPath {
-    param([string] $Directory)
-
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ([string]::IsNullOrWhiteSpace($userPath)) {
-        return $false
-    }
-
-    return ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }).Count -gt 0
-}
-
-function Add-BinDirToUserPath {
-    if (Test-PathInUserPath -Directory $BinDir) {
-        return
-    }
-
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $updated = if ([string]::IsNullOrWhiteSpace($userPath)) {
-        $BinDir
-    }
-    else {
-        "$BinDir;$userPath"
-    }
-    [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
-    Write-InstallLog "Added $BinDir to the user PATH. Open a new terminal to use devloop commands."
-}
-
-function New-CommandLauncher {
-    param(
-        [string] $Name,
-        [string] $ScriptPath
-    )
-
-    $launcher = Join-Path $BinDir "$Name.cmd"
-    $content = @"
-@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "$ScriptPath" %*
-"@
-  Set-Content -LiteralPath $launcher -Value $content -Encoding ASCII
-}
-
-function Install-CommandLaunchers {
-    if ($NoBinLinks) {
-        return
-    }
-
-    Write-InstallLog "Creating command launchers in $BinDir"
-    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    New-CommandLauncher -Name 'devloop' -ScriptPath (Join-Path $InstallDir 'bin\devloop.ps1')
-    New-CommandLauncher -Name 'devloop-plan' -ScriptPath (Join-Path $InstallDir 'bin\devloop-plan.ps1')
-    Add-BinDirToUserPath
-}
-
 function Show-NextSteps {
     $python = if ($env:DEVLOOP_TESTING -eq '1') {
         Get-DevLoopPython
@@ -402,16 +351,15 @@ function Show-NextSteps {
     Write-Host 'Dev Loop is installed at:'
     Write-Host "  $InstallDir"
     Write-Host ''
-    Write-Host 'Commands:'
-    Write-Host '  devloop --help'
-    Write-Host '  devloop-plan --help'
+    Write-Host 'Run from the bin directory:'
+    Write-Host "  Set-Location -LiteralPath '$InstallDir\bin'"
+    Write-Host '  .\devloop.ps1 --help'
+    Write-Host '  .\devloop-plan.ps1 --help'
     Write-Host ''
-
-    if (-not $NoBinLinks -and -not (Test-PathInUserPath -Directory $BinDir)) {
-        Write-Host 'Add this directory to your PATH:'
-        Write-Host "  $BinDir"
-        Write-Host ''
-    }
+    Write-Host 'The installer does not create shortcuts or modify PATH.'
+    Write-Host 'To use bare command names, add this directory to PATH yourself:'
+    Write-Host "  $InstallDir\bin"
+    Write-Host ''
 
     if ($null -eq (Get-Command codex -ErrorAction SilentlyContinue)) {
         Write-Host 'Codex CLI was not found on PATH. Install and authenticate Codex before running Dev Loop:'
@@ -441,5 +389,4 @@ $InstallDir = ConvertTo-AbsoluteInstallPath -Path (Resolve-InstallDir)
 Sync-Bundle
 Install-PortableRuntime
 Install-BundledSkills
-Install-CommandLaunchers
 Show-NextSteps

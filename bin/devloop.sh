@@ -6,7 +6,7 @@ BUNDLE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PYTHON_BIN="$BUNDLE_ROOT/.venv/bin/python"
 if [ ! -x "$PYTHON_BIN" ]; then
-  printf 'Dev Loop runtime is missing or damaged. Rerun install/devloop.sh to repair it.\n' >&2
+  printf 'Dev Loop runtime is missing or damaged. Run install/setup-development.sh in a development checkout, or rerun install/devloop.sh in an installed bundle.\n' >&2
   exit 1
 fi
 export PYTHONPATH="$BUNDLE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"

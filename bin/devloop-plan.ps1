@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $bundleRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $bundleRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-    throw 'Dev Loop runtime is missing or damaged. Rerun install\devloop.ps1 to repair it.'
+    throw 'Dev Loop runtime is missing or damaged. Run install\setup-development.ps1 in a development checkout, or rerun install\devloop.ps1 in an installed bundle.'
 }
 
 $pythonPath = Join-Path $bundleRoot 'src'
