@@ -87,11 +87,12 @@ or press Enter if you kept the default.
 Non-interactive install or update:
 
 ```bash
-./devloop-install.sh --dir ~/devloop
+curl -fsSL https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.sh | bash -s -- --dir "$HOME/devloop"
 ```
 
 ```powershell
-.\devloop-install.ps1 -InstallDir C:\devloop
+$env:DEVLOOP_INSTALL_DIR = 'C:\devloop'
+irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps1 | iex
 ```
 
 ### Verify
@@ -112,7 +113,7 @@ they do not share an interface, command registry, or run-state format.
 
 | Application | Start command | Interface and state | Resume |
 | --- | --- | --- | --- |
-| Portable Dev Loop | `devloop-plan.sh` / `.ps1`, then `devloop.sh` / `.ps1` | Line editor and bounded console dashboard; PRD-local `*.loop.state.json` | Startup **Resume an unfinished PRD**, planning `/resume`, or rerun the same `devloop` command |
+| Portable Dev Loop | `devloop-plan.sh` / `.ps1`, then `devloop.sh` / `.ps1` | Keyboard-driven window UI, line editor, and bounded dashboard; PRD-local `*.loop.state.json` | Startup **Resume an unfinished PRD**, planning `/resume`, or rerun the same `devloop` command |
 | CodexCLI | Installed `codexcli run` command | Separate Textual application; `.devloop/runs/` and Codex App Server threads | Its own `/resume` command |
 
 `devloop-plan` is not a launcher or compatibility wrapper for `codexcli`.

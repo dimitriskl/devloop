@@ -1305,7 +1305,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             DEVELOPMENT_STEP_ID,
         )
         self.assertIn(
-            "Branch-only step — type select to pick branch steps",
+            "Position: branch-only",
             "\n".join(output),
         )
 
@@ -2344,8 +2344,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             )
 
         first_frame = output[0]
-        panes = first_frame.split("\n\nAvailable commands", maxsplit=1)[0]
-        self.assertNotIn(" | Settings", panes)
+        self.assertIn("Workflow Steps", first_frame)
+        self.assertIn("Settings —", first_frame)
         self.assertLess(
             first_frame.index("Workflow Steps"),
             first_frame.index("Settings —"),
@@ -2363,7 +2363,22 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             )
 
         self.assertIn("Workflow Steps", output[0])
-        self.assertIn(" | Settings —", output[0])
+        self.assertIn("┬ Settings —", output[0])
+
+    def test_navigation_commands_change_the_highlighted_step_without_editing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output: list[str] = []
+
+            run_workflow_editor(
+                Path(raw) / "devloop-plan.json",
+                read_line=FakeEditor([]).read_line,
+                read_command=FakeEditor(["__next_step__", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=120,
+            )
+
+        self.assertIn("> 2. Development", output[0])
+        self.assertIn("> 3. Security Review", output[1])
 
     def test_layout_never_emits_a_line_wider_than_the_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

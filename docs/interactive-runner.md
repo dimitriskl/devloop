@@ -39,6 +39,10 @@ After the target checkout is selected, Dev Loop opens a replacing startup menu:
 - **Workflow options** (same editor as `/options`)
 - **Exit**
 
+On an interactive terminal, use Up/Down and Enter to choose an item; Esc exits
+or returns to the previous screen. Number keys remain available, and terminals
+without raw-key support fall back to the numbered prompt.
+
 The resume catalog scans standard
 `prd/<name>/<name>.md` plus `prd/<name>/issues/README.md` packages and supported
 flat local issue packs. Fully completed packs are omitted. Entries include
@@ -122,8 +126,24 @@ Clipboard capture depends on tools already present on most machines:
 ## `/options`: Workflow Editor And Capabilities
 
 Typing `/options` at any planning or development-handoff prompt opens the
-transactional terminal Workflow Editor. It shows the Primary Path and the
-selected step's display name, component type, and component-owned scope. Step
+transactional terminal Workflow Editor. The color-aware full-screen layout keeps
+Workflow Steps in the left pane, the selected step's settings in the right
+pane, feedback in the window, and common shortcuts in the bottom action bar.
+Use Up/Down to select a Primary Path step, Enter or F9 for the complete action
+list, F1 for help, F2 to apply, F3 for the route map, F4 for technical details,
+F5 to add a step, F7 for capabilities, and Esc to cancel. Number keys and the
+complete-word commands below remain the fallback on limited or redirected
+terminals.
+It honors `NO_COLOR=1` and uses ASCII borders when box drawing is unavailable.
+
+Every finite choice—including models, reasoning effort, Fast mode, component
+types, routes, bindings, and confirmations—opens as a replacing full-screen
+menu with an explicit Back or Cancel row. Esc returns from these menus. The
+complete action catalog is divided into named groups so only a short list is
+shown at each level. Free-form values open their own input view.
+
+The editor shows the Primary Path and the selected step's display name,
+component type, and component-owned scope. Step
 Instance IDs stay hidden unless `advanced` is selected. Use a step number to
 change selection. `add` appends an installed component type, while `insert`
 places one at a one-based Primary Path position. `move-up`, `move-down`, and

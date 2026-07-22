@@ -1005,7 +1005,6 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse(source_state_was_created)
         self.assertIn("Current Run (read-only)", output.getvalue())
-        self.assertIn("Viewing Current Run settings.", output.getvalue())
 
 
 class WorktreePromptTests(unittest.TestCase):
@@ -1415,6 +1414,66 @@ class PlanStateTests(unittest.TestCase):
         )
         self.assertEqual(restored_selection.to_dict(), selection.to_dict())
 
+    def test_options_model_picker_stays_in_the_full_screen_application(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_path = root / "devloop-plan.json"
+            live_catalog = CodexModelCatalog(
+                models=(
+                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                ),
+                fetched_at="2026-07-16T12:00:00",
+                source=CatalogSource.LIVE,
+            )
+
+            with mock.patch.object(
+                interactive_runner,
+                "read_workflow_command",
+                side_effect=["model", "cancel"],
+            ), mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                side_effect=AssertionError("model picker used line input"),
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_menu_option",
+                return_value="cancel",
+            ) as choose_menu, redirect_stdout(StringIO()):
+                interactive_runner.run_options_menu(
+                    root,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    state_path,
+                    model_catalog_loader=lambda: live_catalog,
+                )
+
+        choose_menu.assert_called_once()
+        self.assertEqual(choose_menu.call_args.kwargs["cancel_key"], "cancel")
+
+    def test_workflow_text_entry_replaces_the_previous_application_view(self) -> None:
+        terminal_stdout = mock.Mock()
+        terminal_stdout.isatty.return_value = True
+        terminal_stdout.encoding = "utf-8"
+        with mock.patch.object(
+            interactive_runner.sys,
+            "stdout",
+            terminal_stdout,
+        ), mock.patch.object(
+            interactive_runner,
+            "render_app_screen",
+        ) as render, mock.patch.object(
+            interactive_runner,
+            "read_prompt",
+            return_value="New name",
+        ) as read_prompt:
+            value = interactive_runner.read_workflow_value("New display name: ")
+
+        self.assertEqual(value, "New name")
+        self.assertIn("Workflow Editor > Input", render.call_args.args[0])
+        self.assertIn("New display name:", render.call_args.args[0])
+        read_prompt.assert_called_once_with("> ")
+
     def test_active_options_edits_future_runs_without_mutating_the_run_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1457,7 +1516,7 @@ class PlanStateTests(unittest.TestCase):
             stored = WorkflowDefaultStore(state_path, catalog).load()
             after = writer.state_path.read_bytes()
 
-        self.assertIn("Current Run (read-only)", output.getvalue())
+        self.assertIn("Current Run hash", output.getvalue())
         self.assertEqual(before, after)
         self.assertEqual(
             stored.step(SECURITY_REVIEW_STEP_ID).display_name,
@@ -1756,7 +1815,7 @@ class ResumePlanningTests(unittest.TestCase):
             selection = catalog_module.Selection.defaults()
             with mock.patch.object(
                 interactive_runner,
-                "render_menu_screen",
+                "render_app_screen",
             ), mock.patch.object(
                 interactive_runner,
                 "ask_choice",
@@ -1780,8 +1839,8 @@ class ResumePlanningTests(unittest.TestCase):
             selection = catalog_module.Selection.defaults()
             with mock.patch.object(
                 interactive_runner,
-                "render_menu_screen",
-            ) as render_menu, mock.patch.object(
+                "render_app_screen",
+            ) as render_app, mock.patch.object(
                 interactive_runner,
                 "ask_choice",
                 side_effect=["3", "1"],
@@ -1799,7 +1858,7 @@ class ResumePlanningTests(unittest.TestCase):
         self.assertFalse(selected.exit_requested)
         self.assertIsNone(selected.artifacts)
         run_options_menu.assert_called_once()
-        self.assertGreaterEqual(render_menu.call_count, 2)
+        self.assertGreaterEqual(render_app.call_count, 2)
 
     def test_startup_exit_quits_without_starting_planning(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1824,7 +1883,7 @@ class ResumePlanningTests(unittest.TestCase):
                 return_value=root,
             ), mock.patch.object(
                 interactive_runner,
-                "render_menu_screen",
+                "render_app_screen",
             ), mock.patch.object(
                 interactive_runner,
                 "ask_choice",
@@ -1851,8 +1910,8 @@ class ResumePlanningTests(unittest.TestCase):
             selection = catalog_module.Selection.defaults()
             with mock.patch.object(
                 interactive_runner,
-                "render_menu_screen",
-            ) as render_menu, mock.patch.object(
+                "render_app_screen",
+            ) as render_app, mock.patch.object(
                 interactive_runner,
                 "ask_choice",
                 side_effect=["2", "b", "1"],
@@ -1868,8 +1927,8 @@ class ResumePlanningTests(unittest.TestCase):
         self.assertIsNone(selected.artifacts)
         resume_calls = [
             call
-            for call in render_menu.call_args_list
-            if "Unfinished PRDs" in call.args
+            for call in render_app.call_args_list
+            if call.args and "Unfinished PRDs" in call.args[0]
         ]
         self.assertEqual(len(resume_calls), 1)
 
@@ -1896,7 +1955,7 @@ class ResumePlanningTests(unittest.TestCase):
             ), mock.patch.object(
                 interactive_runner,
                 "choose_startup_artifacts",
-                return_value=artifacts,
+                return_value=interactive_runner.StartupMenuResult(artifacts=artifacts),
             ), mock.patch.object(
                 interactive_runner,
                 "current_branch",

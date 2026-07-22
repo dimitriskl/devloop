@@ -129,7 +129,7 @@ class RenderBannerTests(unittest.TestCase):
         self.assertNotIn("●", banner)
         self.assertNotIn("→", banner)
         self.assertIn("qa *", banner)
-        self.assertIn("->", banner)
+        self.assertIn(" > ", banner)
 
     def test_color_used_only_on_tty_without_no_color(self) -> None:
         env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}

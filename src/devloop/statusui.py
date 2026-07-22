@@ -1669,12 +1669,12 @@ def render_banner(stage: Stage, context: str = "", stream=None) -> str:
     unicode_ok = _can_encode("●○→·─", stream)
     active_marker = "●" if unicode_ok else "*"
     idle_marker = "○" if unicode_ok else "."
-    arrow = " → " if unicode_ok else " -> "
+    separator = " > " if unicode_ok else " > "
     dot = " · " if unicode_ok else " - "
     rule_char = "─" if unicode_ok else "-"
     color = _use_color(stream)
 
-    parts: list[str] = []
+    parts: list[str] = ["Dev Loop"]
     for item in PIPELINE:
         marker = active_marker if item is stage else idle_marker
         label = f"{item.value} {marker}"
@@ -1683,7 +1683,7 @@ def render_banner(stage: Stage, context: str = "", stream=None) -> str:
         parts.append(label)
 
     suffix = f"{dot}{context}" if context else ""
-    line = f" devloop{dot}{arrow.join(parts)}{suffix} "
+    line = f" {separator.join(parts)}{suffix} "
     rule = rule_char * _BANNER_WIDTH
     return f"{rule}\n{line}\n{rule}"
 

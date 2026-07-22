@@ -59,6 +59,25 @@ Apply the [Clean Code summary](https://gist.github.com/wojteklu/73c6914cc446146b
 
 Use enums for closed domain sets such as outcomes, lifecycle states, and built-in roles. Do not compare or persist domain states through scattered hard-coded strings. Give repeated protocol, schema, command, and UI literals named constants; keep a constant beside its owning contract, and place it in a shared constants module only when it is genuinely used across components. Parse external strings into typed values at system boundaries and fail clearly on unsupported values.
 
+## Terminal Application UI
+
+Treat the interactive TTY as one full-screen application. Every view transition
+must replace the previous view; never append a picker, confirmation, or prompt
+below an existing screen. Keep the current context, content, and shortcuts inside
+one bounded application frame.
+
+Use arrow-key menus for every finite choice. Enter confirms the highlighted item,
+and every subordinate screen must provide an explicit Back or Cancel item handled
+by Esc. Do not rely on F10 because desktop terminal emulators may reserve it. Do
+not ask TTY users to type a choice number or a word such as
+`cancel`; line-oriented choice prompts are permitted only as the non-TTY fallback.
+
+Keep menus scannable: group long action catalogs into short, named submenus, show
+only the choices relevant to the current decision, and preserve the user's current
+selection when practical. Free-form values still require text entry, but their
+prompt and context must be rendered as a dedicated application view rather than
+being printed beneath the prior screen.
+
 ## Testing Guidelines
 
 There is no formal Python test suite or linter config. Validate runner changes with `--dry-run --no-worktree` against a small local issue pack, and inspect `.loop.logs`, `README.loop.md`, and `README.loop.state.json` when behavior changes. For SQL MCP changes, run `.\install\build-sql-mcp.ps1`.

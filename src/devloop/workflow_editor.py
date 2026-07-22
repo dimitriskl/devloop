@@ -12,11 +12,14 @@ from .cli_ui import (
     editor_prompt,
     fit_text_to_screen,
     format_selected_step_line,
+    render_action_bar,
     render_context_path,
     render_grouped_commands,
+    render_screen_frame,
+    render_split_panes,
 )
 from .lineeditor import display_width
-from .terminal_menu import clear_terminal_screen
+from .terminal_menu import MenuAction, clear_terminal_screen
 from .model_catalog import (
     CatalogDiscoveryError,
     CodexModel,
@@ -54,10 +57,23 @@ from .step_configuration import (
 from .terminal_text import sanitize_terminal_text
 
 ReadLine = Callable[[str], str]
+ReadCommand = Callable[[str], str]
 WriteLine = Callable[[str], None]
 OpenCapabilities = Callable[["WorkflowDraft", StepInstanceId], None]
 ConfigurationUpdates = Callable[[], Mapping[str, object]]
 ModelCatalogLoader = Callable[[], CodexModelCatalog]
+
+
+@dataclass(frozen=True)
+class SelectionMenu:
+    title: str
+    options: tuple[tuple[str, str], ...]
+    default_key: str
+    cancel_key: str
+    description: tuple[str, ...] = ()
+
+
+SelectOption = Callable[[SelectionMenu], str]
 
 WIDE_EDITOR_MINIMUM_WIDTH = 96
 EDITOR_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -94,6 +110,54 @@ EDITOR_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Draft", ("undo", "reset-step", "reset-workflow")),
     ("Finish", ("apply", "cancel")),
 )
+
+WORKFLOW_ACTION_BAR: tuple[tuple[str, str], ...] = (
+    ("Up/Down", "Select step"),
+    ("Enter", "Actions"),
+    ("F1", "Help"),
+    ("F2", "Apply"),
+    ("F3", "Route map"),
+    ("F4", "Details"),
+    ("F5", "Add"),
+    ("F7", "Capabilities"),
+    ("F9", "Actions"),
+    ("Esc", "Cancel"),
+)
+
+WORKFLOW_ACTIONS: tuple[MenuAction, ...] = (
+    MenuAction("Help", "Keyboard and screen guide", "help"),
+    MenuAction("View", "Inspect current run", "current"),
+    MenuAction("View", "Edit future runs", "future"),
+    MenuAction("View", "Show or hide route map", "graph"),
+    MenuAction("View", "Show or hide technical details", "advanced"),
+    MenuAction("Step", "Select any workflow step", "select"),
+    MenuAction("Step", "Rename selected step", "rename"),
+    MenuAction("Step", "Change component type", "type"),
+    MenuAction("Step", "Choose model", "model"),
+    MenuAction("Step", "Choose reasoning effort", "reasoning"),
+    MenuAction("Step", "Toggle Fast mode", "fast"),
+    MenuAction("Step", "Edit execution budget", "budget"),
+    MenuAction("Step", "Edit guidance", "guidance"),
+    MenuAction("Step", "Manage capabilities", "capabilities"),
+    MenuAction("Structure", "Add step to the end", "add"),
+    MenuAction("Structure", "Insert step at a position", "insert"),
+    MenuAction("Structure", "Duplicate selected step", "duplicate"),
+    MenuAction("Structure", "Delete selected step", "delete"),
+    MenuAction("Structure", "Move selected step earlier", "move-up"),
+    MenuAction("Structure", "Move selected step later", "move-down"),
+    MenuAction("Structure", "Move selected step to position", "position"),
+    MenuAction("Structure", "Edit outcome route", "route"),
+    MenuAction("Structure", "Edit input binding", "bind"),
+    MenuAction("Draft", "Undo last edit", "undo"),
+    MenuAction("Draft", "Reset selected step", "reset-step"),
+    MenuAction("Draft", "Reset entire workflow", "reset-workflow"),
+    MenuAction("Catalog", "Retry model catalog", "retry-catalog"),
+    MenuAction("Finish", "Apply future-run default", "apply"),
+    MenuAction("Finish", "Cancel without saving", "cancel"),
+)
+
+_PREVIOUS_STEP_COMMAND = "__previous_step__"
+_NEXT_STEP_COMMAND = "__next_step__"
 
 
 def _parse_one_based_integer(value: str) -> int | None:
@@ -839,6 +903,7 @@ def run_workflow_editor(
     configuration_path: Path,
     *,
     read_line: ReadLine,
+    read_command: ReadCommand | None = None,
     write: WriteLine,
     terminal_width: int,
     terminal_height: int | None = None,
@@ -847,6 +912,7 @@ def run_workflow_editor(
     open_capabilities: OpenCapabilities | None = None,
     configuration_updates: ConfigurationUpdates | None = None,
     model_catalog_loader: ModelCatalogLoader | None = None,
+    select_option: SelectOption | None = None,
 ) -> EditorResult:
     component_catalog = catalog or default_portable_component_catalog()
     height = terminal_height or max(10, shutil.get_terminal_size(fallback=(100, 24)).lines)
@@ -854,6 +920,7 @@ def run_workflow_editor(
         store=WorkflowDefaultStore(configuration_path, component_catalog),
         catalog=component_catalog,
         read_line=read_line,
+        read_command=read_command or read_line,
         write=write,
         terminal_width=terminal_width,
         terminal_height=height,
@@ -861,6 +928,7 @@ def run_workflow_editor(
         open_capabilities=open_capabilities,
         configuration_updates=configuration_updates,
         model_catalog_loader=model_catalog_loader,
+        select_option=select_option,
         model_catalog_cache=CodexModelCatalogCache(
             model_catalog_cache_path(configuration_path)
         ),
@@ -874,6 +942,7 @@ class _WorkflowEditorSession:
         store: WorkflowDefaultStore,
         catalog: PortableStepComponentCatalog,
         read_line: ReadLine,
+        read_command: ReadCommand,
         write: WriteLine,
         terminal_width: int,
         terminal_height: int,
@@ -881,11 +950,13 @@ class _WorkflowEditorSession:
         open_capabilities: OpenCapabilities | None,
         configuration_updates: ConfigurationUpdates | None,
         model_catalog_loader: ModelCatalogLoader | None,
+        select_option: SelectOption | None,
         model_catalog_cache: CodexModelCatalogCache,
     ) -> None:
         self._store = store
         self._catalog = catalog
         self._read_line = read_line
+        self._read_command = read_command
         self._write = write
         self._terminal_width = terminal_width
         self._terminal_height = terminal_height
@@ -893,6 +964,7 @@ class _WorkflowEditorSession:
         self._open_capabilities = open_capabilities
         self._configuration_updates = configuration_updates
         self._model_catalog_loader = model_catalog_loader
+        self._select_option = select_option
         self._model_catalog_cache = model_catalog_cache
         self._model_catalog: CodexModelCatalog | None = None
         self._model_catalog_error: str | None = None
@@ -928,12 +1000,13 @@ class _WorkflowEditorSession:
         self._scope = EditorScope.FUTURE_RUNS
         self._show_advanced = False
         self._show_graph = False
+        self._notice: str | None = None
 
     def run(self) -> EditorResult:
         while True:
             self._render()
             result = self._dispatch(
-                self._read_line(self._prompt()).strip()
+                self._read_command(self._prompt()).strip()
             )
             if result is not None:
                 return result
@@ -969,11 +1042,23 @@ class _WorkflowEditorSession:
                 scope=self._scope,
                 model_catalog=self._model_catalog,
                 model_catalog_error=self._model_catalog_error,
+                notice=self._notice,
             )
         )
 
     def _dispatch(self, command: str) -> EditorResult | None:
         normalized = command.casefold()
+        if normalized:
+            self._notice = None
+        if normalized == _PREVIOUS_STEP_COMMAND:
+            self._select_relative_step(-1)
+            return None
+        if normalized == _NEXT_STEP_COMMAND:
+            self._select_relative_step(1)
+            return None
+        if normalized == "help":
+            self._show_help()
+            return None
         if self._default_recovery_state is not WorkflowDefaultRecoveryState.NORMAL:
             return self._dispatch_default_recovery(normalized)
         handlers: dict[str, Callable[[], EditorResult | None]] = {
@@ -1022,6 +1107,57 @@ class _WorkflowEditorSession:
             )
         )
         return None
+
+    def _show_help(self) -> None:
+        help_text = render_workflow_help(
+            terminal_width=self._terminal_width,
+            terminal_height=self._terminal_height,
+        )
+        if self._select_option is not None:
+            self._choose_menu(
+                SelectionMenu(
+                    title="Help",
+                    options=(("back", "Back to Workflow Editor"),),
+                    default_key="back",
+                    cancel_key="back",
+                    description=tuple(help_text.splitlines()),
+                ),
+                fallback_prompt="Press Enter to return to the Workflow Editor: ",
+            )
+            return
+        clear_terminal_screen()
+        self._write(help_text)
+        self._read_line("Press Enter to return to the Workflow Editor: ")
+
+    def _choose_menu(
+        self,
+        menu: SelectionMenu,
+        *,
+        fallback_prompt: str,
+        fallback_content: str | None = None,
+    ) -> str:
+        if self._select_option is not None:
+            return self._select_option(menu)
+        if fallback_content is not None:
+            self._write(fallback_content)
+        return self._read_line(fallback_prompt).strip()
+
+    def _select_relative_step(self, offset: int) -> None:
+        primary_path = self._viewed_workflow().primary_path()
+        selected_id = self._selected_step_id()
+        current = next(
+            (
+                index
+                for index, step in enumerate(primary_path)
+                if step.instance_id == selected_id
+            ),
+            0,
+        )
+        selected = primary_path[(current + offset) % len(primary_path)].instance_id
+        if self._scope is EditorScope.CURRENT_RUN:
+            self._current_selected_step_id = selected
+        else:
+            self._future_selected_step_id = selected
 
     def _dispatch_default_recovery(self, command: str) -> EditorResult | None:
         if command == "cancel":
@@ -1076,13 +1212,35 @@ class _WorkflowEditorSession:
 
     def _select_any_step(self) -> None:
         workflow = self._viewed_workflow()
-        self._write(
-            render_step_picker(
-                workflow,
-                terminal_width=self._terminal_width,
-            )
+        picker = render_step_picker(
+            workflow,
+            terminal_width=self._terminal_width,
         )
-        raw_position = self._read_line("Step number (or cancel): ").strip()
+        raw_position = self._choose_menu(
+            SelectionMenu(
+                title="Select workflow step",
+                options=(
+                    *(
+                        (str(index), step.display_name)
+                        for index, step in enumerate(workflow.steps, start=1)
+                    ),
+                    ("cancel", "Back to Workflow Editor"),
+                ),
+                default_key=str(
+                    next(
+                        (
+                            index
+                            for index, step in enumerate(workflow.steps, start=1)
+                            if step.instance_id == self._selected_step_id()
+                        ),
+                        1,
+                    )
+                ),
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Step number (or cancel): ",
+            fallback_content=picker,
+        )
         if raw_position.casefold() == "cancel":
             return
         position = _parse_one_based_integer(raw_position)
@@ -1153,7 +1311,32 @@ class _WorkflowEditorSession:
         component = self._choose_component()
         if component is None:
             return
-        raw_position = self._read_line("Primary Path Position: ").strip()
+        primary_path = self._draft.workflow.primary_path()
+        raw_position = self._choose_menu(
+            SelectionMenu(
+                title="Insert position",
+                options=(
+                    *(
+                        (
+                            str(position),
+                            (
+                                f"Before {primary_path[position - 1].display_name}"
+                                if position <= len(primary_path)
+                                else "At the end of the Primary Path"
+                            ),
+                        )
+                        for position in range(1, len(primary_path) + 2)
+                    ),
+                    ("cancel", "Back without inserting a step"),
+                ),
+                default_key=str(len(primary_path) + 1),
+                cancel_key="cancel",
+                description=(f"Step Type: {component.default_display_name}",),
+            ),
+            fallback_prompt="Primary Path Position: ",
+        )
+        if raw_position.casefold() == "cancel":
+            return
         position = _parse_one_based_integer(raw_position)
         if position is None:
             self._message("Primary Path Position must be a one-based number.")
@@ -1182,16 +1365,25 @@ class _WorkflowEditorSession:
         except ValueError as error:
             self._message(f"Cannot delete step: {error}")
             return
-        self._write(
-            render_delete_preview(
-                preview,
-                self._draft.workflow,
-                terminal_width=self._terminal_width,
-            )
+        preview_text = render_delete_preview(
+            preview,
+            self._draft.workflow,
+            terminal_width=self._terminal_width,
         )
-        confirmation = self._read_line(
-            f"Type yes to delete {preview.step_display_name!r}: "
-        ).strip().casefold()
+        confirmation = self._choose_menu(
+            SelectionMenu(
+                title=f"Delete · {preview.step_display_name}",
+                options=(
+                    ("yes", "Delete this workflow step"),
+                    ("no", "Keep this workflow step"),
+                ),
+                default_key="no",
+                cancel_key="no",
+                description=tuple(preview_text.splitlines()),
+            ),
+            fallback_prompt=f"Type yes to delete {preview.step_display_name!r}: ",
+            fallback_content=preview_text,
+        ).casefold()
         if confirmation != "yes":
             self._message("Deletion cancelled; the workflow draft was not changed.")
             return
@@ -1207,14 +1399,30 @@ class _WorkflowEditorSession:
         component = self._choose_component()
         if component is None:
             return
-        self._write(
-            render_type_change_preview(
-                self._draft.workflow,
-                source,
-                component,
-                terminal_width=self._terminal_width,
-            )
+        preview = render_type_change_preview(
+            self._draft.workflow,
+            source,
+            component,
+            terminal_width=self._terminal_width,
         )
+        if self._select_option is not None:
+            confirmation = self._choose_menu(
+                SelectionMenu(
+                    title=f"Change Step Type · {source.display_name}",
+                    options=(
+                        ("apply", "Apply this Step Type change"),
+                        ("cancel", "Back without changing the Step Type"),
+                    ),
+                    default_key="cancel",
+                    cancel_key="cancel",
+                    description=tuple(preview.splitlines()),
+                ),
+                fallback_prompt="Apply type change [apply/cancel]: ",
+            )
+            if confirmation != "apply":
+                return
+        else:
+            self._write(preview)
         try:
             self._draft.change_type(source.instance_id, component.component_id)
         except ValueError as error:
@@ -1248,7 +1456,32 @@ class _WorkflowEditorSession:
             self._message(f"Cannot move step: {error}")
 
     def _set_position(self) -> None:
-        raw_position = self._read_line("Primary Path Position: ").strip()
+        primary_path = self._draft.workflow.primary_path()
+        current_position = next(
+            (
+                index
+                for index, step in enumerate(primary_path, start=1)
+                if step.instance_id == self._future_selected_step_id
+            ),
+            1,
+        )
+        raw_position = self._choose_menu(
+            SelectionMenu(
+                title="Move workflow step",
+                options=(
+                    *(
+                        (str(index), f"Position {index} · {step.display_name}")
+                        for index, step in enumerate(primary_path, start=1)
+                    ),
+                    ("cancel", "Back without moving the step"),
+                ),
+                default_key=str(current_position),
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Primary Path Position: ",
+        )
+        if raw_position.casefold() == "cancel":
+            return
         position = _parse_one_based_integer(raw_position)
         if position is None:
             self._message("Primary Path Position must be a one-based number.")
@@ -1266,13 +1499,37 @@ class _WorkflowEditorSession:
         if selection is None:
             return
         step, settings, model_catalog = selection
-        self._write(
-            render_model_picker(
+        current_position = next(
+            (
+                index
+                for index, model in enumerate(model_catalog.models, start=1)
+                if model.model_id == settings.model
+            ),
+            1,
+        )
+        raw_position = self._choose_menu(
+            SelectionMenu(
+                title=f"Model · {step.display_name}",
+                options=(
+                    *(
+                        (str(index), f"{model.display_name} — {model.model_id}")
+                        for index, model in enumerate(model_catalog.models, start=1)
+                    ),
+                    ("cancel", "Back without changing the model"),
+                ),
+                default_key=str(current_position),
+                cancel_key="cancel",
+                description=(
+                    "Choose the Codex model for this workflow step.",
+                    "Catalog source: live",
+                ),
+            ),
+            fallback_prompt="Model number (or cancel): ",
+            fallback_content=render_model_picker(
                 model_catalog,
                 terminal_width=self._terminal_width,
-            )
+            ),
         )
-        raw_position = self._read_line("Model number (or cancel): ").strip()
         if raw_position.casefold() == "cancel":
             return
         position = _parse_one_based_integer(raw_position)
@@ -1324,13 +1581,29 @@ class _WorkflowEditorSession:
             f"{index}. {effort}"
             for index, effort in enumerate(model.reasoning_efforts, start=1)
         )
-        self._write(
-            "\n".join(
-                _fit_to_width(line, max(1, self._terminal_width))
-                for line in lines
-            )
+        rendered = "\n".join(
+            _fit_to_width(line, max(1, self._terminal_width))
+            for line in lines
         )
-        raw_position = self._read_line("Reasoning number (or cancel): ").strip()
+        raw_position = self._choose_menu(
+            SelectionMenu(
+                title=f"Reasoning effort · {model.display_name}",
+                options=(
+                    *(
+                        (str(index), effort)
+                        for index, effort in enumerate(
+                            model.reasoning_efforts,
+                            start=1,
+                        )
+                    ),
+                    ("cancel", "Back without changing reasoning"),
+                ),
+                default_key="1",
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Reasoning number (or cancel): ",
+            fallback_content=rendered,
+        )
         if raw_position.casefold() == "cancel":
             return None
         position = _parse_one_based_integer(raw_position)
@@ -1357,7 +1630,20 @@ class _WorkflowEditorSession:
                 f"Model {settings.model!r} does not advertise Fast; only Off is available."
             )
             return
-        choice = self._read_line("Fast [on/off/cancel]: ").strip().casefold()
+        choice = self._choose_menu(
+            SelectionMenu(
+                title=f"Fast mode · {step.display_name}",
+                options=(
+                    ("on", "On"),
+                    ("off", "Off"),
+                    ("cancel", "Back without changing Fast mode"),
+                ),
+                default_key=settings.fast.value.casefold(),
+                cancel_key="cancel",
+                description=(f"Model: {model.display_name}",),
+            ),
+            fallback_prompt="Fast [on/off/cancel]: ",
+        ).casefold()
         if choice == "cancel":
             return
         if choice not in {"on", "off"}:
@@ -1401,16 +1687,46 @@ class _WorkflowEditorSession:
             if step.guidance is None:
                 self._message("Local deterministic steps do not accept Step Guidance.")
                 return
-            action = self._read_line(
-                "Guidance action [clear/cancel]: "
-            ).strip().casefold()
+            action = self._choose_menu(
+                SelectionMenu(
+                    title=f"Guidance · {step.display_name}",
+                    options=(
+                        ("clear", "Clear existing guidance"),
+                        ("cancel", "Back without changing guidance"),
+                    ),
+                    default_key="cancel",
+                    cancel_key="cancel",
+                ),
+                fallback_prompt="Guidance action [clear/cancel]: ",
+            ).casefold()
             if action == "clear":
                 self._draft.clear_guidance(step.instance_id)
             elif action != "cancel":
                 self._message("Choose clear or cancel.")
             return
         actions = "keep/edit/clear/cancel" if step.guidance is not None else "edit/cancel"
-        action = self._read_line(f"Guidance action [{actions}]: ").strip().casefold()
+        options: tuple[tuple[str, str], ...]
+        if step.guidance is None:
+            options = (
+                ("edit", "Add guidance"),
+                ("cancel", "Back without changing guidance"),
+            )
+        else:
+            options = (
+                ("keep", "Keep guidance and mark it reviewed"),
+                ("edit", "Replace guidance"),
+                ("clear", "Remove guidance"),
+                ("cancel", "Back without changing guidance"),
+            )
+        action = self._choose_menu(
+            SelectionMenu(
+                title=f"Guidance · {step.display_name}",
+                options=options,
+                default_key="keep" if step.guidance is not None else "edit",
+                cancel_key="cancel",
+            ),
+            fallback_prompt=f"Guidance action [{actions}]: ",
+        ).casefold()
         if action == "cancel":
             return
         if action == "keep" and step.guidance is not None:
@@ -1532,24 +1848,56 @@ class _WorkflowEditorSession:
             for outcome in StepOutcome
             if outcome in component.supported_outcomes
         )
-        self._write(
-            render_outcome_picker(
-                step,
-                outcomes,
-                self._draft.workflow,
-                terminal_width=self._terminal_width,
-            )
+        outcome_picker = render_outcome_picker(
+            step,
+            outcomes,
+            self._draft.workflow,
+            terminal_width=self._terminal_width,
         )
-        raw_outcome = self._read_line("Outcome number (or cancel): ").strip()
+        raw_outcome = self._choose_menu(
+            SelectionMenu(
+                title=f"Outcome route · {step.display_name}",
+                options=(
+                    *(
+                        (
+                            str(index),
+                            (
+                                f"{outcome.value} → "
+                                f"{_outcome_destination_label(self._draft.workflow, step, outcome)}"
+                            ),
+                        )
+                        for index, outcome in enumerate(outcomes, start=1)
+                    ),
+                    ("cancel", "Back without changing a route"),
+                ),
+                default_key="1",
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Outcome number (or cancel): ",
+            fallback_content=outcome_picker,
+        )
         if raw_outcome.casefold() == "cancel":
             return
         outcome_position = _parse_one_based_integer(raw_outcome)
         if outcome_position is None or outcome_position > len(outcomes):
             self._message("Choose a supported Step Outcome by number, or cancel.")
             return
-        action = self._read_line(
-            "Route action [existing/new/insert/terminal/cancel]: "
-        ).strip().casefold()
+        action = self._choose_menu(
+            SelectionMenu(
+                title=f"Route action · {outcomes[outcome_position - 1].value}",
+                options=(
+                    ("existing", "Route to an existing workflow step"),
+                    ("new", "Create a new branch step"),
+                    ("insert", "Insert a new step into this route"),
+                    ("terminal", "End the workflow on this outcome"),
+                    ("cancel", "Back without changing the route"),
+                ),
+                default_key="existing",
+                cancel_key="cancel",
+                description=(f"Source: {step.display_name}",),
+            ),
+            fallback_prompt="Route action [existing/new/insert/terminal/cancel]: ",
+        ).casefold()
         if action == "cancel":
             return
         if action == "terminal":
@@ -1588,13 +1936,32 @@ class _WorkflowEditorSession:
         if action != "existing":
             self._message("Choose existing, new, insert, terminal, or cancel.")
             return
-        self._write(
-            render_step_picker(
-                self._draft.workflow,
-                terminal_width=self._terminal_width,
-            )
+        target_picker = render_step_picker(
+            self._draft.workflow,
+            terminal_width=self._terminal_width,
         )
-        raw_target = self._read_line("Target step number (or cancel): ").strip()
+        raw_target = self._choose_menu(
+            SelectionMenu(
+                title="Route target",
+                options=(
+                    *(
+                        (str(index), target.display_name)
+                        for index, target in enumerate(
+                            self._draft.workflow.steps,
+                            start=1,
+                        )
+                    ),
+                    ("cancel", "Back without changing the route"),
+                ),
+                default_key="1",
+                cancel_key="cancel",
+                description=(
+                    f"{step.display_name}.{outcomes[outcome_position - 1].value}",
+                ),
+            ),
+            fallback_prompt="Target step number (or cancel): ",
+            fallback_content=target_picker,
+        )
         if raw_target.casefold() == "cancel":
             return
         target_position = _parse_one_based_integer(raw_target)
@@ -1628,13 +1995,34 @@ class _WorkflowEditorSession:
                 "required" if input_port in component.input_ports else "optional"
             )
             lines.append(f"{index}. {input_port} [{requirement}] {contract_id}")
-        self._write(
-            "\n".join(
-                _fit_to_width(line, max(1, self._terminal_width))
-                for line in lines
-            )
+        port_picker = "\n".join(
+            _fit_to_width(line, max(1, self._terminal_width))
+            for line in lines
         )
-        raw_port = self._read_line("Input port number (or cancel): ").strip()
+        raw_port = self._choose_menu(
+            SelectionMenu(
+                title=f"Input binding · {step.display_name}",
+                options=(
+                    *(
+                        (
+                            str(index),
+                            f"{input_port} · "
+                            f"{'required' if input_port in component.input_ports else 'optional'} · "
+                            f"{contract_id}",
+                        )
+                        for index, (input_port, contract_id) in enumerate(
+                            ports,
+                            start=1,
+                        )
+                    ),
+                    ("cancel", "Back without changing a binding"),
+                ),
+                default_key="1",
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Input port number (or cancel): ",
+            fallback_content=port_picker,
+        )
         if raw_port.casefold() == "cancel":
             return
         port_position = _parse_one_based_integer(raw_port)
@@ -1655,15 +2043,31 @@ class _WorkflowEditorSession:
             for index, binding in enumerate(candidates, start=1)
         )
         candidate_lines.append("Enter clear to remove the current binding.")
-        self._write(
-            "\n".join(
-                _fit_to_width(line, max(1, self._terminal_width))
-                for line in candidate_lines
-            )
+        candidate_picker = "\n".join(
+            _fit_to_width(line, max(1, self._terminal_width))
+            for line in candidate_lines
         )
-        raw_candidate = self._read_line(
-            "Producer number (clear or cancel): "
-        ).strip()
+        raw_candidate = self._choose_menu(
+            SelectionMenu(
+                title=f"Producer · {step.display_name}.{input_port}",
+                options=(
+                    *(
+                        (
+                            str(index),
+                            f"{workflow.step(binding.producer_step_id).display_name}."
+                            f"{binding.output_port}",
+                        )
+                        for index, binding in enumerate(candidates, start=1)
+                    ),
+                    ("clear", "Remove the current binding"),
+                    ("cancel", "Back without changing the binding"),
+                ),
+                default_key="1" if candidates else "clear",
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Producer number (clear or cancel): ",
+            fallback_content=candidate_picker,
+        )
         if raw_candidate.casefold() == "cancel":
             return
         if raw_candidate.casefold() == "clear":
@@ -1680,13 +2084,32 @@ class _WorkflowEditorSession:
         )
 
     def _choose_component(self) -> PortableStepComponent | None:
-        self._write(
-            render_component_type_picker(
-                self._catalog,
-                terminal_width=self._terminal_width,
-            )
+        picker = render_component_type_picker(
+            self._catalog,
+            terminal_width=self._terminal_width,
         )
-        choice = self._read_line("Type number (or cancel): ").strip()
+        choice = self._choose_menu(
+            SelectionMenu(
+                title="Workflow Step Type",
+                options=(
+                    *(
+                        (
+                            str(index),
+                            f"{component.default_display_name} ({component.scope.value})",
+                        )
+                        for index, component in enumerate(
+                            self._catalog.components,
+                            start=1,
+                        )
+                    ),
+                    ("cancel", "Back without choosing a Step Type"),
+                ),
+                default_key="1",
+                cancel_key="cancel",
+            ),
+            fallback_prompt="Type number (or cancel): ",
+            fallback_content=picker,
+        )
         if choice.casefold() == "cancel":
             return None
         position = _parse_one_based_integer(choice)
@@ -1701,7 +2124,7 @@ class _WorkflowEditorSession:
     def _toggle_graph(self) -> None:
         self._show_graph = not self._show_graph
         state = "shown" if self._show_graph else "hidden"
-        self._message(f"Graph preview {state}. Use graph again to toggle.")
+        self._message(f"Route map {state}. Press F3 to toggle it.")
 
     def _open_capability_options(self) -> None:
         if self._open_capabilities is None:
@@ -1757,6 +2180,7 @@ class _WorkflowEditorSession:
         return EditorResult.CANCELLED
 
     def _message(self, message: str) -> None:
+        self._notice = sanitize_terminal_text(message, preserve_newlines=False)
         _write_message(self._write, message, self._terminal_width)
 
 
@@ -1789,6 +2213,36 @@ def render_workflow_default_recovery(
     )
 
 
+def render_workflow_help(
+    *,
+    terminal_width: int,
+    terminal_height: int,
+) -> str:
+    return render_screen_frame(
+        path=render_context_path("Workflow Editor", "Help"),
+        body=(
+            "Navigate",
+            "  Up / Down      Select a workflow step",
+            "  Enter or F9   Open the complete action list",
+            "",
+            "Common actions",
+            "  F2 Apply      Save the Future Runs workflow default",
+            "  F3 Route map Show or hide workflow routes",
+            "  F4 Details   Show summary or technical settings",
+            "  F5 Add       Add a workflow step",
+            "  F7 Capabilities  Manage skills and agent references",
+            "  Esc Cancel   Leave without saving draft changes",
+            "",
+            "Compatibility",
+            "  Number keys select steps. Terminals without raw-key support retain the",
+            "  complete-word command prompt and the same workflow behavior.",
+        ),
+        action_bar=(("Enter", "Back"),),
+        width=terminal_width,
+        height=terminal_height,
+    )
+
+
 def _compact_detail_lines(
     workflow: WorkflowDefinition,
     selected: WorkflowStep,
@@ -1801,8 +2255,8 @@ def _compact_detail_lines(
     model_catalog_error: str | None,
 ) -> list[str]:
     lines = [
-        f"Settings — {selected.display_name}",
-        f"Type: {selected.component_id} | Scope: {component.scope.value}",
+        f"Component: {selected.component_id}",
+        f"Scope: {component.scope.value.title()}",
     ]
     if component.is_codex_backed:
         if selected.codex_settings is None:
@@ -1832,18 +2286,16 @@ def _compact_detail_lines(
         for capability in selected.capability_profile.capabilities
         if component.required_capability_reason(capability) is not None
     )
-    lines.append(
-        f"Capabilities: {capability_count} ({required_count} required) — type capabilities"
-    )
+    lines.append(f"Capabilities: {capability_count} ({required_count} required)")
     if selected.guidance is None:
-        lines.append("Guidance: none — type guidance to edit")
+        lines.append("Guidance: none")
     else:
         preview = selected.guidance.text.splitlines()[0]
         lines.append(
             f"Guidance: {selected.guidance.review_state.value} — {preview}"
         )
     if selected_position is None:
-        lines.append("Branch-only step — type select to pick branch steps")
+        lines.append("Position: branch-only")
     else:
         lines.append(f"Position: {selected_position}/{primary_path_length}")
     unresolved = _unresolved_input_lines(workflow, selected, catalog)
@@ -1852,61 +2304,6 @@ def _compact_detail_lines(
         if len(unresolved) > 2:
             lines.append(f"… {len(unresolved) - 2} more unresolved inputs")
     return lines
-
-
-def _editor_body_line_budget(
-    height: int,
-    *,
-    show_graph: bool,
-    command_line_count: int,
-    header_line_count: int,
-) -> int:
-    graph_reserve = max(4, height // 4) if show_graph else 0
-    fixed = header_line_count + command_line_count + graph_reserve + 3
-    return max(4, height - 1 - fixed)
-
-
-def _body_display_line_count(
-    primary_lines: list[str],
-    detail_lines: list[str],
-    *,
-    width: int,
-    wide_layout: bool,
-) -> int:
-    if wide_layout:
-        body = _render_columns(primary_lines, detail_lines, width)
-    else:
-        body = "\n".join(
-            _fit_to_width(line, width)
-            for line in (*primary_lines, "", *detail_lines)
-        )
-    return len(body.splitlines()) if body else 0
-
-
-def _trim_detail_lines_to_budget(
-    detail_lines: list[str],
-    *,
-    width: int,
-    primary_lines: list[str],
-    max_body_lines: int,
-    wide_layout: bool,
-) -> list[str]:
-    trimmed = list(detail_lines)
-    while (
-        trimmed
-        and _body_display_line_count(
-            primary_lines,
-            trimmed,
-            width=width,
-            wide_layout=wide_layout,
-        )
-        > max_body_lines
-    ):
-        trimmed.pop()
-    if trimmed != detail_lines:
-        hidden = len(detail_lines) - len(trimmed)
-        trimmed.append(f"… {hidden} settings hidden")
-    return trimmed
 
 
 def render_workflow_editor(
@@ -1922,6 +2319,7 @@ def render_workflow_editor(
     scope: EditorScope = EditorScope.FUTURE_RUNS,
     model_catalog: CodexModelCatalog | None = None,
     model_catalog_error: str | None = None,
+    notice: str | None = None,
 ) -> str:
     width = max(1, terminal_width)
     height = max(10, terminal_height)
@@ -1941,21 +2339,18 @@ def render_workflow_editor(
         if scope is EditorScope.CURRENT_RUN
         else "Future Runs (editable)"
     )
-    if selected_position is None:
-        location = "branch step"
-        position_label = "branch-only"
-    else:
-        location = f"step {selected_position} of {len(primary_path)}"
-        position_label = f"{selected_position}/{len(primary_path)}"
+    position_label = (
+        "branch-only"
+        if selected_position is None
+        else f"{selected_position}/{len(primary_path)}"
+    )
     context_path = render_context_path(
+        "Workflow Editor",
         scope_label,
         selected.display_name,
         position_label,
     )
-    primary_lines = [
-        "Workflow Steps (enter step number or select)",
-    ]
-    primary_lines.extend(
+    primary_lines = list(
         format_selected_step_line(
             index,
             step.display_name,
@@ -1963,28 +2358,27 @@ def render_workflow_editor(
         )
         for index, step in enumerate(primary_path, start=1)
     )
-    header = [context_path]
+    route_status = "Route map shown" if show_graph else "Route map hidden"
+    header = [
+        f"Mode: {scope_label}  |  {route_status} (F3)  |  "
+        f"Details: {'technical' if show_advanced else 'summary'}"
+    ]
     if current_workflow is not None:
         header.append(
             f"Current Run hash: {canonical_workflow_hash(current_workflow)[:12]}…"
         )
-    if not show_graph:
-        header.append("Route map hidden — type graph to show")
-    command_lines = _render_command_lines(width, max_height=height)
-    body_budget = _editor_body_line_budget(
-        height,
-        show_graph=show_graph,
-        command_line_count=len(command_lines),
-        header_line_count=len(header),
-    )
+    if notice:
+        header.append(f"Status: {notice}")
     if show_graph:
-        detail_lines = [
-            f"Selected: {selected.display_name}",
-            "Type graph again to return to step settings.",
-        ]
+        detail_lines = render_graph_preview(
+            workflow,
+            catalog,
+            terminal_width=max(20, width - 4),
+            max_lines=max(6, height - 10),
+        ).splitlines()
+        right_title = f"Route map — {selected.display_name}"
     elif show_advanced:
         detail_lines = [
-            f"Settings — {selected.display_name}",
             f"Instance: {selected.instance_id}",
         ]
         detail_lines.extend(
@@ -1995,6 +2389,7 @@ def render_workflow_editor(
                 catalog,
             )
         )
+        right_title = f"Settings — {selected.display_name} · Technical details"
     else:
         detail_lines = _compact_detail_lines(
             workflow,
@@ -2006,50 +2401,41 @@ def render_workflow_editor(
             model_catalog=model_catalog,
             model_catalog_error=model_catalog_error,
         )
-    if not show_advanced:
-        detail_lines = _trim_detail_lines_to_budget(
-            detail_lines,
-            width=width,
-            primary_lines=primary_lines,
-            max_body_lines=body_budget,
-            wide_layout=width >= WIDE_EDITOR_MINIMUM_WIDTH,
-        )
-    if width >= WIDE_EDITOR_MINIMUM_WIDTH:
-        body = _render_columns(primary_lines, detail_lines, width)
-    else:
-        body = "\n".join(
-            _fit_to_width(line, width)
-            for line in (*primary_lines, "", *detail_lines)
-        )
-    fitted_header = tuple(_fit_to_width(line, width) for line in header)
-    graph_budget = max(6, height // 2) if show_graph else 0
-    graph_sections: tuple[str, ...] = ()
-    if show_graph:
-        graph_sections = (
-            "",
-            render_graph_preview(
-                workflow,
-                catalog,
-                terminal_width=width,
-                max_lines=graph_budget,
-            ),
-        )
-    rendered = "\n".join(
-        (
-            *fitted_header,
-            "",
-            body,
-            "",
-            *graph_sections,
-            "",
-            *command_lines,
-        )
+        right_title = f"Settings — {selected.display_name}"
+
+    action_line_count = len(
+        render_action_bar(WORKFLOW_ACTION_BAR, width=max(1, width - 2))
     )
-    return fit_text_to_screen(
-        rendered,
+    available_body_height = max(4, height - 4 - action_line_count)
+    if show_graph:
+        body_lines = [*header, "", right_title, *detail_lines]
+    elif width >= WIDE_EDITOR_MINIMUM_WIDTH:
+        pane_height = max(4, available_body_height - len(header))
+        panes = render_split_panes(
+            left_title="Workflow Steps",
+            left_lines=primary_lines,
+            right_title=right_title,
+            right_lines=detail_lines,
+            width=max(20, width - 2),
+            height=pane_height,
+        )
+        body_lines = [*header, *panes]
+    else:
+        body_lines = [
+            *header,
+            "",
+            "Workflow Steps",
+            *primary_lines,
+            "",
+            right_title,
+            *detail_lines,
+        ]
+    return render_screen_frame(
+        path=context_path,
+        body=body_lines,
+        action_bar=WORKFLOW_ACTION_BAR,
         width=width,
-        max_height=height,
-        reserve_prompt=True,
+        height=height,
     )
 
 
@@ -2171,6 +2557,16 @@ def _step_destination_label(
         return workflow.step(step_id).display_name
     except KeyError:
         return f"[deleted Step Instance {step_id}]"
+
+
+def _outcome_destination_label(
+    workflow: WorkflowDefinition,
+    step: WorkflowStep,
+    outcome: StepOutcome,
+) -> str:
+    if outcome not in step.transitions:
+        return "[not configured]"
+    return _step_destination_label(workflow, step.transitions[outcome])
 
 
 def render_model_picker(
@@ -2339,34 +2735,14 @@ def _port_binding_lines(
                     f"{input_port} requires a binding."
                 )
             elif binding_error is not None:
-                lines.append(f"Error: {binding_error}")
+                if binding is not None and "binds unknown producer" in binding_error:
+                    lines.append(
+                        f"Error: {step.display_name}.{input_port} binds unknown producer "
+                        f"{binding.producer_step_id}."
+                    )
+                else:
+                    lines.append(f"Error: {binding_error}")
     return lines
-
-
-def _render_columns(left: list[str], right: list[str], width: int) -> str:
-    separator = " | "
-    left_width = max(24, (width - len(separator)) // 2)
-    right_width = max(1, width - left_width - len(separator))
-    wrapped_left = _wrap_column_lines(left, left_width)
-    wrapped_right = _wrap_column_lines(right, right_width)
-    line_count = max(len(wrapped_left), len(wrapped_right))
-    rows: list[str] = []
-    for index in range(line_count):
-        left_text = wrapped_left[index] if index < len(wrapped_left) else ""
-        right_text = wrapped_right[index] if index < len(wrapped_right) else ""
-        rows.append(
-            f"{_pad_to_width(left_text, left_width)}{separator}"
-            f"{_fit_to_width(right_text, right_width)}"
-        )
-    return "\n".join(rows)
-
-
-def _wrap_column_lines(lines: list[str], width: int) -> list[str]:
-    return [
-        wrapped
-        for line in lines
-        for wrapped in _wrap_to_width(line, width)
-    ]
 
 
 def _render_command_lines(width: int, *, max_height: int | None = None) -> list[str]:
@@ -2376,7 +2752,9 @@ def _render_command_lines(width: int, *, max_height: int | None = None) -> list[
     return render_grouped_commands(
         EDITOR_COMMAND_GROUPS,
         width=width,
+        heading="Available commands",
         max_lines=command_budget,
+        inner=True,
     )
 
 
@@ -2416,11 +2794,6 @@ def _split_display_prefix(text: str, width: int) -> tuple[str, str]:
     if split_at == 0:
         split_at = 1
     return text[:split_at], text[split_at:]
-
-
-def _pad_to_width(text: str, width: int) -> str:
-    fitted = _fit_to_width(text, width)
-    return fitted + (" " * max(0, width - display_width(fitted)))
 
 
 def _fit_to_width(text: str, width: int) -> str:

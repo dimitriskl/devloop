@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import atexit
+import codecs
 import os
 import shutil
 import sys
@@ -24,6 +26,8 @@ ACTION_NONE = "none"
 ACTION_SUBMIT = "submit"
 ACTION_NEWLINE = "newline"
 
+_windows_output_prepared = False
+
 
 @dataclass
 class _EditorState:
@@ -45,18 +49,21 @@ class _EditorState:
         self.vertical_column = None
 
 
-class _KeySource:
+class TerminalKeySource:
     def read(self) -> str | None:
         raise NotImplementedError
 
     def alt_pressed(self) -> bool:
         return False
 
+    def read_pending(self, timeout_seconds: float = 0.05) -> str | None:
+        return self.read()
+
     def close(self) -> None:
         pass
 
 
-class _IteratorKeySource(_KeySource):
+class IteratorKeySource(TerminalKeySource):
     def __init__(self, chars: Iterator[str]) -> None:
         self._iter = chars
 
@@ -64,7 +71,7 @@ class _IteratorKeySource(_KeySource):
         return next(self._iter, None)
 
 
-class _PosixKeySource(_KeySource):
+class _PosixKeySource(TerminalKeySource):
     def __init__(self) -> None:
         import termios
         import tty
@@ -72,17 +79,36 @@ class _PosixKeySource(_KeySource):
         self._termios = termios
         self._fd = sys.stdin.fileno()
         self._old = termios.tcgetattr(self._fd)
+        encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+        errors = getattr(sys.stdin, "errors", None) or "strict"
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
         tty.setcbreak(self._fd)
 
     def read(self) -> str | None:
-        char = sys.stdin.read(1)
-        return char or None
+        while True:
+            byte = os.read(self._fd, 1)
+            if not byte:
+                return None
+            decoded = self._decoder.decode(byte)
+            if decoded:
+                return decoded
 
     def close(self) -> None:
         self._termios.tcsetattr(self._fd, self._termios.TCSADRAIN, self._old)
 
+    def read_pending(self, timeout_seconds: float = 0.05) -> str | None:
+        import select
 
-class _WindowsKeySource(_KeySource):
+        readable, _writable, _errors = select.select(
+            [self._fd],
+            [],
+            [],
+            timeout_seconds,
+        )
+        return self.read() if readable else None
+
+
+class _WindowsKeySource(TerminalKeySource):
     def __init__(self) -> None:
         import msvcrt  # noqa: F401  (import check)
 
@@ -109,6 +135,17 @@ class _WindowsKeySource(_KeySource):
     def close(self) -> None:
         if self._restore is not None:
             self._restore()
+
+    def read_pending(self, timeout_seconds: float = 0.05) -> str | None:
+        import msvcrt
+        import time
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                return self.read()
+            time.sleep(0.005)
+        return None
 
 
 def _windows_alt_pressed() -> bool:
@@ -168,7 +205,38 @@ def _enable_windows_vt_modes() -> Callable[[], None] | None:
     return restore
 
 
-def _make_key_source() -> _KeySource | None:
+def prepare_terminal_output() -> bool:
+    """Enable ANSI output on Windows for this process, restoring it at exit."""
+    global _windows_output_prepared
+    if not sys.platform.startswith("win"):
+        return True
+    if _windows_output_prepared:
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        enable_vt_output = 0x0004
+        previous_mode = mode.value
+        if not kernel32.SetConsoleMode(handle, previous_mode | enable_vt_output):
+            return False
+    except Exception:
+        return False
+
+    def restore() -> None:
+        kernel32.SetConsoleMode(handle, previous_mode)
+
+    _windows_output_prepared = True
+    atexit.register(restore)
+    return True
+
+
+def open_key_source() -> TerminalKeySource | None:
+    """Open a portable raw-key source, or return ``None`` for line-input terminals."""
     if os.environ.get("DEVLOOP_EDITOR", "").strip().lower() in {"native", "plain", "input"}:
         return None
 
@@ -217,7 +285,7 @@ class TerminalEditor:
         handler raises KeyboardInterrupt on the main thread), not as a
         raw \\x03 byte.
         """
-        keys = _make_key_source()
+        keys = open_key_source()
         if keys is None:
             if self._fallback_hint and not self._fallback_hint_shown:
                 self._fallback_hint_shown = True
@@ -237,12 +305,12 @@ class TerminalEditor:
 
     def feed(self, prompt: str, chars: Iterable[str]) -> str:
         flattened = (char for item in chars for char in item)
-        line = self._edit(prompt, _IteratorKeySource(flattened))
+        line = self._edit(prompt, IteratorKeySource(flattened))
         if line.strip():
             self.history.append(line)
         return line
 
-    def _edit(self, prompt: str, keys: _KeySource) -> str:
+    def _edit(self, prompt: str, keys: TerminalKeySource) -> str:
         state = _EditorState()
         self._render(prompt, state)
         while True:
@@ -295,7 +363,7 @@ class TerminalEditor:
                 self._insert_text(state, char)
             self._render(prompt, state)
 
-    def _handle_escape(self, state: _EditorState, keys: _KeySource) -> str:
+    def _handle_escape(self, state: _EditorState, keys: TerminalKeySource) -> str:
         follow = keys.read()
         if follow in ENTER_KEYS:
             return ACTION_NEWLINE
@@ -332,7 +400,11 @@ class TerminalEditor:
             parameters += final
         return self._handle_csi_sequence(parameters, final, state)
 
-    def _handle_windows_extended(self, state: _EditorState, keys: _KeySource) -> None:
+    def _handle_windows_extended(
+        self,
+        state: _EditorState,
+        keys: TerminalKeySource,
+    ) -> None:
         code = keys.read()
         if code is None:
             return

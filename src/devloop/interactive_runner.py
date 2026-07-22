@@ -45,14 +45,29 @@ from .step_configuration import CapabilityKind, CapabilityReference
 from .state import LoopStateWriter
 from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext
-from .cli_ui import fit_text_to_screen, render_context_path, terminal_dimensions
-from .terminal_menu import render_menu_screen
+from .cli_ui import (
+    CAPABILITY_ACTION_BAR,
+    CAPABILITY_TOGGLE_COMMAND_GROUPS,
+    RESUME_ACTION_BAR,
+    STARTUP_ACTION_BAR,
+    render_choice_menu,
+    render_context_path,
+    render_screen_frame,
+    terminal_dimensions,
+)
+from .terminal_menu import choose_menu_option, read_workflow_command, render_app_screen
 from .worktree import (
     branch_exists,
     build_worktree_add_command,
     resolve_existing_worktree,
 )
-from .workflow_editor import EditorResult, WorkflowDraft, run_workflow_editor
+from .workflow_editor import (
+    WORKFLOW_ACTIONS,
+    EditorResult,
+    SelectionMenu,
+    WorkflowDraft,
+    run_workflow_editor,
+)
 from .workflow_defaults import (
     PORTABLE_PLANNER_CONFIGURATION_FILE,
     WorkflowDefaultStore,
@@ -385,17 +400,34 @@ def choose_startup_artifacts(
     model_catalog_adapter = CodexModelCatalogAdapter(codex, cwd=repo_root)
     while True:
         candidates = find_resume_candidates(repo_root)
-        render_menu_screen(
-            "Dev Loop planning",
-            "",
-            "  1. Start a new change",
-            f"  2. Resume an unfinished PRD ({len(candidates)} found)",
-            "  3. Workflow options",
-            "",
-            "  q. Exit",
-            "",
+        width, height = terminal_dimensions()
+        menu_choices = (
+            ("1", "Start a new change"),
+            ("2", f"Resume an unfinished PRD ({len(candidates)} found)"),
+            ("3", "Workflow options"),
         )
-        choice = ask_choice("Select", {"1", "2", "3", "q"}, default="1")
+        choice = choose_menu_option(
+            (*menu_choices, ("q", "Exit")),
+            default_key="1",
+            cancel_key="q",
+            render=lambda selected: render_app_screen(
+                render_choice_menu(
+                    path=render_context_path("Startup"),
+                    section_title="What would you like to do?",
+                    choices=menu_choices,
+                    footer=(("q", "Exit"),),
+                    selected_key=selected,
+                    action_bar=STARTUP_ACTION_BAR,
+                    width=width,
+                    height=height,
+                )
+            ),
+            fallback=lambda: ask_choice(
+                "Select",
+                {"1", "2", "3", "q"},
+                default="1",
+            ),
+        )
         if choice == "q":
             return StartupMenuResult(exit_requested=True)
         if choice == "1":
@@ -428,16 +460,19 @@ def choose_resume_artifacts(
 ) -> ResumeMenuResult:
     available = find_resume_candidates(repo_root) if candidates is None else candidates
     if not available:
-        empty_lines = [
-            "Dev Loop planning",
-            "",
-            "No unfinished PRD issue packs were found in this project.",
-            "",
-        ]
-        if allow_exit:
-            empty_lines.append("  q. Exit")
-        empty_lines.append("")
-        render_menu_screen(*empty_lines)
+        width, height = terminal_dimensions()
+        footer = (("q", "Exit"),) if allow_exit else ()
+        render_app_screen(
+            render_choice_menu(
+                path=render_context_path("Startup", "Resume"),
+                section_title="No unfinished PRD issue packs were found in this project.",
+                choices=(),
+                footer=footer,
+                action_bar=RESUME_ACTION_BAR,
+                width=width,
+                height=height,
+            )
+        )
         prompt = (
             "Press Enter to return, or q to exit: "
             if allow_exit
@@ -454,19 +489,40 @@ def choose_resume_artifacts(
             else:
                 print("Press Enter to return to the main menu.", file=sys.stderr)
 
-    lines = ["Dev Loop planning", "", "Unfinished PRDs", ""]
-    for index, candidate in enumerate(available, start=1):
-        lines.append(f"  {index}. {format_resume_candidate(candidate)}")
-    footer = ["", "  b. Back"]
+    width, height = terminal_dimensions()
+    choices = tuple(
+        (str(index), format_resume_candidate(candidate))
+        for index, candidate in enumerate(available, start=1)
+    )
+    footer: list[tuple[str, str]] = [("b", "Back")]
     if allow_exit:
-        footer.append("  q. Exit")
-    footer.append("")
-    lines.extend(footer)
-    render_menu_screen(*lines)
-    choices = {str(index) for index in range(1, len(available) + 1)} | {"b"}
+        footer.append(("q", "Exit"))
+    menu_options = (*choices, *footer)
+    allowed_choices = {str(index) for index in range(1, len(available) + 1)} | {"b"}
     if allow_exit:
-        choices.add("q")
-    choice = ask_choice("Select PRD to resume", choices, default="1")
+        allowed_choices.add("q")
+    choice = choose_menu_option(
+        menu_options,
+        default_key="1",
+        cancel_key="b",
+        render=lambda selected: render_app_screen(
+            render_choice_menu(
+                path=render_context_path("Startup", "Resume"),
+                section_title="Unfinished PRDs",
+                choices=choices,
+                footer=tuple(footer),
+                selected_key=selected,
+                action_bar=RESUME_ACTION_BAR,
+                width=width,
+                height=height,
+            )
+        ),
+        fallback=lambda: ask_choice(
+            "Select PRD to resume",
+            allowed_choices,
+            default="1",
+        ),
+    )
     if choice == "b":
         return ResumeMenuResult()
     if choice == "q":
@@ -649,6 +705,60 @@ class HandoffParams:
     branch_name: str
 
 
+def choose_workflow_selection(menu: SelectionMenu) -> str:
+    width, height = terminal_dimensions()
+    choices = tuple(
+        option for option in menu.options if option[0] != menu.cancel_key
+    )
+    footer = tuple(
+        option for option in menu.options if option[0] == menu.cancel_key
+    )
+    return choose_menu_option(
+        menu.options,
+        default_key=menu.default_key,
+        cancel_key=menu.cancel_key,
+        render=lambda selected: render_app_screen(
+            render_choice_menu(
+                path=render_context_path("Workflow Editor", menu.title),
+                section_title="Choose an option",
+                description=menu.description,
+                choices=choices,
+                footer=footer,
+                selected_key=selected,
+                action_bar=(
+                    ("Up/Down", "Choose"),
+                    ("Enter", "Select"),
+                    ("Esc", "Back"),
+                ),
+                width=width,
+                height=height,
+            )
+        ),
+        fallback=lambda: ask_choice(
+            menu.title,
+            {key for key, _label in menu.options},
+            default=menu.default_key,
+        ),
+    )
+
+
+def read_workflow_value(prompt: str) -> str:
+    if not sys.stdout.isatty():
+        return read_prompt(prompt)
+    width, height = terminal_dimensions()
+    label = prompt.strip() or "Enter a value"
+    render_app_screen(
+        render_screen_frame(
+            path=render_context_path("Workflow Editor", "Input"),
+            body=(label,),
+            action_bar=(("Enter", "Confirm"),),
+            width=width,
+            height=height,
+        )
+    )
+    return read_prompt("> ")
+
+
 def run_options_menu(
     bundle_root: Path,
     selection: "catalog_module.Selection",
@@ -665,7 +775,12 @@ def run_options_menu(
     width, height = terminal_dimensions()
     result = run_workflow_editor(
         state_path,
-        read_line=read_prompt,
+        read_line=read_workflow_value,
+        read_command=lambda prompt: read_workflow_command(
+            prompt,
+            fallback=read_prompt,
+            actions=WORKFLOW_ACTIONS,
+        ),
         write=print,
         terminal_width=width,
         terminal_height=height,
@@ -680,6 +795,7 @@ def run_options_menu(
         ),
         configuration_updates=lambda: {"selection": draft_selection.to_dict()},
         model_catalog_loader=model_catalog_loader,
+        select_option=choose_workflow_selection,
     )
     if result is EditorResult.APPLIED:
         selection.planning_skills = list(draft_selection.planning_skills)
@@ -750,20 +866,38 @@ def run_capability_options_menu(
     found = catalog_module.discover(bundle_root)
     while True:
         step = draft.workflow.step(step_id)
-        context = render_context_path(
-            "Capability Options",
-            step.display_name,
+        width, height = terminal_dimensions()
+        menu_choices = (
+            ("1", "Search and toggle capabilities for this step"),
+            ("2", "Reset this step to component defaults"),
+            ("3", "Add skill or agent from GitHub"),
+            ("4", "Back to Workflow Editor"),
         )
-        render_menu_screen(
-            context,
-            "",
-            "  1. Search and toggle capabilities for this step",
-            "  2. Reset this step to component defaults",
-            "  3. Add skill or agent from GitHub",
-            "  4. Back to Workflow Editor",
-            "",
+        choice = choose_menu_option(
+            menu_choices,
+            default_key="4",
+            cancel_key="4",
+            render=lambda selected: render_app_screen(
+                render_choice_menu(
+                    path=render_context_path(
+                        "Workflow Editor",
+                        "Capabilities",
+                        step.display_name,
+                    ),
+                    section_title="Capability options",
+                    choices=menu_choices,
+                    selected_key=selected,
+                    action_bar=CAPABILITY_ACTION_BAR,
+                    width=width,
+                    height=height,
+                )
+            ),
+            fallback=lambda: ask_choice(
+                "Select",
+                {"1", "2", "3", "4"},
+                default="4",
+            ),
         )
-        choice = ask_choice("Select", {"1", "2", "3", "4"}, default="4")
         if choice == "4":
             return
         if choice == "1":
@@ -812,11 +946,8 @@ def edit_step_capabilities(
         _catalog_capability_reference(bundle_root, entry)
         for entry in entries
     ]
-    context = render_context_path("Capabilities", step.display_name)
     width, height = terminal_dimensions()
-    menu_lines = [
-        context,
-        "",
+    body = [
         "Enter a capability number to toggle, or cancel.",
         "",
     ]
@@ -835,21 +966,16 @@ def edit_step_capabilities(
         entry_lines.append(
             f"  {index}. [{marker}] {entry.kind}: {entry.name}{explanation}"
         )
-    reserved = len(menu_lines) + 2
-    visible_budget = max(1, height - reserved)
-    if len(entry_lines) > visible_budget:
-        menu_lines.extend(entry_lines[: visible_budget - 1])
-        hidden = len(entry_lines) - visible_budget + 1
-        menu_lines.append(f"  … {hidden} more — refine search to narrow the list")
-    else:
-        menu_lines.extend(entry_lines)
-    screen = fit_text_to_screen(
-        "\n".join(menu_lines),
-        width=width,
-        max_height=height,
-        reserve_prompt=True,
+    body.extend(entry_lines)
+    render_app_screen(
+        render_screen_frame(
+            path=render_context_path("Workflow Editor", "Capabilities", step.display_name),
+            body=body,
+            command_groups=CAPABILITY_TOGGLE_COMMAND_GROUPS,
+            width=width,
+            height=height,
+        )
     )
-    render_menu_screen(*screen.splitlines())
     raw = read_prompt("Capability number to toggle (or cancel): ").strip()
     if raw.casefold() == "cancel":
         return
