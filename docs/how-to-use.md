@@ -54,6 +54,12 @@ For new-machine setup, use `docs/new-pc-setup.md` and the platform install
 notes in `docs/install-windows.md`, `docs/install-ubuntu.md`, or
 `docs/install-macos.md`.
 
+For a development checkout, run `install/setup-development.ps1` on Windows or
+`install/setup-development.sh` on Linux/macOS. This creates only the ignored
+checkout-local `.venv`; it does not create shortcuts, modify PATH, copy global
+skills, or update Git. Remove installer-managed artifacts with the matching
+`install/uninstall-devloop` script. Uninstall preserves source and project data.
+
 ## 2. Choose The Right Entrypoint
 
 Use `devloop-plan` when you have an idea, bug, screenshot, or rough request and

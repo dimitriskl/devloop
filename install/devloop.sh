@@ -309,6 +309,9 @@ Optional isolated CodexCLI install from the bundle checkout:
 
 Verified isolated runtime:
   $("$python" --version)
+
+Uninstall installer-managed artifacts while preserving source and project data:
+  "$INSTALL_DIR/install/uninstall-devloop.sh" --dir "$INSTALL_DIR"
 EOF
 }
 

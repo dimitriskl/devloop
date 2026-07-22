@@ -31,6 +31,29 @@ type another path.
 
 Re-run the same command to update an existing install.
 
+Use `-NoBinLinks` when running a downloaded installer if you do not want
+`devloop` command shortcuts or user PATH changes.
+
+## Development checkout
+
+From a checkout where you edit Dev Loop itself, use the local-only setup:
+
+```powershell
+& '.\install\setup-development.ps1'
+& '.\bin\devloop-plan.ps1'
+```
+
+It creates only `.venv` inside the checkout.
+
+## Uninstall
+
+```powershell
+& '.\install\uninstall-devloop.ps1' -InstallDir 'C:\devloop'
+```
+
+This removes the runtime, generated command shortcuts, applicable PATH entry,
+and unchanged installed capabilities. It preserves source and project data.
+
 ## Verify
 
 Open a new terminal, then:

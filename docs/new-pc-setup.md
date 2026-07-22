@@ -95,6 +95,15 @@ devloop-plan --help
 
 If you prefer to copy the bundle yourself, continue with the steps below.
 
+For a development checkout that must not create shortcuts, edit PATH, install
+global skills, or update Git, run `install/setup-development.ps1` on Windows or
+`install/setup-development.sh` on Linux/macOS, then invoke the wrapper directly
+from `bin/`.
+
+To undo a normal installation, run the platform `install/uninstall-devloop`
+script. It removes installer-managed runtime, command, PATH, and unchanged
+capability artifacts while preserving source and project data.
+
 ## 1. Copy The Bundle
 
 Copy the whole `devloop` folder to the new PC, for example:

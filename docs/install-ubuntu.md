@@ -31,6 +31,23 @@ type another path.
 
 Re-run the same command to update an existing install.
 
+Use `--no-bin-links` when you do not want command links.
+
+## Development checkout
+
+```bash
+./install/setup-development.sh
+./bin/devloop-plan.sh
+```
+
+## Uninstall
+
+```bash
+./install/uninstall-devloop.sh --dir "$HOME/devloop"
+```
+
+The source checkout and project data are preserved.
+
 ## Verify
 
 Open a new terminal, then:

@@ -425,6 +425,9 @@ function Show-NextSteps {
     Write-Host ''
     Write-Host "Verified isolated runtime:"
     Write-Host "  $pythonVersion"
+    Write-Host ''
+    Write-Host 'Uninstall installer-managed artifacts while preserving source and project data:'
+    Write-Host "  & '$InstallDir\install\uninstall-devloop.ps1' -InstallDir '$InstallDir'"
 }
 
 if ($Help) {

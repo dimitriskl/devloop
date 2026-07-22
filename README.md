@@ -80,6 +80,51 @@ Commands are linked into:
 - Linux / macOS: `~/.local/bin`
 - Windows: `%USERPROFILE%\.local\bin`
 
+Use `--no-bin-links` on Linux/macOS or `-NoBinLinks` on Windows when you do
+not want command shortcuts or PATH changes.
+
+### Development checkout without global installation
+
+When working directly in a cloned development checkout, prepare only its local
+runtime. This does not create shortcuts, change PATH, install global skills, or
+update/reset Git.
+
+Windows:
+
+```powershell
+& '.\install\setup-development.ps1'
+& '.\bin\devloop-plan.ps1'
+```
+
+Linux/macOS:
+
+```bash
+./install/setup-development.sh
+./bin/devloop-plan.sh
+```
+
+### Uninstall
+
+The uninstaller removes the bundle-local runtime, generated `devloop` and
+`devloop-plan` command shortcuts, an empty installer-added command directory
+from PATH, and unchanged copies of bundled Codex skills and agent references.
+It preserves the source checkout, target-project PRDs, worktrees, branches, and
+any personally modified skill or agent file.
+
+Windows:
+
+```powershell
+& '.\install\uninstall-devloop.ps1' -InstallDir 'C:\devloop'
+```
+
+Linux/macOS:
+
+```bash
+./install/uninstall-devloop.sh --dir "$HOME/devloop"
+```
+
+Use `-KeepSkills` or `--keep-skills` when the capability copies should remain.
+
 ### Update
 
 Run the same installer command again. Enter the same install path when prompted,

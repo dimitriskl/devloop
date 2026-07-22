@@ -11,8 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "install" / "devloop.sh"
 INSTALL_PS1 = ROOT / "install" / "devloop.ps1"
+UNINSTALL_SH = ROOT / "install" / "uninstall-devloop.sh"
+UNINSTALL_PS1 = ROOT / "install" / "uninstall-devloop.ps1"
+DEVELOPMENT_SETUP_SH = ROOT / "install" / "setup-development.sh"
+DEVELOPMENT_SETUP_PS1 = ROOT / "install" / "setup-development.ps1"
 
 
+@unittest.skipIf(os.name == "nt", "Unix installer behavior requires a POSIX host")
 class BundleInstallerScriptTests(unittest.TestCase):
     def test_unix_installer_has_valid_shell_syntax(self) -> None:
         result = subprocess.run(
@@ -140,15 +145,65 @@ class BundleInstallerScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("not a git checkout", result.stderr)
 
+    def test_unix_uninstaller_removes_managed_artifacts_but_keeps_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_dir = root / "development-checkout"
+            bin_dir = root / "bin"
+            runtime = install_dir / ".venv"
+            runtime.mkdir(parents=True)
+            (runtime / "runtime.txt").write_text("installed", encoding="utf-8")
+            (install_dir / "keep-source.txt").write_text("source", encoding="utf-8")
+            bin_dir.mkdir()
+            (bin_dir / "devloop").symlink_to(install_dir / "bin" / "devloop.sh")
+            (bin_dir / "devloop-plan").symlink_to(
+                install_dir / "bin" / "devloop-plan.sh"
+            )
+            unrelated = bin_dir / "keep"
+            unrelated.write_text("keep", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(UNINSTALL_SH),
+                    "--dir",
+                    str(install_dir),
+                    "--bin-dir",
+                    str(bin_dir),
+                    "--keep-skills",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=ROOT,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertFalse(runtime.exists())
+            self.assertFalse((bin_dir / "devloop").exists())
+            self.assertFalse((bin_dir / "devloop-plan").exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue((install_dir / "keep-source.txt").exists())
+
 
 @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "PowerShell is required")
 class BundleInstallerPowerShellTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.powershell = "pwsh" if shutil.which("pwsh") else "powershell"
+        self.powershell = (
+            "powershell"
+            if os.name == "nt" and shutil.which("powershell")
+            else "pwsh"
+        )
+        self.powershell_command = [
+            self.powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+        ]
 
     def test_windows_installer_help_exits_zero(self) -> None:
         result = subprocess.run(
-            [self.powershell, "-NoProfile", "-File", str(INSTALL_PS1), "-Help"],
+            [*self.powershell_command, "-File", str(INSTALL_PS1), "-Help"],
             capture_output=True,
             text=True,
             check=False,
@@ -156,6 +211,147 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Install or update the portable Dev Loop bundle.", result.stdout)
+
+    def test_windows_development_setup_help_exits_zero(self) -> None:
+        result = subprocess.run(
+            [
+                *self.powershell_command,
+                "-File",
+                str(DEVELOPMENT_SETUP_PS1),
+                "-Help",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=ROOT,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Prepare this development checkout", result.stdout)
+
+    def test_windows_uninstaller_removes_managed_artifacts_but_keeps_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_dir = root / "development-checkout"
+            bin_dir = root / "bin"
+            runtime = install_dir / ".venv"
+            runtime.mkdir(parents=True)
+            (runtime / "runtime.txt").write_text("installed", encoding="utf-8")
+            (install_dir / "keep-source.txt").write_text("source", encoding="utf-8")
+            bin_dir.mkdir()
+            (bin_dir / "devloop.cmd").write_text(
+                '@echo off\npowershell -File "C:\\devloop\\bin\\devloop.ps1" %*\n',
+                encoding="ascii",
+            )
+            (bin_dir / "devloop-plan.cmd").write_text(
+                '@echo off\npowershell -File "C:\\devloop\\bin\\devloop-plan.ps1" %*\n',
+                encoding="ascii",
+            )
+            unrelated = bin_dir / "keep.cmd"
+            unrelated.write_text("@echo off\necho keep\n", encoding="ascii")
+            env = os.environ.copy()
+            env["DEVLOOP_TESTING"] = "1"
+
+            result = subprocess.run(
+                [
+                    *self.powershell_command,
+                    "-File",
+                    str(UNINSTALL_PS1),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-BinDir",
+                    str(bin_dir),
+                    "-KeepSkills",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                cwd=ROOT,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertFalse(runtime.exists())
+            self.assertFalse((bin_dir / "devloop.cmd").exists())
+            self.assertFalse((bin_dir / "devloop-plan.cmd").exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue((install_dir / "keep-source.txt").exists())
+
+    def test_windows_uninstaller_removes_only_unchanged_installed_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_dir = root / "development-checkout"
+            install_dir.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            skills_dir = root / "skills"
+            agents_dir = root / "agents"
+            matching_skill = skills_dir / "implement" / "SKILL.md"
+            matching_skill.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "skills" / "codex" / "implement" / "SKILL.md", matching_skill)
+            modified_skill = skills_dir / "tdd" / "SKILL.md"
+            modified_skill.parent.mkdir(parents=True)
+            modified_skill.write_text("personal changes", encoding="utf-8")
+            unrelated_empty_directory = skills_dir / "personal-empty-skill"
+            unrelated_empty_directory.mkdir(parents=True)
+            matching_agent = agents_dir / "senior-code-reviewer.md"
+            matching_agent.parent.mkdir(parents=True)
+            shutil.copy2(
+                ROOT / "agents" / "codex" / "senior-code-reviewer.md",
+                matching_agent,
+            )
+            env = os.environ.copy()
+            env["DEVLOOP_TESTING"] = "1"
+
+            result = subprocess.run(
+                [
+                    *self.powershell_command,
+                    "-File",
+                    str(UNINSTALL_PS1),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-BinDir",
+                    str(bin_dir),
+                    "-CodexSkillsPath",
+                    str(skills_dir),
+                    "-CodexAgentsPath",
+                    str(agents_dir),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                cwd=ROOT,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertFalse(matching_skill.exists())
+            self.assertFalse(matching_agent.exists())
+            self.assertTrue(modified_skill.exists())
+            self.assertTrue(unrelated_empty_directory.exists())
+            self.assertIn("Kept modified capability", result.stdout)
+
+    def test_windows_uninstaller_refuses_a_filesystem_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            result = subprocess.run(
+                [
+                    *self.powershell_command,
+                    "-File",
+                    str(UNINSTALL_PS1),
+                    "-InstallDir",
+                    Path(raw).anchor,
+                    "-BinDir",
+                    str(Path(raw) / "bin"),
+                    "-KeepSkills",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=ROOT,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to use filesystem root", result.stderr)
 
 
 class PortableRuntimePackagingTests(unittest.TestCase):
@@ -217,6 +413,29 @@ class PortableRuntimePackagingTests(unittest.TestCase):
             self.assertIn(".venv.next", installer)
             self.assertIn("requirements-portable.lock", installer)
             self.assertIn("textual.__version__", installer)
+
+    def test_development_setup_is_local_only_and_uninstall_is_available(self) -> None:
+        setup_scripts = (
+            DEVELOPMENT_SETUP_PS1.read_text(encoding="utf-8"),
+            DEVELOPMENT_SETUP_SH.read_text(encoding="utf-8"),
+        )
+        uninstallers = (
+            UNINSTALL_PS1.read_text(encoding="utf-8"),
+            UNINSTALL_SH.read_text(encoding="utf-8"),
+        )
+
+        for setup in setup_scripts:
+            self.assertIn(".venv.next", setup)
+            self.assertIn("requirements-portable.lock", setup)
+            self.assertIn("textual.__version__", setup)
+            self.assertNotIn("install-skills", setup)
+            self.assertNotIn("devloop-plan.cmd", setup)
+            self.assertNotIn("ln -sf", setup)
+
+        for uninstaller in uninstallers:
+            self.assertIn("Source checkout preserved", uninstaller)
+            self.assertIn("devloop-plan", uninstaller)
+            self.assertIn(".venv.previous", uninstaller)
 
 
 if __name__ == "__main__":
