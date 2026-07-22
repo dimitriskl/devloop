@@ -16,6 +16,7 @@ from typing import Any, Iterator, TextIO
 class PortableRuntimeEventKind(str, Enum):
     CHOICE_REQUESTED = "CHOICE_REQUESTED"
     INPUT_REQUESTED = "INPUT_REQUESTED"
+    INTERACTION_COMPLETED = "INTERACTION_COMPLETED"
     SCREEN_UPDATED = "SCREEN_UPDATED"
     OUTPUT_WRITTEN = "OUTPUT_WRITTEN"
 
@@ -77,6 +78,7 @@ class PortableRuntimeBridge:
                 continue
             with self._response_lock:
                 self._responses.pop(request_id, None)
+            self._publish_interaction_completed(request_id)
             return value
 
     def next_event(self, *, timeout: float | None = None) -> PortableRuntimeEvent:
@@ -104,6 +106,7 @@ class PortableRuntimeBridge:
         _interaction, value = response.get()
         with self._response_lock:
             self._responses.pop(request_id, None)
+        self._publish_interaction_completed(request_id)
         return value
 
     def show_screen(self, content: str) -> None:
@@ -147,6 +150,14 @@ class PortableRuntimeBridge:
                     f"Unknown portable interaction request: {request_id}"
                 ) from error
         response.put((interaction, value))
+
+    def _publish_interaction_completed(self, request_id: int) -> None:
+        self._event_queue.put(
+            PortableRuntimeEvent(
+                kind=PortableRuntimeEventKind.INTERACTION_COMPLETED,
+                request_id=request_id,
+            )
+        )
 
 
 class PortableRoutedStream:

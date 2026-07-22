@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 
 from textual.containers import Horizontal
@@ -64,6 +65,94 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 "Dev Loop > Final Result",
                 str(app.query_one("#portable-detail", Static).render()),
             )
+
+    async def test_committed_choice_replaces_stale_menu_and_escape_reports_progress(self) -> None:
+        bridge = PortableRuntimeBridge()
+        choice_received = threading.Event()
+        release_preview = threading.Event()
+        release_operation = threading.Event()
+
+        def render_preview(key: str) -> None:
+            release_preview.wait(timeout=2)
+            bridge.show_screen(f"preview:{key}")
+
+        def operation() -> int:
+            bridge.choose(
+                (("start", "Start development"), ("quit", "Quit")),
+                default_key="start",
+                cancel_key="quit",
+                render=render_preview,
+            )
+            choice_received.set()
+            release_operation.wait(timeout=2)
+            return 0
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            menu = app.query_one("#portable-navigation", OptionList)
+            for _ in range(20):
+                await pilot.pause()
+                if menu.option_count == 2:
+                    break
+
+            try:
+                await pilot.press("enter")
+                release_preview.set()
+                for _ in range(20):
+                    await pilot.pause()
+                    if choice_received.is_set():
+                        break
+
+                self.assertTrue(choice_received.is_set())
+                self.assertTrue(menu.disabled)
+                self.assertEqual(menu.option_count, 0)
+                self.assertIn(
+                    "Dev Loop > Working",
+                    str(app.query_one("#portable-detail", Static).render()),
+                )
+
+                await pilot.press("escape")
+                self.assertIsInstance(app.screen, PortableTextOverlay)
+                self.assertIn(
+                    "already accepted",
+                    str(
+                        app.screen.query_one(
+                            ".portable-overlay-content",
+                            Static,
+                        ).render()
+                    ),
+                )
+            finally:
+                release_preview.set()
+                release_operation.set()
+
+    async def test_escape_returns_the_current_cancel_action(self) -> None:
+        bridge = PortableRuntimeBridge()
+
+        def operation() -> int:
+            selected = bridge.choose(
+                (("start", "Start development"), ("quit", "Quit")),
+                default_key="start",
+                cancel_key="quit",
+                render=lambda key: bridge.show_screen(f"preview:{key}"),
+            )
+            return 0 if selected == "quit" else 1
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            menu = app.query_one("#portable-navigation", OptionList)
+            for _ in range(20):
+                await pilot.pause()
+                if menu.option_count == 2:
+                    break
+
+            await pilot.press("escape")
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            self.assertEqual(app.operation_result, 0)
 
     async def test_help_and_logs_open_inside_the_application(self) -> None:
         app = PortableApplicationShell(PortableRuntimeBridge(), lambda: 0)

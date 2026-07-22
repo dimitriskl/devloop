@@ -298,6 +298,8 @@ class PortableApplicationShell(App[None]):
         self._input_history: tuple[str, ...] = ()
         self._input_history_position = 0
         self._shortcut_commands: dict[str, str] = {}
+        self._option_labels: dict[str, str] = {}
+        self._pending_working_state: tuple[int, str] | None = None
         self._terminal_too_small = False
 
     def compose(self) -> ComposeResult:
@@ -401,6 +403,7 @@ class PortableApplicationShell(App[None]):
         self._show_exit_action()
 
     def _operation_failed(self, error: Exception) -> None:
+        self._drain_runtime_events()
         self.operation_result = 1
         self._workflow_complete = True
         self.query_one("#portable-status", Static).update("FAILED")
@@ -413,6 +416,7 @@ class PortableApplicationShell(App[None]):
     def _show_exit_action(self) -> None:
         menu = self.query_one("#portable-navigation", OptionList)
         menu.display = True
+        menu.disabled = False
         menu.clear_options()
         menu.add_option(Option("Exit Dev Loop", id="__exit__"))
         menu.highlighted = 0
@@ -431,6 +435,8 @@ class PortableApplicationShell(App[None]):
             self._show_choice(event)
         elif event.kind is PortableRuntimeEventKind.INPUT_REQUESTED:
             self._show_input(event)
+        elif event.kind is PortableRuntimeEventKind.INTERACTION_COMPLETED:
+            self._finish_interaction_transition(event.request_id)
         elif event.kind is PortableRuntimeEventKind.SCREEN_UPDATED:
             safe_content = sanitize_terminal_text(
                 event.content,
@@ -480,12 +486,18 @@ class PortableApplicationShell(App[None]):
 
     def _show_choice(self, event: PortableRuntimeEvent) -> None:
         self._active_request_id = event.request_id
+        self._pending_working_state = None
         self._cancel_key = event.cancel_key
         self._shortcut_commands = dict(event.shortcuts)
+        self._option_labels = {
+            key: sanitize_terminal_text(label, preserve_newlines=False)
+            for key, label in event.options
+        }
         input_widget = self.query_one("#portable-input", Input)
         input_widget.display = False
         menu = self.query_one("#portable-navigation", OptionList)
         menu.display = True
+        menu.disabled = False
         menu.clear_options()
         menu.add_options(
             [
@@ -511,6 +523,7 @@ class PortableApplicationShell(App[None]):
 
     def _show_input(self, event: PortableRuntimeEvent) -> None:
         self._active_request_id = event.request_id
+        self._pending_working_state = None
         self._cancel_key = ""
         self._shortcut_commands = {}
         self._input_history = event.input_history
@@ -568,28 +581,81 @@ class PortableApplicationShell(App[None]):
             return
         if request_id is None or option_id is None:
             return
-        self._active_request_id = None
-        self._bridge.respond(request_id, option_id)
-        self.query_one("#portable-status", Static).update("WORKING")
+        option_label = self._option_labels.get(option_id, option_id)
+        self._respond(request_id, option_id, f"Accepted: {option_label}")
 
     @on(Input.Submitted, "#portable-input")
     def submit_input(self, event: Input.Submitted) -> None:
         request_id = self._active_request_id
         if request_id is None:
             return
-        self._active_request_id = None
         event.input.display = False
-        self._bridge.respond(request_id, event.value)
-        self.query_one("#portable-status", Static).update("WORKING")
+        self._respond(request_id, event.value, "Input accepted")
 
     def action_back(self) -> None:
-        if self._active_request_id is None or self._cancel_key is None:
+        if self._active_request_id is None:
+            if not self._workflow_complete:
+                self._show_working_explanation()
+            return
+        if self._cancel_key is None:
+            self.push_screen(
+                PortableTextOverlay(
+                    "Back Unavailable",
+                    "This view has no Back or Cancel action. Choose an explicit "
+                    "menu item to continue.",
+                )
+            )
             return
         request_id = self._active_request_id
-        self._active_request_id = None
         self.query_one("#portable-input", Input).display = False
-        self._bridge.respond(request_id, self._cancel_key)
+        self._respond(
+            request_id,
+            self._cancel_key,
+            "Back or cancel accepted",
+        )
+
+    def _respond(self, request_id: int, value: str, message: str) -> None:
+        self._active_request_id = None
+        self._pending_working_state = (request_id, message)
+        self._show_working_state(message)
+        self._bridge.respond(request_id, value)
+
+    def _finish_interaction_transition(self, request_id: int) -> None:
+        pending = self._pending_working_state
+        if pending is None or pending[0] != request_id:
+            return
+        self._pending_working_state = None
+        if not self._workflow_complete:
+            self._show_working_state(pending[1])
+
+    def _show_working_state(self, message: str) -> None:
+        safe_message = sanitize_terminal_text(message, preserve_newlines=False)
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.clear_options()
+        menu.disabled = True
+        menu.display = True
+        self.query_one("#portable-header", Static).update("Dev Loop > Working")
+        self.query_one("#portable-detail", Static).update(
+            "Dev Loop > Working\n\n"
+            f"{safe_message}\n\n"
+            "The application is still active. Progress or the next choice will "
+            "replace this view automatically."
+        )
         self.query_one("#portable-status", Static).update("WORKING")
+        self.query_one("#portable-actions", Static).update(
+            "F1 Help | F4 Logs | Ctrl+C Stop | Esc Status"
+        )
+        self._publish_activity(f"RUNNING · {safe_message}")
+
+    def _show_working_explanation(self) -> None:
+        self.push_screen(
+            PortableTextOverlay(
+                "Workflow In Progress",
+                "Your last selection was already accepted and Dev Loop is working.\n\n"
+                "There is no safe Back action at this moment. Progress or the next "
+                "choice will appear in this application automatically.",
+            )
+        )
 
     def action_help(self) -> None:
         self.push_screen(
@@ -638,9 +704,7 @@ class PortableApplicationShell(App[None]):
         request_id = self._active_request_id
         if command is None or request_id is None:
             return False
-        self._active_request_id = None
-        self._bridge.respond(request_id, command)
-        self.query_one("#portable-status", Static).update("WORKING")
+        self._respond(request_id, command, f"Accepted shortcut: {key.upper()}")
         return True
 
     def action_paste_image(self) -> None:
@@ -648,10 +712,8 @@ class PortableApplicationShell(App[None]):
         request_id = self._active_request_id
         if request_id is None or not input_widget.display:
             return
-        self._active_request_id = None
         input_widget.display = False
-        self._bridge.respond(request_id, "/paste")
-        self.query_one("#portable-status", Static).update("ATTACHING SCREENSHOT")
+        self._respond(request_id, "/paste", "Attaching screenshot")
 
     def action_request_stop(self) -> None:
         if self._active_request_id is not None and self._cancel_key is not None:
