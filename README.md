@@ -66,8 +66,9 @@ irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps
 
 1. Asks where to install Dev Loop.
 2. Clones or updates the bundle from GitHub into that folder.
-3. Copies bundled Codex skills and agent references into your Codex home folder.
-4. Adds `devloop` and `devloop-plan` commands to your user PATH.
+3. Builds and validates an isolated `.venv` from the committed portable runtime lock.
+4. Copies bundled Codex skills and agent references into your Codex home folder.
+5. Adds `devloop` and `devloop-plan` commands to your user PATH.
 
 Press Enter to accept the default install location:
 
@@ -113,13 +114,18 @@ they do not share an interface, command registry, or run-state format.
 
 | Application | Start command | Interface and state | Resume |
 | --- | --- | --- | --- |
-| Portable Dev Loop | `devloop-plan.sh` / `.ps1`, then `devloop.sh` / `.ps1` | Keyboard-driven window UI, line editor, and bounded dashboard; PRD-local `*.loop.state.json` | Startup **Resume an unfinished PRD**, planning `/resume`, or rerun the same `devloop` command |
+| Portable Dev Loop | `devloop-plan.sh` / `.ps1`, then `devloop.sh` / `.ps1` | Persistent Textual two-pane terminal application; PRD-local `*.loop.state.json` | Startup **Resume an unfinished PRD**, planning `/resume`, or rerun the same `devloop` command |
 | CodexCLI | Installed `codexcli run` command | Separate Textual application; `.devloop/runs/` and Codex App Server threads | Its own `/resume` command |
 
 `devloop-plan` is not a launcher or compatibility wrapper for `codexcli`.
 Changes requested while running `devloop-plan` target the portable Dev Loop
 unless the user explicitly names CodexCLI. See
 `docs/product-boundaries.md` before changing workflow architecture.
+
+Interactive TTY sessions use one full-screen Midnight Commander-inspired shell
+through planning, development, review, QA, post-run tasks, and completion. Each
+view replaces the current panes instead of appending to terminal history. Use
+`--plain` for deterministic line-oriented output or redirected automation.
 
 ## Separate Optional Application: CodexCLI v0.1.0
 

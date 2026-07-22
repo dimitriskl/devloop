@@ -12,6 +12,12 @@ itself into development once the PRD and issue pack exist on disk.
 > is not their backend and has different commands and state. See
 > `product-boundaries.md`.
 
+> The interactive interface is the persistent
+> [Portable Application Shell](portable-application-shell.md). Planning,
+> configuration, delivery, post-run work, errors, and completion stay inside
+> one mounted two-pane Textual application. `--plain` keeps deterministic
+> line-oriented behavior for redirected or diagnostic runs.
+
 ## Windows PowerShell
 
 ```powershell
@@ -40,8 +46,8 @@ After the target checkout is selected, Dev Loop opens a replacing startup menu:
 - **Exit**
 
 On an interactive terminal, use Up/Down and Enter to choose an item; Esc exits
-or returns to the previous screen. Number keys remain available, and terminals
-without raw-key support fall back to the numbered prompt.
+or returns to the previous screen. Redirected terminals and explicit `--plain`
+runs use the line-oriented fallback.
 
 The resume catalog scans standard
 `prd/<name>/<name>.md` plus `prd/<name>/issues/README.md` packages and supported

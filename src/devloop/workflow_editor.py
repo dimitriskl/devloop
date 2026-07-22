@@ -75,6 +75,9 @@ class SelectionMenu:
 
 SelectOption = Callable[[SelectionMenu], str]
 
+_APPLICATION_SELECTION_COMMAND = "__application_selection_updated__"
+_APPLICATION_STEP_PREFIX = "__application_step__:"
+
 WIDE_EDITOR_MINIMUM_WIDTH = 96
 EDITOR_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("View", ("current", "future", "graph", "advanced")),
@@ -1004,12 +1007,128 @@ class _WorkflowEditorSession:
 
     def run(self) -> EditorResult:
         while True:
-            self._render()
-            result = self._dispatch(
-                self._read_command(self._prompt()).strip()
-            )
+            from .portable_runtime import active_portable_runtime
+
+            if active_portable_runtime() is None:
+                self._render()
+                command = self._read_command(self._prompt()).strip()
+            else:
+                command = self._read_application_command()
+            if command == _APPLICATION_SELECTION_COMMAND:
+                continue
+            result = self._dispatch(command)
             if result is not None:
                 return result
+
+    def _read_application_command(self) -> str:
+        from .portable_runtime import active_portable_runtime
+
+        portable_runtime = active_portable_runtime()
+        assert portable_runtime is not None
+        originally_selected_step_id = self._selected_step_id()
+        workflow_steps = self._viewed_workflow().steps
+        selected_position = next(
+            index
+            for index, step in enumerate(workflow_steps, start=1)
+            if step.instance_id == self._selected_step_id()
+        )
+        options = (
+            *(
+                (
+                    f"{_APPLICATION_STEP_PREFIX}{index}",
+                    f"{index}. {step.display_name}",
+                )
+                for index, step in enumerate(workflow_steps, start=1)
+            ),
+            ("actions", "Actions…"),
+            ("cancel", "Cancel workflow draft"),
+        )
+        command = portable_runtime.choose(
+            options,
+            default_key=f"{_APPLICATION_STEP_PREFIX}{selected_position}",
+            cancel_key="cancel",
+            render=self._preview_application_step,
+            shortcuts={
+                "f2": "apply",
+                "f3": "graph",
+                "f5": "add",
+                "f9": "actions",
+            },
+        )
+        if command == "actions":
+            return self._read_command(self._prompt()).strip()
+        if command.startswith(_APPLICATION_STEP_PREFIX):
+            if self._selected_step_id() == originally_selected_step_id:
+                return self._read_command(self._prompt()).strip()
+            return _APPLICATION_SELECTION_COMMAND
+        return command
+
+    def _preview_application_step(self, command: str) -> None:
+        raw_position = command.removeprefix(_APPLICATION_STEP_PREFIX)
+        position = _parse_one_based_integer(raw_position)
+        workflow_steps = self._viewed_workflow().steps
+        if position is not None and position <= len(workflow_steps):
+            selected = workflow_steps[position - 1].instance_id
+            if self._scope is EditorScope.CURRENT_RUN:
+                self._current_selected_step_id = selected
+            else:
+                self._future_selected_step_id = selected
+        self._render_application_detail()
+
+    def _render_application_detail(self) -> None:
+        from .portable_runtime import active_portable_runtime
+
+        portable_runtime = active_portable_runtime()
+        if portable_runtime is None:
+            return
+        workflow = self._viewed_workflow()
+        selected = workflow.step(self._selected_step_id())
+        component = self._catalog.resolve(selected.component_id)
+        primary_path = workflow.primary_path()
+        selected_position = next(
+            (
+                index
+                for index, step in enumerate(primary_path, start=1)
+                if step.instance_id == selected.instance_id
+            ),
+            None,
+        )
+        if self._show_graph:
+            detail_lines = render_graph_preview(
+                workflow,
+                self._catalog,
+                terminal_width=max(40, self._terminal_width - 12),
+                max_lines=max(6, self._terminal_height - 8),
+            ).splitlines()
+        elif self._show_advanced:
+            detail_lines = [f"Instance: {selected.instance_id}"]
+            detail_lines.extend(
+                _port_binding_lines(workflow, selected, component, self._catalog)
+            )
+        else:
+            detail_lines = _compact_detail_lines(
+                workflow,
+                selected,
+                component,
+                self._catalog,
+                selected_position=selected_position,
+                primary_path_length=len(primary_path),
+                model_catalog=self._model_catalog,
+                model_catalog_error=self._model_catalog_error,
+            )
+        scope_label = (
+            "Current Run (read-only)"
+            if self._scope is EditorScope.CURRENT_RUN
+            else "Future Runs (editable)"
+        )
+        lines = [
+            f"Dev Loop > Workflow Editor > {scope_label} > {selected.display_name}",
+            "",
+            *detail_lines,
+        ]
+        if self._notice:
+            lines.extend(("", f"Status: {self._notice}"))
+        portable_runtime.show_screen("\n".join(lines))
 
     def _prompt(self) -> str:
         step = self._viewed_workflow().step(self._selected_step_id())

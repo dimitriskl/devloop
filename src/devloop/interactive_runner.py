@@ -119,8 +119,36 @@ class ResumeCandidate:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    from .portable_presentation import PortableUiMode, select_portable_ui_mode
+    from .portable_runtime import active_portable_runtime
+
+    ui_mode = select_portable_ui_mode(
+        force_plain=args.plain,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        term=os.environ.get("TERM"),
+    )
+    operation = lambda: _run_planning(parser, args)
     try:
-        return _run_planning(parser, args)
+        if (
+            ui_mode is PortableUiMode.APPLICATION
+            and active_portable_runtime() is None
+        ):
+            try:
+                from .portable_ui.app import run_portable_application
+            except ModuleNotFoundError as error:
+                if error.name != "textual":
+                    raise
+                print(
+                    "Dev Loop terminal UI is unavailable. Rerun the Dev Loop "
+                    "installer to repair its runtime, or use --plain.",
+                    file=sys.stderr,
+                )
+                return 78
+
+            return run_portable_application(operation)
+        return operation()
     except KeyboardInterrupt:
         # Top-level backstop: covers the chat loop, the /options menus, and the
         # handoff prompts so a mid-run Ctrl+C exits cleanly.
@@ -156,6 +184,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             selection,
             state_path,
             codex=args.codex,
+            plain=args.plain,
         )
 
     repo_root = choose_target_repo(args.repo)
@@ -184,6 +213,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
                 selection,
                 state_path,
                 codex=args.codex,
+                plain=args.plain,
             )
     repo_root = apply_branch_strategy(repo_root)
 
@@ -294,6 +324,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         selection,
         state_path,
         codex=args.codex,
+        plain=args.plain,
         workflow_snapshot=workflow_snapshot,
     )
 
@@ -333,9 +364,28 @@ def preflight_analysis_workflow(
                 "Recovery: /options opens the Workflow Editor; retry-catalog "
                 "retries live discovery; /quit stops planning."
             )
-        action = read_prompt(
-            "Preflight action [/options/retry-catalog/quit]: "
-        ).strip().casefold()
+        from .portable_runtime import active_portable_runtime
+
+        if active_portable_runtime() is not None:
+            action = choose_menu_option(
+                (
+                    ("/options", "Edit workflow options"),
+                    ("retry-catalog", "Retry model catalog discovery"),
+                    ("/quit", "Quit planning"),
+                ),
+                default_key="/options",
+                cancel_key="/quit",
+                render=lambda selected: render_app_screen(
+                    "Dev Loop > Preflight Recovery\n\n"
+                    f"Selected: {selected}\n\n"
+                    "Choose how to recover the Codex execution settings."
+                ),
+                fallback=lambda: "/quit",
+            )
+        else:
+            action = read_prompt(
+                "Preflight action [/options/retry-catalog/quit]: "
+            ).strip().casefold()
         if action == "/options":
             run_options_menu(
                 bundle_root,
@@ -567,6 +617,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prd", help="Existing PRD file or PRD folder to resume directly. Skips planning and starts from the development prompts.")
     parser.add_argument("--goal", help="Initial feature or fix description. If omitted, Dev Loop asks before Codex starts.")
     parser.add_argument("--codex", default="codex", help="Codex executable path or command name. Default: codex.")
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Use deterministic line-oriented output instead of the full-screen application.",
+    )
     parser.add_argument(
         "--native-editor",
         action="store_true",
@@ -1053,6 +1108,7 @@ def build_devloop_args(
     artifacts: PlanningArtifacts,
     preset_path: Path | None,
     codex: str = "codex",
+    plain: bool = False,
 ) -> list[str]:
     args = [
         "--prd",
@@ -1065,6 +1121,8 @@ def build_devloop_args(
     ]
     if preset_path is not None:
         args.extend(["--preset", str(preset_path)])
+    if plain:
+        args.append("--plain")
     if params.start_issue:
         args.extend(["--start-issue", params.start_issue])
     if params.run_all:
@@ -1114,6 +1172,7 @@ def run_handoff(
     *,
     codex: str = "codex",
     workflow_snapshot: WorkflowDefinition | None = None,
+    plain: bool = False,
 ) -> int:
     component_catalog = build_portable_component_catalog(bundle_root)
     slug = artifact_slug(artifacts)
@@ -1126,25 +1185,50 @@ def run_handoff(
     )
 
     while True:
-        print()
-        print(statusui.render_banner(Stage.DEVELOPMENT))
-        print(f"PRD:            {artifacts.prd_path}")
-        print(f"Issue index:    {artifacts.issues_index}")
-        print(f"Issues to run:  {handoff_issue_summary(params, artifacts)}")
-        print(f"Worktree:       {params.worktree_path if params.use_worktree else 'disabled (work in checkout)'}")
+        lines = [
+            statusui.render_banner(Stage.DEVELOPMENT),
+            f"PRD:            {artifacts.prd_path}",
+            f"Issue index:    {artifacts.issues_index}",
+            f"Issues to run:  {handoff_issue_summary(params, artifacts)}",
+            "Worktree:       "
+            f"{params.worktree_path if params.use_worktree else 'disabled (work in checkout)'}",
+        ]
         if params.use_worktree:
-            print(f"Branch:         {params.branch_name}")
-        print("Wiki:           always on (read + updated)")
+            lines.append(f"Branch:         {params.branch_name}")
+        lines.append("Wiki:           always on (read + updated)")
         if selection.has_role_overrides():
-            print("Preset:         session role overrides (via /options)")
+            lines.append("Preset:         session role overrides (via /options)")
         else:
-            print("Preset:         embedded defaults")
-        raw = read_prompt(
-            "Press Enter to start development, /options for workflow defaults, "
-            "/run-options to adjust this launch, "
-            "/reset-roles to clear role overrides, /quit to stop: "
-        ).strip().lower()
-        if raw == "":
+            lines.append("Preset:         embedded defaults")
+        screen = "\n".join(lines)
+
+        from .portable_runtime import active_portable_runtime
+
+        if active_portable_runtime() is not None:
+            raw = choose_menu_option(
+                (
+                    ("start", "Start development"),
+                    ("/options", "Workflow defaults"),
+                    ("/run-options", "Adjust this launch"),
+                    ("/reset-roles", "Clear role overrides"),
+                    ("/quit", "Quit"),
+                ),
+                default_key="start",
+                cancel_key="/quit",
+                render=lambda selected: render_app_screen(
+                    f"{screen}\n\nSelected action: {selected}"
+                ),
+                fallback=lambda: "/quit",
+            )
+        else:
+            print()
+            print(screen)
+            raw = read_prompt(
+                "Press Enter to start development, /options for workflow defaults, "
+                "/run-options to adjust this launch, "
+                "/reset-roles to clear role overrides, /quit to stop: "
+            ).strip().lower()
+        if raw in {"", "start"}:
             break
         if raw == "/quit":
             return 0
@@ -1192,7 +1276,13 @@ def run_handoff(
         selection,
         artifacts.prd_path.parent / "devloop.session.preset.json",
     )
-    args = build_devloop_args(params, artifacts, preset_path, codex)
+    args = build_devloop_args(
+        params,
+        artifacts,
+        preset_path,
+        codex,
+        plain=plain,
+    )
 
     from .cli import main as devloop_main
 
@@ -1712,7 +1802,19 @@ def current_branch(repo_root: Path) -> str:
 def run_git(args: Sequence[str], *, cwd: Path) -> None:
     command = ["git", *args]
     print(format_command(command))
-    result = subprocess.run(command, cwd=cwd, check=False)
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
@@ -1730,6 +1832,19 @@ def run_text(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProces
 
 
 def ask_choice(prompt: str, allowed: set[str], *, default: str) -> str:
+    from .portable_runtime import active_portable_runtime
+
+    if active_portable_runtime() is not None:
+        options = tuple((choice, choice) for choice in sorted(allowed))
+        return choose_menu_option(
+            options,
+            default_key=default,
+            cancel_key=None,
+            render=lambda selected: render_app_screen(
+                f"{prompt}\n\nSelected: {selected}"
+            ),
+            fallback=lambda: default,
+        )
     while True:
         raw = read_prompt(f"{prompt} [{default}]: ").strip() or default
         if raw in allowed:
@@ -1738,6 +1853,19 @@ def ask_choice(prompt: str, allowed: set[str], *, default: str) -> str:
 
 
 def ask_yes_no(prompt: str, *, default: bool) -> bool:
+    from .portable_runtime import active_portable_runtime
+
+    if active_portable_runtime() is not None:
+        selected = choose_menu_option(
+            (("yes", "Yes"), ("no", "No")),
+            default_key="yes" if default else "no",
+            cancel_key="no",
+            render=lambda choice: render_app_screen(
+                f"{prompt}\n\nSelected: {choice.title()}"
+            ),
+            fallback=lambda: "yes" if default else "no",
+        )
+        return selected == "yes"
     suffix = "Y/n" if default else "y/N"
     while True:
         raw = read_prompt(f"{prompt} [{suffix}]: ").strip().lower()

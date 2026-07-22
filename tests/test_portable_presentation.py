@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import io
+import unittest
+from threading import Event, Thread, get_ident
+
+from devloop.portable_presentation import (
+    PortableActivity,
+    PortableActivityFeed,
+    PortableActivityStatus,
+    PortableListItem,
+    PortableUiMode,
+    PortableViewModel,
+    select_portable_ui_mode,
+)
+from devloop.portable_runtime import (
+    PortableRoutedStream,
+    PortableRuntimeBridge,
+    PortableRuntimeEventKind,
+)
+from devloop.portable_runtime import portable_runtime_session
+from devloop.terminal_editor import TerminalEditor
+from devloop.terminal_menu import choose_menu_option, render_app_screen
+
+
+class PortableUiModeTests(unittest.TestCase):
+    def test_interactive_terminal_uses_application_shell(self) -> None:
+        mode = select_portable_ui_mode(
+            force_plain=False,
+            stdin_is_tty=True,
+            stdout_is_tty=True,
+            term="xterm-256color",
+        )
+
+        self.assertIs(mode, PortableUiMode.APPLICATION)
+
+
+class PortableViewModelTests(unittest.TestCase):
+    def test_selection_immediately_changes_the_preview(self) -> None:
+        view = PortableViewModel(
+            path=("Startup", "Resume"),
+            title="Unfinished PRDs",
+            items=(
+                PortableListItem("one", "First PRD", ("3 remaining",)),
+                PortableListItem("two", "Second PRD", ("1 remaining",)),
+            ),
+            selected_id="one",
+        )
+
+        selected = view.select("two")
+
+        self.assertEqual(selected.selected_item.label, "Second PRD")
+        self.assertEqual(selected.preview_lines, ("1 remaining",))
+        self.assertEqual(view.selected_item.label, "First PRD")
+
+
+class PortableActivityFeedTests(unittest.TestCase):
+    def test_repeated_operation_updates_one_bounded_activity_item(self) -> None:
+        feed = PortableActivityFeed().publish(
+            PortableActivity(
+                operation_id="command-7",
+                message="Running repository command",
+                status=PortableActivityStatus.RUNNING,
+            )
+        )
+
+        completed = feed.publish(
+            PortableActivity(
+                operation_id="command-7",
+                message="Repository command finished",
+                status=PortableActivityStatus.SUCCEEDED,
+            )
+        )
+
+        self.assertEqual(len(completed.items), 1)
+        self.assertEqual(completed.items[0].message, "Repository command finished")
+        self.assertIs(completed.items[0].status, PortableActivityStatus.SUCCEEDED)
+
+    def test_updated_activity_moves_to_the_visible_end_of_the_feed(self) -> None:
+        feed = PortableActivityFeed(
+            (
+                PortableActivity("first", "First", PortableActivityStatus.RUNNING),
+                PortableActivity("second", "Second", PortableActivityStatus.NOTICE),
+            )
+        )
+
+        updated = feed.publish(
+            PortableActivity("first", "Finished", PortableActivityStatus.SUCCEEDED)
+        )
+
+        self.assertEqual(
+            [item.operation_id for item in updated.items],
+            ["second", "first"],
+        )
+
+
+class PortableRuntimeBridgeTests(unittest.TestCase):
+    def test_choice_request_round_trips_through_the_presentation_seam(self) -> None:
+        bridge = PortableRuntimeBridge()
+        selected: list[str] = []
+        worker = Thread(
+            target=lambda: selected.append(
+                bridge.choose(
+                    (("start", "Start a new change"), ("exit", "Exit")),
+                    default_key="start",
+                    cancel_key="exit",
+                    render=lambda _key: None,
+                )
+            )
+        )
+
+        worker.start()
+        request = bridge.next_event(timeout=1)
+        self.assertIs(request.kind, PortableRuntimeEventKind.CHOICE_REQUESTED)
+        bridge.respond(request.request_id, "exit")
+        worker.join(timeout=1)
+
+        self.assertEqual(selected, ["exit"])
+
+    def test_highlight_change_refreshes_preview_before_confirmation(self) -> None:
+        bridge = PortableRuntimeBridge()
+        preview_updated = Event()
+        rendered: list[str] = []
+
+        def render(key: str) -> None:
+            rendered.append(key)
+            if key == "resume":
+                preview_updated.set()
+
+        worker = Thread(
+            target=lambda: bridge.choose(
+                (("start", "Start"), ("resume", "Resume")),
+                default_key="start",
+                cancel_key=None,
+                render=render,
+            )
+        )
+        worker.start()
+        request = bridge.next_event(timeout=1)
+
+        bridge.preview(request.request_id, "resume")
+        self.assertTrue(preview_updated.wait(timeout=1))
+        bridge.respond(request.request_id, "resume")
+        worker.join(timeout=1)
+
+        self.assertEqual(rendered, ["start", "resume"])
+
+    def test_free_form_input_is_requested_inside_the_application(self) -> None:
+        bridge = PortableRuntimeBridge()
+        entered: list[str] = []
+        worker = Thread(
+            target=lambda: entered.append(bridge.read_line("Target project root"))
+        )
+        worker.start()
+
+        request = bridge.next_event(timeout=1)
+        self.assertIs(request.kind, PortableRuntimeEventKind.INPUT_REQUESTED)
+        self.assertEqual(request.prompt, "Target project root")
+        bridge.respond(request.request_id, "E:\\LocalCode\\example")
+        worker.join(timeout=1)
+
+        self.assertEqual(entered, ["E:\\LocalCode\\example"])
+
+    def test_existing_terminal_editor_uses_the_application_input_view(self) -> None:
+        bridge = PortableRuntimeBridge()
+        entered: list[str] = []
+
+        def read() -> None:
+            entered.append(
+                TerminalEditor(
+                    on_paste_image=lambda: None,
+                    fallback_hint=None,
+                ).read_line("Goal: ")
+            )
+
+        with portable_runtime_session(bridge):
+            worker = Thread(target=read)
+            worker.start()
+            request = bridge.next_event(timeout=1)
+            bridge.respond(request.request_id, "Build the shell")
+            worker.join(timeout=1)
+
+        self.assertEqual(entered, ["Build the shell"])
+
+    def test_existing_screen_render_is_contained_by_the_application(self) -> None:
+        bridge = PortableRuntimeBridge()
+
+        with portable_runtime_session(bridge):
+            render_app_screen("Dev Loop > Startup")
+
+        event = bridge.next_event(timeout=1)
+        self.assertIs(event.kind, PortableRuntimeEventKind.SCREEN_UPDATED)
+        self.assertEqual(event.content, "Dev Loop > Startup")
+
+    def test_existing_finite_menu_uses_the_application_choice_view(self) -> None:
+        bridge = PortableRuntimeBridge()
+        selected: list[str] = []
+
+        def choose() -> None:
+            selected.append(
+                choose_menu_option(
+                    (("start", "Start"), ("exit", "Exit")),
+                    default_key="start",
+                    cancel_key="exit",
+                    render=lambda key: render_app_screen(f"selected:{key}"),
+                    fallback=lambda: "fallback",
+                )
+            )
+
+        with portable_runtime_session(bridge):
+            worker = Thread(target=choose)
+            worker.start()
+            request = bridge.next_event(timeout=1)
+            self.assertIs(request.kind, PortableRuntimeEventKind.CHOICE_REQUESTED)
+            preview = bridge.next_event(timeout=1)
+            self.assertEqual(preview.content, "selected:start")
+            bridge.respond(request.request_id, "exit")
+            worker.join(timeout=1)
+
+        self.assertEqual(selected, ["exit"])
+
+    def test_worker_output_is_routed_inside_the_application(self) -> None:
+        bridge = PortableRuntimeBridge()
+        terminal = io.StringIO()
+        stream = PortableRoutedStream(
+            bridge,
+            terminal,
+            application_thread_id=get_ident(),
+            is_error=False,
+        )
+
+        stream.write("application-render")
+        worker = Thread(target=lambda: stream.write("repository command finished\n"))
+        worker.start()
+        worker.join(timeout=1)
+
+        event = bridge.next_event(timeout=1)
+        self.assertEqual(terminal.getvalue(), "application-render")
+        self.assertIs(event.kind, PortableRuntimeEventKind.OUTPUT_WRITTEN)
+        self.assertEqual(event.content, "repository command finished\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

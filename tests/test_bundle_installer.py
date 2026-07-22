@@ -44,6 +44,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
                     "DEVLOOP_BIN_DIR": str(bin_dir),
                     "DEVLOOP_REPO_URL": f"file://{ROOT.as_posix()}",
                     "DEVLOOP_REF": "HEAD",
+                    "DEVLOOP_TESTING": "1",
                 }
             )
             result = subprocess.run(
@@ -70,6 +71,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
                     "DEVLOOP_BIN_DIR": str(bin_dir),
                     "DEVLOOP_REPO_URL": f"file://{ROOT.as_posix()}",
                     "DEVLOOP_REF": "HEAD",
+                    "DEVLOOP_TESTING": "1",
                 }
             )
             first = subprocess.run(
@@ -124,6 +126,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
                     "DEVLOOP_BIN_DIR": str(Path(raw) / "bin"),
                     "DEVLOOP_REPO_URL": f"file://{ROOT.as_posix()}",
                     "DEVLOOP_REF": "HEAD",
+                    "DEVLOOP_TESTING": "1",
                 }
             )
             result = subprocess.run(
@@ -153,6 +156,41 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Install or update the portable Dev Loop bundle.", result.stdout)
+
+
+class PortableRuntimePackagingTests(unittest.TestCase):
+    def test_runtime_lock_pins_textual_and_every_transitive_dependency(self) -> None:
+        lock = (ROOT / "requirements-portable.lock").read_text(encoding="utf-8")
+
+        self.assertIn("textual==8.2.8", lock)
+        self.assertNotIn(">=", lock)
+        self.assertEqual(
+            len([line for line in lock.splitlines() if line and not line.startswith("#")]),
+            10,
+        )
+
+    def test_launchers_use_only_the_bundle_runtime_and_do_not_print_a_logo(self) -> None:
+        launchers = (
+            (ROOT / "bin" / "devloop.ps1").read_text(encoding="utf-8"),
+            (ROOT / "bin" / "devloop-plan.ps1").read_text(encoding="utf-8"),
+            (ROOT / "bin" / "devloop.sh").read_text(encoding="utf-8"),
+            (ROOT / "bin" / "devloop-plan.sh").read_text(encoding="utf-8"),
+        )
+
+        for launcher in launchers:
+            self.assertIn(".venv", launcher)
+            self.assertNotIn("devloop.logo", launcher)
+
+    def test_installers_stage_and_validate_a_replacement_runtime(self) -> None:
+        installers = (
+            INSTALL_PS1.read_text(encoding="utf-8"),
+            INSTALL_SH.read_text(encoding="utf-8"),
+        )
+
+        for installer in installers:
+            self.assertIn(".venv.next", installer)
+            self.assertIn("requirements-portable.lock", installer)
+            self.assertIn("textual.__version__", installer)
 
 
 if __name__ == "__main__":

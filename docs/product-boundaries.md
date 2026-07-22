@@ -36,6 +36,11 @@ issue through coder, reviewer, and QA roles in Bash or PowerShell.
 `--prd`, or rerunning the same `devloop` command. Resume continues PRD/issue
 execution state; it does not use CodexCLI Workflow Runs.
 
+**Implemented presentation:** The interactive TTY interface uses the persistent
+[Portable Application Shell](portable-application-shell.md). This
+changes presentation ownership only; it does not adopt CodexCLI state, App
+Server execution, or Workflow Runs.
+
 ## CodexCLI
 
 **Product name:** `codexcli`

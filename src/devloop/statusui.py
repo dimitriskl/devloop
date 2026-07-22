@@ -1109,7 +1109,13 @@ class IssueDashboard:
         self._frame_seconds = frame_seconds
         self._terminal_size = terminal_size
         isatty = getattr(self._stream, "isatty", None)
-        self._enabled = bool(callable(isatty) and isatty())
+        from .portable_runtime import active_portable_runtime
+
+        self._portable_runtime = active_portable_runtime()
+        self._enabled = bool(
+            self._portable_runtime is not None
+            or (callable(isatty) and isatty())
+        )
         self._unicode = _can_encode("─⠋›", self._stream)
         self._statuses = {
             Stage.DEVELOPMENT: DashboardStatus.WAITING,
@@ -1320,6 +1326,15 @@ class IssueDashboard:
 
     def close(self, activity: str | None = None) -> None:
         self._stop_animation()
+        if self._portable_runtime is not None:
+            if activity:
+                with self._lock:
+                    self._activity = _safe_progress_text(activity)
+                    self._last_activity_at = self._clock()
+                    self._render_locked()
+            self._opened = False
+            self._rendered_lines = 0
+            return
         if not self._enabled:
             if self._workflow_progress is not None and activity:
                 with self._lock:
@@ -1410,6 +1425,11 @@ class IssueDashboard:
             frame=frame,
         )
         lines = rendered.splitlines()
+        if self._portable_runtime is not None:
+            self._portable_runtime.show_screen(rendered)
+            self._rendered_lines = len(lines)
+            self._opened = True
+            return
         if not self._enabled:
             try:
                 self._stream.write(f"{rendered}\n")
@@ -1451,7 +1471,13 @@ class WaitingIndicator:
         self._context = _safe_progress_text(context)
         self._workflow_progress = workflow_progress
         isatty = getattr(self._stream, "isatty", None)
-        self._enabled = bool(callable(isatty) and isatty())
+        from .portable_runtime import active_portable_runtime
+
+        self._portable_runtime = active_portable_runtime()
+        self._enabled = bool(
+            self._portable_runtime is not None
+            or (callable(isatty) and isatty())
+        )
         self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
         self._activity_lock = threading.Lock()
@@ -1514,6 +1540,12 @@ class WaitingIndicator:
                 frame_index += 1
                 continue
             status_line = self._status_line(frame)
+            if self._portable_runtime is not None:
+                self._portable_runtime.show_screen(status_line)
+                if self._stop_requested.wait(self._frame_seconds):
+                    return
+                frame_index += 1
+                continue
             status_width = _terminal_display_width(status_line)
             padding = " " * max(0, self._rendered_width - status_width)
             try:
@@ -1561,6 +1593,10 @@ class WaitingIndicator:
 
     def _write_progress_panel(self, rendered: str) -> None:
         lines = rendered.splitlines()
+        if self._portable_runtime is not None:
+            self._portable_runtime.show_screen(rendered)
+            self._rendered_lines = len(lines)
+            return
         try:
             _rewrite_terminal_lines(
                 self._stream,
@@ -1573,6 +1609,9 @@ class WaitingIndicator:
         self._rendered_lines = len(lines)
 
     def _clear_progress_panel(self) -> None:
+        if self._portable_runtime is not None:
+            self._rendered_lines = 0
+            return
         if self._rendered_lines <= 0:
             return
         try:
@@ -1636,6 +1675,8 @@ class WaitingIndicator:
         )
 
     def _clear(self) -> None:
+        if self._portable_runtime is not None:
+            return
         try:
             self._stream.write(f"\r{' ' * self._rendered_width}\r")
             self._stream.flush()

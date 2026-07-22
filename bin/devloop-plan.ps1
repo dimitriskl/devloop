@@ -9,42 +9,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Show-DevLoopLogo {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $BundleRoot,
-
-        [Parameter(Mandatory = $true)]
-        [string] $Python
-    )
-
-    & $Python -m devloop.logo $BundleRoot
-}
-
-function Get-DevLoopPython {
-    $candidates = @('python', 'python3', 'py')
-
-    foreach ($candidate in $candidates) {
-        $command = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($null -eq $command) {
-            continue
-        }
-
-        try {
-            & $candidate --version *> $null
-            if ($LASTEXITCODE -eq 0) {
-                return $candidate
-            }
-        }
-        catch {
-            continue
-        }
-    }
-
-    throw 'Python 3.10+ was not found on PATH. Install Python and rerun this script.'
-}
-
 $bundleRoot = Split-Path -Parent $PSScriptRoot
+$python = Join-Path $bundleRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Dev Loop runtime is missing or damaged. Rerun install\devloop.ps1 to repair it.'
+}
 
 $pythonPath = Join-Path $bundleRoot 'src'
 $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
@@ -53,9 +22,6 @@ $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
 else {
     "$pythonPath$([IO.Path]::PathSeparator)$env:PYTHONPATH"
 }
-
-$python = Get-DevLoopPython
-Show-DevLoopLogo -BundleRoot $bundleRoot -Python $python
 
 if ($Help) {
     & $python -m devloop.interactive_runner --help

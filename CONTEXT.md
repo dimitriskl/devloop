@@ -7,9 +7,10 @@ must be established before applying the vocabulary below.
 
 **Portable Dev Loop**:
 The `devloop-plan.sh` / `.ps1` planning intake plus the `devloop.sh` / `.ps1`
-Markdown issue runner. It uses the portable line editor, console dashboard,
-Codex exec role sessions, and PRD-local `*.loop.state.json` state.
-_Avoid_: CodexCLI, Textual application, App Server Workflow Run
+Markdown issue runner. Its accepted interactive TTY presentation is the
+Portable Application Shell, while execution remains based on Codex exec role
+sessions and PRD-local `*.loop.state.json` state.
+_Avoid_: CodexCLI, App Server Workflow Run
 
 **CodexCLI**:
 The separately installed `codexcli` Textual application built around Codex App
@@ -23,6 +24,43 @@ An unfinished Portable Dev Loop PRD and linked issue pack listed at
 development handoff; the issue runner then restores its exact unfinished
 role/pass from PRD-local loop state.
 _Avoid_: CodexCLI Resume Candidate, App Server thread
+
+**Portable Application Shell**:
+The single persistent full-screen TTY surface that owns every interactive
+Portable Dev Loop view from planning startup through issue-runner completion.
+Its outer frame remains consistent across every Workflow Step and while work is
+running; transitions replace only the contained view while keeping context,
+actions, activity, and status within the same bounded screen.
+_Avoid_: Console transcript, printed panel sequence, CodexCLI Application Shell
+
+**Portable Two-Pane View**:
+The standard view inside the Portable Application Shell: the left pane contains
+the current navigation or selection and the right pane contains its details or
+live work. A fixed header, status row, and action bar surround both panes.
+_Avoid_: Page-specific frame, scrolling transcript
+
+**Portable View**:
+One context-specific interactive state shown inside the Portable Application
+Shell. Moving to another Portable View replaces the current content instead of
+adding another rendered screen to terminal history.
+_Avoid_: Printed page, appended panel, line prompt
+
+**Portable Selection Preview**:
+The right-pane projection of the item currently highlighted in the left pane,
+updated immediately as the selection moves without requiring Enter.
+_Avoid_: Opened page, submitted selection
+
+**Portable Activity Feed**:
+The bounded, deduplicated summary of current agent, command, scheduler, and
+post-run activity shown inside the active Portable View. Complete output remains
+available through durable logs and the in-application log viewer.
+_Avoid_: Raw event stream, terminal transcript
+
+**Portable Plain Mode**:
+The deterministic append-only interface used when Portable Dev Loop is run with
+`--plain` or without an interactive TTY. It presents the same workflow state and
+outcomes without full-screen terminal control.
+_Avoid_: Broken TUI, interactive application shell
 
 Terms involving the Application Shell, Run Launcher, Run Directory, Execution
 Thread, Recovery Attempt, Context Manifest, or `.devloop/runs/` below are

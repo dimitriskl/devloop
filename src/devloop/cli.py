@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -269,6 +270,14 @@ def report_unresolved_dependency_cut(result: DependencyScheduleResult) -> None:
         )
 
 
+def publish_portable_screen(content: str) -> None:
+    from .portable_runtime import active_portable_runtime
+
+    portable_runtime = active_portable_runtime()
+    if portable_runtime is not None:
+        portable_runtime.show_screen(content)
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -276,6 +285,39 @@ def main(
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    from .portable_presentation import PortableUiMode, select_portable_ui_mode
+    from .portable_runtime import active_portable_runtime
+
+    ui_mode = select_portable_ui_mode(
+        force_plain=args.plain,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        term=os.environ.get("TERM"),
+    )
+    operation = lambda: _run_devloop(parser, args, workflow_snapshot)
+    if ui_mode is PortableUiMode.APPLICATION and active_portable_runtime() is None:
+        try:
+            from .portable_ui.app import run_portable_application
+        except ModuleNotFoundError as error:
+            if error.name != "textual":
+                raise
+            print(
+                "Dev Loop terminal UI is unavailable. Rerun the Dev Loop "
+                "installer to repair its runtime, or use --plain.",
+                file=sys.stderr,
+            )
+            return 78
+
+        return run_portable_application(operation)
+    return operation()
+
+
+def _run_devloop(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    workflow_snapshot: WorkflowDefinition | None,
+) -> int:
 
     if args.self_improvement_max_lessons < 1:
         parser.error("--self-improvement-max-lessons must be at least 1")
@@ -585,6 +627,11 @@ def main(
         report_unresolved_dependency_cut(schedule_result)
 
     if args.self_improvement_wiki:
+        publish_portable_screen(
+            "Dev Loop > Post-run Tasks > Self-improvement Wiki\n\n"
+            "Updating durable self-improvement lessons.\n"
+            "Repeated repository operations are coalesced in the activity feed."
+        )
         if args.dry_run:
             print("Dev Loop self-improvement wiki update skipped for dry run.")
         else:
@@ -628,6 +675,12 @@ def main(
                 )
 
     if overall_status == 0:
+        publish_portable_screen(
+            "Dev Loop > Final Result\n\n"
+            "Workflow completed.\n"
+            f"Issues processed: {len(issues)}\n"
+            f"Loop state: {state_writer.board_path}"
+        )
         print("Dev loop finished.")
         offer_merge_followup(
             source_repo=source_repo,
@@ -636,6 +689,13 @@ def main(
             interactive=not args.non_interactive and not args.dry_run,
         )
     else:
+        publish_portable_screen(
+            "Dev Loop > Final Result\n\n"
+            "Workflow finished with blocked or failed Issues.\n"
+            f"Issues processed: {len(issues)}\n"
+            f"Loop state: {state_writer.board_path}\n\n"
+            "Use F4 to inspect captured activity and diagnostics."
+        )
         print("Dev loop finished with blocked or failed issues.", file=sys.stderr)
 
     return overall_status
@@ -664,6 +724,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--blocked-retry-max-passes", type=int, default=1, help="Deprecated compatibility option; each Blocker Resolution attempt always consumes one workflow pass.")
     parser.add_argument("--no-blocked-retry", action="store_true", help="Disable Blocker Resolution.")
     parser.add_argument("--dry-run", action="store_true", help="Render prompts and state without invoking Codex or modifying issues.")
+    parser.add_argument("--plain", action="store_true", help="Use line-oriented output instead of the full-screen terminal application.")
     parser.add_argument("--codex", default="codex", help="Codex executable path or command name.")
     parser.add_argument("--sandbox", default="workspace-write", help="Codex sandbox mode. Default: workspace-write.")
     parser.add_argument("--approval-policy", default="never", choices=["never", "on-request", "untrusted", "on-failure"], help="Codex approval policy. Default: never.")
@@ -1764,6 +1825,19 @@ def git_status_porcelain(repo_root: Path) -> str:
 
 
 def ask_yes_no(prompt: str, *, default: bool) -> bool:
+    from .portable_runtime import active_portable_runtime
+
+    portable_runtime = active_portable_runtime()
+    if portable_runtime is not None:
+        selected = portable_runtime.choose(
+            (("yes", "Yes"), ("no", "No")),
+            default_key="yes" if default else "no",
+            cancel_key="no",
+            render=lambda choice: portable_runtime.show_screen(
+                f"{prompt}\n\nSelected: {choice.title()}"
+            ),
+        )
+        return selected == "yes"
     suffix = "Y/n" if default else "y/N"
     while True:
         raw = read_prompt(f"{prompt} [{suffix}]: ").strip().lower()

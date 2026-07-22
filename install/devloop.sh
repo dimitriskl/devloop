@@ -219,6 +219,38 @@ install_skills() {
   "$INSTALL_DIR/install/install-skills.sh"
 }
 
+install_portable_runtime() {
+  if [ "${DEVLOOP_TESTING:-0}" = "1" ]; then
+    return 0
+  fi
+
+  local base_python runtime next previous lock next_python
+  base_python="$(find_python)"
+  runtime="$INSTALL_DIR/.venv"
+  next="$INSTALL_DIR/.venv.next"
+  previous="$INSTALL_DIR/.venv.previous"
+  lock="$INSTALL_DIR/requirements-portable.lock"
+  next_python="$next/bin/python"
+
+  log "Preparing isolated portable terminal runtime"
+  rm -rf "$next"
+  "$base_python" -m venv "$next"
+  "$next_python" -m pip install --disable-pip-version-check --requirement "$lock"
+  "$next_python" -c 'import textual; raise SystemExit(0 if textual.__version__ == "8.2.8" else 1)'
+
+  rm -rf "$previous"
+  if [ -d "$runtime" ]; then
+    mv "$runtime" "$previous"
+  fi
+  if ! mv "$next" "$runtime"; then
+    if [ -d "$previous" ]; then
+      mv "$previous" "$runtime"
+    fi
+    die "could not activate the replacement portable runtime"
+  fi
+  rm -rf "$previous"
+}
+
 link_command() {
   local name="$1"
   local target="$2"
@@ -237,7 +269,11 @@ link_commands() {
 
 print_next_steps() {
   local python
-  python="$(find_python)"
+  if [ "${DEVLOOP_TESTING:-0}" = "1" ]; then
+    python="$(find_python)"
+  else
+    python="$INSTALL_DIR/.venv/bin/python"
+  fi
 
   cat <<EOF
 
@@ -271,7 +307,7 @@ EOF
 Optional isolated CodexCLI install from the bundle checkout:
   cd "$INSTALL_DIR" && uv tool install .
 
-Verified Python:
+Verified isolated runtime:
   $("$python" --version)
 EOF
 }
@@ -283,6 +319,7 @@ main() {
   find_python >/dev/null
   sync_bundle
   make_scripts_executable
+  install_portable_runtime
   install_skills
   link_commands
   print_next_steps

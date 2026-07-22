@@ -73,6 +73,12 @@ def clear_terminal_screen() -> None:
 
 
 def render_app_screen(content: str) -> None:
+    from .portable_runtime import active_portable_runtime
+
+    portable_runtime = active_portable_runtime()
+    if portable_runtime is not None:
+        portable_runtime.show_screen(content)
+        return
     clear_terminal_screen()
     if content:
         print(content)
@@ -91,6 +97,16 @@ def choose_menu_option(
     cancel_key: str | None = None,
 ) -> str:
     """Choose from a menu with arrows on a TTY and line input everywhere else."""
+    from .portable_runtime import active_portable_runtime
+
+    portable_runtime = active_portable_runtime()
+    if portable_runtime is not None:
+        return portable_runtime.choose(
+            options,
+            default_key=default_key,
+            cancel_key=cancel_key,
+            render=render,
+        )
     keys = _open_navigation_source()
     if keys is None:
         render(default_key)
@@ -139,6 +155,21 @@ def read_workflow_command(
     actions: Sequence[MenuAction],
 ) -> str:
     """Read one workflow action using navigation keys or the legacy command line."""
+    from .portable_runtime import active_portable_runtime
+
+    portable_runtime = active_portable_runtime()
+    if portable_runtime is not None:
+        workflow_options = (
+            ("__previous_step__", "Previous workflow step"),
+            ("__next_step__", "Next workflow step"),
+            *((action.command, f"{action.group} · {action.label}") for action in actions),
+        )
+        return portable_runtime.choose(
+            workflow_options,
+            default_key=workflow_options[0][0],
+            cancel_key="cancel",
+            render=lambda _selected: None,
+        )
     keys = _open_navigation_source()
     if keys is None:
         return fallback(prompt)

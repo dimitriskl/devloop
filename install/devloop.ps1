@@ -161,6 +161,55 @@ function Install-BundledSkills {
     }
 }
 
+function Install-PortableRuntime {
+    if ($env:DEVLOOP_TESTING -eq '1') {
+        return
+    }
+
+    $basePython = Get-DevLoopPython
+    $runtimePath = Join-Path $InstallDir '.venv'
+    $nextPath = Join-Path $InstallDir '.venv.next'
+    $previousPath = Join-Path $InstallDir '.venv.previous'
+    $lockPath = Join-Path $InstallDir 'requirements-portable.lock'
+
+    Write-InstallLog 'Preparing isolated portable terminal runtime'
+    if (Test-Path -LiteralPath $nextPath) {
+        Remove-Item -LiteralPath $nextPath -Recurse -Force
+    }
+    & $basePython -m venv $nextPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'devloop-install: error: could not create the replacement runtime'
+    }
+    $nextPython = Join-Path $nextPath 'Scripts\python.exe'
+    & $nextPython -m pip install --disable-pip-version-check --requirement $lockPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'devloop-install: error: portable runtime dependency installation failed'
+    }
+    & $nextPython -c 'import textual; raise SystemExit(0 if textual.__version__ == "8.2.8" else 1)'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'devloop-install: error: portable runtime validation failed'
+    }
+
+    if (Test-Path -LiteralPath $previousPath) {
+        Remove-Item -LiteralPath $previousPath -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $runtimePath) {
+        Move-Item -LiteralPath $runtimePath -Destination $previousPath
+    }
+    try {
+        Move-Item -LiteralPath $nextPath -Destination $runtimePath
+    }
+    catch {
+        if (Test-Path -LiteralPath $previousPath) {
+            Move-Item -LiteralPath $previousPath -Destination $runtimePath
+        }
+        throw
+    }
+    if (Test-Path -LiteralPath $previousPath) {
+        Remove-Item -LiteralPath $previousPath -Recurse -Force
+    }
+}
+
 function Test-PathInUserPath {
     param([string] $Directory)
 
@@ -215,7 +264,12 @@ function Install-CommandLaunchers {
 }
 
 function Show-NextSteps {
-    $python = Get-DevLoopPython
+    $python = if ($env:DEVLOOP_TESTING -eq '1') {
+        Get-DevLoopPython
+    }
+    else {
+        Join-Path $InstallDir '.venv\Scripts\python.exe'
+    }
     $pythonVersion = & $python --version 2>&1
 
     Write-Host ''
@@ -243,7 +297,7 @@ function Show-NextSteps {
     Write-Host 'Optional isolated CodexCLI install from the bundle checkout:'
     Write-Host "  cd `"$InstallDir`" && uv tool install ."
     Write-Host ''
-    Write-Host "Verified Python:"
+    Write-Host "Verified isolated runtime:"
     Write-Host "  $pythonVersion"
 }
 
@@ -256,6 +310,7 @@ Assert-CommandAvailable -Name 'git' -Hint 'Git is required. Install Git and reru
 [void](Get-DevLoopPython)
 $InstallDir = Resolve-InstallDir
 Sync-Bundle
+Install-PortableRuntime
 Install-BundledSkills
 Install-CommandLaunchers
 Show-NextSteps
