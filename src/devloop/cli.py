@@ -38,6 +38,13 @@ from .portable_workflow import (
     parse_issue_status,
     preflight_codex_execution_settings,
 )
+from .run_review import (
+    RunReview,
+    RunReviewAction,
+    build_run_review,
+    render_run_review,
+    run_review_options,
+)
 from .self_improvement_wiki import (
     DEFAULT_SELF_IMPROVEMENT_WIKI_PATH,
     ensure_self_improvement_wiki,
@@ -52,6 +59,7 @@ from .state import (
     mark_portable_issue_completed,
 )
 from .subprocess_utils import run_captured_text
+from .terminal_menu import choose_menu_option, render_app_screen
 from .terminal_text import compact_terminal_text, sanitize_terminal_text
 from .templates import BundleContext, load_preset
 from .worktree import resolve_worktree
@@ -77,6 +85,12 @@ class DependencyScheduleResult:
     waiting_dependencies: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DevLoopAttemptResult:
+    exit_code: int
+    review_action: RunReviewAction
+
+
 def execute_dependency_schedule(
     *,
     issues: list[Issue],
@@ -98,10 +112,19 @@ def execute_dependency_schedule(
     session_completed = {
         node.number for node in graph.nodes if node.issue.completed
     }
+    persisted_issue_states = state_writer.state.get("issues", {})
+    if not isinstance(persisted_issue_states, dict):
+        raise ValueError("Persisted issue state must be an object.")
     session_completed.update(
-        issue.number
-        for issue in issues
-        if parse_issue_status(state_writer.issue_state(issue).get("status"))
+        node.number
+        for node in graph.nodes
+        if parse_issue_status(
+            (
+                persisted_issue_states.get(node.number, {})
+                if isinstance(persisted_issue_states.get(node.number), dict)
+                else {}
+            ).get("status")
+        )
         is IssueStatus.COMPLETED
     )
     last_projection_signature: tuple[object, ...] | None = None
@@ -278,6 +301,27 @@ def publish_portable_screen(content: str) -> None:
         portable_runtime.show_screen(content)
 
 
+def choose_run_review_action(
+    review: RunReview,
+    *,
+    interactive: bool,
+) -> RunReviewAction:
+    options = run_review_options(review)
+    if not interactive:
+        render_app_screen(render_run_review(review, RunReviewAction.EXIT))
+        return RunReviewAction.EXIT
+    selected = choose_menu_option(
+        options,
+        default_key=RunReviewAction.EXIT.value,
+        cancel_key=RunReviewAction.EXIT.value,
+        render=lambda value: render_app_screen(
+            render_run_review(review, RunReviewAction(value))
+        ),
+        fallback=lambda: RunReviewAction.EXIT.value,
+    )
+    return RunReviewAction(selected)
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -331,6 +375,19 @@ def _run_devloop(
     args: argparse.Namespace,
     workflow_snapshot: WorkflowDefinition | None,
 ) -> int:
+    while True:
+        result = _run_devloop_attempt(parser, args, workflow_snapshot)
+        if isinstance(result, int):
+            return result
+        if result.review_action is RunReviewAction.EXIT:
+            return result.exit_code
+
+
+def _run_devloop_attempt(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    workflow_snapshot: WorkflowDefinition | None,
+) -> int | DevLoopAttemptResult:
 
     if args.self_improvement_max_lessons < 1:
         parser.error("--self-improvement-max-lessons must be at least 1")
@@ -688,12 +745,6 @@ def _run_devloop(
                 )
 
     if overall_status == 0:
-        publish_portable_screen(
-            "Dev Loop > Final Result\n\n"
-            "Workflow completed.\n"
-            f"Issues processed: {len(issues)}\n"
-            f"Loop state: {state_writer.board_path}"
-        )
         print("Dev loop finished.")
         offer_merge_followup(
             source_repo=source_repo,
@@ -702,16 +753,34 @@ def _run_devloop(
             interactive=not args.non_interactive and not args.dry_run,
         )
     else:
-        publish_portable_screen(
-            "Dev Loop > Final Result\n\n"
-            "Workflow finished with blocked or failed Issues.\n"
-            f"Issues processed: {len(issues)}\n"
-            f"Loop state: {state_writer.board_path}\n\n"
-            "Use F4 to inspect captured activity and diagnostics."
-        )
         print("Dev loop finished with blocked or failed issues.", file=sys.stderr)
 
-    return overall_status
+    raw_issue_states = state_writer.state.get("issues", {})
+    issue_states = raw_issue_states if isinstance(raw_issue_states, dict) else {}
+    review = build_run_review(
+        selected_source_issues,
+        issue_states,
+        loop_state_path=state_writer.board_path,
+        rerun_available=(
+            overall_status != 0
+            and not args.dry_run
+            and not args.no_blocked_retry
+            and args.blocked_retry_rounds > 0
+        ),
+    )
+    review_action = choose_run_review_action(
+        review,
+        interactive=not args.non_interactive and not args.dry_run,
+    )
+    if review_action is RunReviewAction.RERUN_REMAINING:
+        state_writer.reset_scheduler_retry_budget(
+            review.remaining_issue_numbers
+        )
+        print(
+            f"Rerunning {review.remaining_count} unfinished issues. "
+            "Completed issues will be skipped."
+        )
+    return DevLoopAttemptResult(overall_status, review_action)
 
 
 def validate_prd_target_product(prd_path: Path) -> None:

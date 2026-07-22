@@ -24,6 +24,7 @@ from ..portable_runtime import (
     portable_runtime_session,
     route_worker_output,
 )
+from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
 from ..terminal_text import sanitize_terminal_text
 from ..version import VERSION
 
@@ -390,6 +391,19 @@ class PortableApplicationShell(App[None]):
         self._drain_runtime_events()
         self.operation_result = result
         self._workflow_complete = True
+        if self._latest_screen_content.lstrip().startswith(REVIEW_SCREEN_PATH):
+            self.query_one("#portable-detail", Static).update(
+                self._latest_screen_content
+            )
+            self.query_one("#portable-header", Static).update(REVIEW_SCREEN_PATH)
+            review_status = (
+                "WORKFLOW FINISHED · SUCCESS"
+                if REVIEW_SUCCESS_HEADING in self._latest_screen_content
+                else "WORKFLOW FINISHED · ATTENTION REQUIRED"
+            )
+            self.query_one("#portable-status", Static).update(review_status)
+            self._show_exit_action()
+            return
         outcome = (
             "Completed successfully"
             if result == 0

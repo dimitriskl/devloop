@@ -779,6 +779,42 @@ class LoopStateWriter:
             parsed[issue_number] = count
         return parsed
 
+    def reset_scheduler_retry_budget(
+        self,
+        issue_numbers: Iterable[str],
+    ) -> None:
+        """Renew scheduler attempts for an explicit unfinished-issue rerun."""
+        requested = frozenset(
+            str(issue_number).strip()
+            for issue_number in issue_numbers
+            if str(issue_number).strip()
+        )
+        if not requested:
+            raise ValueError("An unfinished-issue rerun requires at least one issue.")
+
+        scheduler_state = self.state.setdefault("dependency_scheduler", {})
+        if not isinstance(scheduler_state, dict):
+            raise ValueError("Dependency Scheduler state must be an object.")
+        active = scheduler_state.get("active_attempt")
+        if isinstance(active, dict) and active.get("issue") in requested:
+            raise ValueError("Cannot renew retry budget during an active attempt.")
+
+        scheduler_state["normal_attempted"] = sorted(
+            self.normal_attempted_issues() - requested
+        )
+        scheduler_state["additional_passes"] = {
+            issue_number: count
+            for issue_number, count in self.additional_passes().items()
+            if issue_number not in requested
+        }
+        scheduler_state["phase"] = SchedulingPhase.NORMAL_SCHEDULING.value
+        scheduler_state["updated_at"] = now()
+        self.add_event(
+            "unfinished-rerun-requested",
+            {"issues": sorted(requested)},
+        )
+        self.flush()
+
     def complete_scheduling_attempt(
         self,
         issue: Issue,

@@ -87,7 +87,7 @@ region is part of the right pane and may collapse when nothing is running.
 | Running workflow | Workflow Steps and Issues | Selected Issue/Step details, attempts, result, and live Portable Activity Feed |
 | Blocker resolution | Blocked and dependency-waiting Issues | Retry budget, dependency chain, attempt history, and current work |
 | Post-run tasks | Finalization tasks including wiki update | Current task activity, outcome, and diagnostic link |
-| Final result | Issues and final tasks | Completed, blocked, or failed summary with artifacts and next actions |
+| Completion review | Rerun unfinished issues (when available), exit | Explicit finished state, completed/remaining counts, per-issue outcomes, loop-state path, and selected next action |
 
 Help, action menus, confirmations, free-form input, errors, and the log viewer
 open as overlays inside the same application. They never replace the shell or

@@ -180,6 +180,57 @@ class IssueDependencyGraphTests(unittest.TestCase):
 
 
 class DependencySchedulerTests(unittest.TestCase):
+    def test_user_requested_rerun_renews_only_unfinished_retry_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            index = root / "README.md"
+            index.write_text("", encoding="utf-8")
+            writer = LoopStateWriter(index)
+            writer.state["dependency_scheduler"] = {
+                "normal_attempted": ["0001", "0002"],
+                "additional_passes": {"0001": 5, "0002": 3},
+                "phase": "EXHAUSTED",
+            }
+            writer.reset_scheduler_retry_budget(("0001",))
+
+            reloaded = LoopStateWriter(index)
+
+        self.assertEqual(reloaded.normal_attempted_issues(), frozenset({"0002"}))
+        self.assertEqual(reloaded.additional_passes(), {"0002": 3})
+        self.assertEqual(
+            reloaded.state["events"][-1]["type"],
+            "unfinished-rerun-requested",
+        )
+
+    def test_rerun_unlocks_issue_whose_completed_dependency_was_filtered_out(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            index = root / "README.md"
+            index.write_text("", encoding="utf-8")
+            first = Issue("0001", "First", root / "0001.md", False)
+            second = Issue(
+                "0002",
+                "Second",
+                root / "0002.md",
+                False,
+                ("0001",),
+            )
+            writer = LoopStateWriter(index)
+            writer.issue_state(first)["status"] = IssueStatus.COMPLETED.value
+            calls: list[str] = []
+
+            result = execute_dependency_schedule(
+                issues=[second],
+                graph=IssueDependencyGraph([first, second]),
+                state_writer=writer,
+                execute_issue=lambda issue, _phase, _ordinal: (
+                    calls.append(issue.number) or RoleResult(status="PASS")
+                ),
+            )
+
+        self.assertTrue(result.completed)
+        self.assertEqual(calls, ["0002"])
+
     def test_blocked_root_defers_descendants_but_not_independent_work(self) -> None:
         first = Issue("0001", "First", Path("0001.md"), False)
         second = Issue("0002", "Second", Path("0002.md"), False, ("0001",))

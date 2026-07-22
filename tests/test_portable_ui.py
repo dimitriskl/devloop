@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import threading
 import unittest
+from pathlib import Path
 
 from textual.containers import Horizontal
 from textual.widgets import OptionList, Static
 
 from devloop.portable_runtime import PortableRuntimeBridge
+from devloop.issue_pack import Issue
+from devloop.cli import choose_run_review_action
+from devloop.run_review import RunReviewAction, build_run_review
 from devloop.portable_ui.app import (
     PortableApplicationShell,
     PortableLogOverlay,
@@ -238,6 +242,72 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     break
 
             self.assertEqual(app.operation_result, 7)
+
+    async def test_completion_review_remains_visible_after_operation_finishes(self) -> None:
+        bridge = PortableRuntimeBridge()
+
+        def operation() -> int:
+            bridge.show_screen(
+                "Dev Loop > Completion Review\n\n"
+                "WORKFLOW FINISHED - ATTENTION REQUIRED\n"
+                "Completed: 3/8    Remaining: 5"
+            )
+            return 2
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            detail = str(app.query_one("#portable-detail", Static).render())
+            status = str(app.query_one("#portable-status", Static).render())
+
+            self.assertIn("Dev Loop > Completion Review", detail)
+            self.assertIn("WORKFLOW FINISHED", detail)
+            self.assertNotIn("Last workflow view", detail)
+            self.assertIn("WORKFLOW FINISHED", status)
+
+    async def test_completion_review_can_rerun_unfinished_issues(self) -> None:
+        bridge = PortableRuntimeBridge()
+        selected_actions: list[RunReviewAction] = []
+        review = build_run_review(
+            [Issue("0001", "Blocked", Path("0001.md"), False)],
+            {"0001": {"status": "BLOCKED"}},
+            loop_state_path=Path("README.loop.md"),
+            rerun_available=True,
+        )
+
+        def operation() -> int:
+            selected_actions.append(
+                choose_run_review_action(review, interactive=True)
+            )
+            return 2
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            menu = app.query_one("#portable-navigation", OptionList)
+            for _ in range(20):
+                await pilot.pause()
+                if menu.option_count == 2:
+                    break
+
+            self.assertEqual(menu.highlighted, 1)
+            await pilot.press("up", "enter")
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            self.assertEqual(
+                selected_actions,
+                [RunReviewAction.RERUN_REMAINING],
+            )
+            self.assertIn(
+                "Rerun only the 1 unfinished issue now",
+                str(app.query_one("#portable-detail", Static).render()),
+            )
 
     async def test_worker_output_is_sanitized_before_display(self) -> None:
         bridge = PortableRuntimeBridge()
