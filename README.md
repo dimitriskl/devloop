@@ -80,23 +80,27 @@ yourself.
 
 ### Development checkout without global installation
 
-When working directly in a cloned development checkout, prepare only its local
-runtime. This does not create shortcuts, change PATH, install global skills, or
+When working directly in a cloned development checkout, start a wrapper from
+`bin`. On the first run it automatically prepares the checkout-local `.venv`.
+This does not create shortcuts, change PATH, install global skills, or
 update/reset Git.
 
 Windows:
 
 ```powershell
-& '.\install\setup-development.ps1'
-& '.\bin\devloop-plan.ps1'
+Set-Location '.\bin'
+.\devloop-plan.ps1
 ```
 
 Linux/macOS:
 
 ```bash
-./install/setup-development.sh
-./bin/devloop-plan.sh
+cd ./bin
+./devloop-plan.sh
 ```
+
+The `install/setup-development` script remains available when you explicitly
+want to rebuild the local runtime.
 
 ### Uninstall
 

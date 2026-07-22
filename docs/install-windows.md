@@ -38,11 +38,11 @@ The installer does not create command shortcuts and does not modify PATH.
 From a checkout where you edit Dev Loop itself, use the local-only setup:
 
 ```powershell
-& '.\install\setup-development.ps1'
-& '.\bin\devloop-plan.ps1'
+Set-Location '.\bin'
+.\devloop-plan.ps1
 ```
 
-It creates only `.venv` inside the checkout.
+The first launch automatically creates only `.venv` inside the checkout.
 
 ## Uninstall
 

@@ -36,9 +36,11 @@ The installer does not create command links and does not modify PATH.
 ## Development checkout
 
 ```bash
-./install/setup-development.sh
-./bin/devloop-plan.sh
+cd ./bin
+./devloop-plan.sh
 ```
+
+The first launch automatically prepares the checkout-local `.venv`.
 
 ## Uninstall
 

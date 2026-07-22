@@ -102,10 +102,9 @@ cd "$HOME/devloop/bin"
 
 If you prefer to copy the bundle yourself, continue with the steps below.
 
-For a development checkout that must not create shortcuts, edit PATH, install
-global skills, or update Git, run `install/setup-development.ps1` on Windows or
-`install/setup-development.sh` on Linux/macOS, then invoke the wrapper directly
-from `bin/`.
+For a development checkout, invoke a wrapper directly from `bin/`. Its first
+launch automatically prepares the local `.venv` without creating shortcuts,
+editing PATH, installing global skills, or updating Git.
 
 To undo a normal installation, run the platform `install/uninstall-devloop`
 script. It removes installer-managed runtime, command, PATH, and unchanged

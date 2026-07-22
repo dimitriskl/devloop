@@ -151,6 +151,39 @@ class BundleInstallerScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("not a git checkout", result.stderr)
 
+    def test_unix_wrapper_bootstraps_a_missing_local_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bundle = Path(raw) / "bundle"
+            wrapper = bundle / "bin" / "devloop-plan.sh"
+            wrapper.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "bin" / "devloop-plan.sh", wrapper)
+            setup = bundle / "install" / "setup-development.sh"
+            setup.parent.mkdir(parents=True)
+            setup.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+bundle="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$bundle/.venv/bin"
+printf '#!/usr/bin/env bash\\nprintf "fake-python-started\\n"\\n' > "$bundle/.venv/bin/python"
+chmod +x "$bundle/.venv/bin/python"
+touch "$bundle/install/bootstrap-ran"
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["bash", str(wrapper), "--help"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=bundle,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertTrue((bundle / "install" / "bootstrap-ran").is_file())
+            self.assertIn("preparing the checkout-local runtime", result.stdout)
+            self.assertIn("fake-python-started", result.stdout)
+
     def test_unix_uninstaller_removes_managed_artifacts_but_keeps_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -242,6 +275,39 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Prepare this development checkout", result.stdout)
+
+    def test_windows_wrapper_bootstraps_a_missing_local_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bundle = Path(raw) / "bundle"
+            wrapper = bundle / "bin" / "devloop-plan.ps1"
+            wrapper.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "bin" / "devloop-plan.ps1", wrapper)
+            setup = bundle / "install" / "setup-development.ps1"
+            setup.parent.mkdir(parents=True)
+            setup.write_text(
+                "\n".join(
+                    (
+                        "$runtime = Join-Path (Split-Path -Parent $PSScriptRoot) '.venv\\Scripts'",
+                        "New-Item -ItemType Directory -Force -Path $runtime | Out-Null",
+                        "Copy-Item -LiteralPath $env:ComSpec -Destination (Join-Path $runtime 'python.exe')",
+                        "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'bootstrap-ran') -Value 'yes'",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [*self.powershell_command, "-File", str(wrapper), "-Help"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=bundle,
+            )
+
+            self.assertTrue((bundle / "install" / "bootstrap-ran").is_file())
+            self.assertTrue((bundle / ".venv" / "Scripts" / "python.exe").is_file())
+            self.assertIn("preparing the checkout-local runtime", result.stdout)
+            self.assertNotIn("runtime and bootstrap script are missing", result.stderr)
 
     def test_windows_uninstaller_removes_managed_artifacts_but_keeps_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -410,6 +476,7 @@ class PortableRuntimePackagingTests(unittest.TestCase):
         ):
             self.assertIn("[Console]::IsInputRedirected", launcher)
             self.assertIn("[Console]::IsOutputRedirected", launcher)
+            self.assertIn("& $developmentSetup", launcher)
 
         for launcher in (
             launchers["shell-runner"],
@@ -417,6 +484,7 @@ class PortableRuntimePackagingTests(unittest.TestCase):
         ):
             self.assertIn("-t 0", launcher)
             self.assertIn("-t 1", launcher)
+            self.assertIn('bash "$DEVELOPMENT_SETUP"', launcher)
 
     def test_installers_stage_and_validate_a_replacement_runtime(self) -> None:
         installers = (
