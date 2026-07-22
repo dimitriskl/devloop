@@ -451,6 +451,37 @@ def render_step_progress_rows(
     )
 
 
+def _inline_progress_summary(
+    steps: tuple[WorkflowStepProgress, ...],
+    *,
+    width: int,
+    color: bool,
+    unicode: bool,
+) -> str | None:
+    separator = " │ " if unicode else " | "
+    segments: list[tuple[str, DashboardStatus]] = []
+    for step in steps:
+        label = step.display_name.upper()
+        if label.endswith(" REVIEW"):
+            label = label.removesuffix(" REVIEW")
+        segments.append(
+            (
+                f"{label} {step.status.value} pass {step.pass_number} "
+                f"{format_duration(step.elapsed_seconds)}",
+                step.status,
+            )
+        )
+    plain_line = separator.join(segment for segment, _status in segments)
+    if display_width(plain_line) > width:
+        return None
+    if not color:
+        return plain_line
+    return separator.join(
+        _color_status_word(segment, status)
+        for segment, status in segments
+    )
+
+
 def render_workflow_progress(
     projection: WorkflowProgress,
     *,
@@ -459,6 +490,7 @@ def render_workflow_progress(
     unicode: bool,
     frame: str,
     max_step_rows: int | None = None,
+    compact_steps: bool = False,
 ) -> str:
     projection = _terminal_safe_workflow_progress(projection)
     frame = _safe_progress_text(frame, max_length=4)
@@ -488,6 +520,29 @@ def render_workflow_progress(
         if not step_list:
             return
         lines.append(_fit_plain_text(title, safe_width, unicode=unicode))
+        if compact_steps:
+            summary = _inline_progress_summary(
+                step_list,
+                width=safe_width,
+                color=color,
+                unicode=unicode,
+            )
+            if summary is not None:
+                lines.append(summary)
+                if hidden_count:
+                    hidden_label = (
+                        f"… {hidden_count} steps hidden …"
+                        if unicode
+                        else f"... {hidden_count} steps hidden ..."
+                    )
+                    lines.append(
+                        _fit_plain_text(
+                            hidden_label,
+                            safe_width,
+                            unicode=unicode,
+                        )
+                    )
+                return
         for step in step_list:
             lines.append(
                 _fit_plain_text(
@@ -737,6 +792,7 @@ def render_issue_dashboard(
     color: bool,
     unicode: bool,
     frame: str,
+    compact_steps: bool = False,
 ) -> str:
     snapshot = replace(
         snapshot,
@@ -767,6 +823,7 @@ def render_issue_dashboard(
             unicode=unicode,
             frame=frame,
             max_step_rows=snapshot.max_step_rows,
+            compact_steps=compact_steps,
         )
     rule_character = "─" if unicode else "-"
     separator = " · " if unicode else " - "
@@ -1397,7 +1454,14 @@ class IssueDashboard:
         frames = UNICODE_WAITING_FRAMES if self._unicode else WAITING_FRAMES
         frame = frames[self._frame_index % len(frames)]
         terminal_size = self._terminal_size(fallback=(80, 24))
-        width = max(1, terminal_size.columns - 1)
+        if self._portable_runtime is not None:
+            content_size = self._portable_runtime.content_size(
+                fallback=(terminal_size.columns, terminal_size.lines),
+            )
+            terminal_size = os.terminal_size(content_size)
+            width = max(1, terminal_size.columns)
+        else:
+            width = max(1, terminal_size.columns - 1)
         rendered = render_issue_dashboard(
             IssueDashboardSnapshot(
                 issue_number=self._issue_number,
@@ -1430,6 +1494,7 @@ class IssueDashboard:
             color=_use_color(self._stream),
             unicode=self._unicode,
             frame=frame,
+            compact_steps=self._portable_runtime is not None,
         )
         lines = rendered.splitlines()
         if self._portable_runtime is not None:

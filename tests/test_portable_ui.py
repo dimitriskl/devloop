@@ -188,6 +188,19 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(len(app.query("#portable-shell")), 1)
 
+    async def test_shell_reports_the_detail_pane_size_to_the_runtime(self) -> None:
+        bridge = PortableRuntimeBridge()
+        app = PortableApplicationShell(bridge, lambda: 0)
+
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            detail_size = app.query_one("#portable-detail", Static).content_size
+
+            self.assertEqual(
+                bridge.content_size(fallback=(1, 1)),
+                (detail_size.width, detail_size.height),
+            )
+
     async def test_input_view_supports_history_and_alt_v(self) -> None:
         bridge = PortableRuntimeBridge()
 

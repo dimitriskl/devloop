@@ -46,6 +46,7 @@ class PortableRuntimeBridge:
         self._responses: dict[int, Queue[tuple[_PortableInteractionKind, str]]] = {}
         self._request_ids = count(1)
         self._response_lock = RLock()
+        self._content_size: tuple[int, int] | None = None
 
     def choose(
         self,
@@ -129,6 +130,14 @@ class PortableRuntimeBridge:
                 is_error=is_error,
             )
         )
+
+    def set_content_size(self, columns: int, rows: int) -> None:
+        with self._response_lock:
+            self._content_size = (max(1, columns), max(1, rows))
+
+    def content_size(self, *, fallback: tuple[int, int]) -> tuple[int, int]:
+        with self._response_lock:
+            return self._content_size or fallback
 
     def respond(self, request_id: int, value: str) -> None:
         self._send_interaction(request_id, _PortableInteractionKind.RESPOND, value)

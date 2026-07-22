@@ -111,22 +111,22 @@ class PortableLogOverlay(ModalScreen[None]):
 class PortableApplicationShell(App[None]):
     CSS = """
     Screen {
-        background: #000080;
-        color: #ffffff;
+        background: #012456;
+        color: #f4f7fb;
     }
 
     #portable-shell {
         width: 100%;
         height: 100%;
-        border: solid #00ffff;
-        background: #000080;
+        border: solid #3a96dd;
+        background: #012456;
     }
 
     #portable-header {
         height: 1;
         padding: 0 1;
-        background: #00aaaa;
-        color: #000000;
+        background: #0b5d7a;
+        color: #ffffff;
         text-style: bold;
     }
 
@@ -138,7 +138,7 @@ class PortableApplicationShell(App[None]):
         width: 35%;
         min-width: 28;
         max-width: 42;
-        border-right: solid #00ffff;
+        border-right: solid #3a96dd;
     }
 
     #portable-right-pane {
@@ -148,20 +148,20 @@ class PortableApplicationShell(App[None]):
     .portable-pane-title {
         height: 1;
         padding: 0 1;
-        background: #0000aa;
-        color: #00ffff;
+        background: #073763;
+        color: #9cdcfe;
         text-style: bold;
     }
 
     #portable-navigation {
         height: 1fr;
-        background: #000080;
-        color: #ffffff;
+        background: #012456;
+        color: #f4f7fb;
     }
 
     #portable-navigation > .option-list--option-highlighted {
-        background: #00ffff;
-        color: #000000;
+        background: #2b579a;
+        color: #ffffff;
         text-style: bold;
     }
 
@@ -169,35 +169,35 @@ class PortableApplicationShell(App[None]):
         height: 2fr;
         padding: 0 1;
         overflow-y: auto;
-        border-bottom: solid #00ffff;
+        border-bottom: solid #3a96dd;
     }
 
     #portable-activity {
         height: 1fr;
         padding: 0 1;
-        background: #000060;
+        background: #001b3d;
     }
 
     #portable-input {
         display: none;
         height: 3;
         margin: 0 1;
-        border: solid #00ffff;
+        border: solid #3a96dd;
     }
 
     #portable-status {
         height: 1;
         padding: 0 1;
-        background: #00aaaa;
-        color: #000000;
+        background: #0b5d7a;
+        color: #ffffff;
         text-style: bold;
     }
 
     #portable-actions {
         height: 1;
         padding: 0 1;
-        background: #000000;
-        color: #ffffff;
+        background: #081b2c;
+        color: #f4f7fb;
     }
 
     #portable-size-warning {
@@ -232,15 +232,15 @@ class PortableApplicationShell(App[None]):
     .portable-overlay {
         width: 82%;
         height: 76%;
-        border: solid #00ffff;
-        background: #000080;
+        border: solid #3a96dd;
+        background: #012456;
     }
 
     .portable-overlay-title {
         height: 1;
         padding: 0 1;
-        background: #00aaaa;
-        color: #000000;
+        background: #0b5d7a;
+        color: #ffffff;
         text-style: bold;
     }
 
@@ -253,7 +253,7 @@ class PortableApplicationShell(App[None]):
     #portable-log-filter {
         height: 3;
         margin: 0 1;
-        border: solid #00ffff;
+        border: solid #3a96dd;
     }
 
     #portable-log-content {
@@ -264,7 +264,7 @@ class PortableApplicationShell(App[None]):
     .portable-overlay-actions {
         height: 1;
         padding: 0 1;
-        background: #000000;
+        background: #081b2c;
     }
     """
 
@@ -338,6 +338,8 @@ class PortableApplicationShell(App[None]):
     def on_mount(self) -> None:
         if os.environ.get("NO_COLOR"):
             self.screen.add_class("portable-monochrome")
+        self._sync_runtime_content_size()
+        self.call_after_refresh(self._sync_runtime_content_size)
         self.set_interval(0.02, self._drain_runtime_events)
         self.run_worker(
             self._execute_operation,
@@ -362,6 +364,11 @@ class PortableApplicationShell(App[None]):
                 f"Required: {MINIMUM_TERMINAL_COLUMNS}x{MINIMUM_TERMINAL_ROWS}\n\n"
                 "Resize the terminal to continue."
             )
+        self.call_after_refresh(self._sync_runtime_content_size)
+
+    def _sync_runtime_content_size(self) -> None:
+        size = self.query_one("#portable-detail", Static).content_size
+        self._bridge.set_content_size(size.width, size.height)
 
     def _execute_operation(self) -> None:
         try:
