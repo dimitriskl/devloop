@@ -3,12 +3,14 @@ from __future__ import annotations
 import threading
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from devloop import cli, interactive_runner
 from devloop.portable_runtime import (
     PortableRuntimeBridge,
     PortableRuntimeEventKind,
+    portable_plain_mode_active,
     portable_runtime_session,
 )
 from devloop.terminal_menu import MenuAction, read_workflow_command
@@ -16,6 +18,23 @@ from devloop.workflow_editor import EditorResult, run_workflow_editor
 
 
 class PortableEntrypointTests(unittest.TestCase):
+    def test_nested_development_handoff_reuses_the_application_session(self) -> None:
+        bridge = PortableRuntimeBridge()
+        plain_mode_seen: list[bool] = []
+
+        def run_development(*_args: object) -> int:
+            plain_mode_seen.append(portable_plain_mode_active())
+            return 0
+
+        with portable_runtime_session(bridge), mock.patch.dict(
+            "os.environ",
+            {"DEVLOOP_UI_MODE": "application"},
+        ), mock.patch.object(cli, "_run_devloop", side_effect=run_development):
+            result = cli.main(["--prd", "prd.md", "--issues", "issues.md"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(plain_mode_seen, [False])
+
     def test_both_entrypoints_accept_plain_mode(self) -> None:
         planning = interactive_runner.build_parser().parse_args(["--plain"])
         delivery = cli.build_parser().parse_args(

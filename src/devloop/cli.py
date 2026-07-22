@@ -286,31 +286,44 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    from .portable_presentation import PortableUiMode, select_portable_ui_mode
-    from .portable_runtime import active_portable_runtime
+    from .portable_presentation import (
+        PortableUiMode,
+        requested_portable_ui_mode,
+        select_portable_ui_mode,
+    )
+    from .portable_runtime import (
+        active_portable_runtime,
+        portable_plain_mode_session,
+    )
 
     ui_mode = select_portable_ui_mode(
-        force_plain=args.plain,
+        requested_mode=requested_portable_ui_mode(
+            explicit_mode=PortableUiMode.PLAIN if args.plain else None,
+            environment=os.environ,
+        ),
         stdin_is_tty=sys.stdin.isatty(),
         stdout_is_tty=sys.stdout.isatty(),
         term=os.environ.get("TERM"),
     )
     operation = lambda: _run_devloop(parser, args, workflow_snapshot)
-    if ui_mode is PortableUiMode.APPLICATION and active_portable_runtime() is None:
-        try:
-            from .portable_ui.app import run_portable_application
-        except ModuleNotFoundError as error:
-            if error.name != "textual":
-                raise
-            print(
-                "Dev Loop terminal UI is unavailable. Rerun the Dev Loop "
-                "installer to repair its runtime, or use --plain.",
-                file=sys.stderr,
-            )
-            return 78
+    if ui_mode is PortableUiMode.APPLICATION:
+        if active_portable_runtime() is None:
+            try:
+                from .portable_ui.app import run_portable_application
+            except ModuleNotFoundError as error:
+                if error.name != "textual":
+                    raise
+                print(
+                    "Dev Loop terminal UI is unavailable. Rerun the Dev Loop "
+                    "installer to repair its runtime, or use --plain.",
+                    file=sys.stderr,
+                )
+                return 78
 
-        return run_portable_application(operation)
-    return operation()
+            return run_portable_application(operation)
+        return operation()
+    with portable_plain_mode_session():
+        return operation()
 
 
 def _run_devloop(

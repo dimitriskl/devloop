@@ -12,6 +12,7 @@ from unittest import mock
 
 from devloop.cli_ui import render_screen_frame
 from devloop.terminal_editor import IteratorKeySource
+from devloop.portable_runtime import portable_plain_mode_session
 from devloop.terminal_menu import (
     KeyEvent,
     MenuAction,
@@ -25,6 +26,22 @@ from devloop.terminal_menu import (
 
 
 class TerminalMenuTests(unittest.TestCase):
+    def test_plain_mode_never_opens_the_legacy_full_screen_menu(self) -> None:
+        rendered: list[str] = []
+        with portable_plain_mode_session(), mock.patch(
+            "devloop.terminal_menu._open_navigation_source",
+            side_effect=AssertionError("plain mode must not open a raw key source"),
+        ):
+            choice = choose_menu_option(
+                (("1", "Start"), ("2", "Resume")),
+                default_key="1",
+                render=rendered.append,
+                fallback=lambda: "fallback",
+            )
+
+        self.assertEqual(choice, "fallback")
+        self.assertEqual(rendered, ["1"])
+
     def test_render_app_screen_clears_before_printing(self) -> None:
         buffer = io.StringIO()
         content = render_screen_frame(
@@ -37,6 +54,8 @@ class TerminalMenuTests(unittest.TestCase):
         )
         with mock.patch.object(sys.stdout, "isatty", return_value=True), mock.patch(
             "builtins.print", side_effect=buffer.write
+        ), mock.patch(
+            "devloop.terminal_menu.prepare_terminal_output", return_value=True
         ), mock.patch.object(sys.stdout, "write", buffer.write), mock.patch.object(
             sys.stdout, "flush"
         ):

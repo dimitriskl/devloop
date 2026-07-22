@@ -5,12 +5,14 @@ import unittest
 from threading import Event, Thread, get_ident
 
 from devloop.portable_presentation import (
+    PORTABLE_UI_MODE_ENVIRONMENT_VARIABLE,
     PortableActivity,
     PortableActivityFeed,
     PortableActivityStatus,
     PortableListItem,
     PortableUiMode,
     PortableViewModel,
+    requested_portable_ui_mode,
     select_portable_ui_mode,
 )
 from devloop.portable_runtime import (
@@ -26,13 +28,36 @@ from devloop.terminal_menu import choose_menu_option, render_app_screen
 class PortableUiModeTests(unittest.TestCase):
     def test_interactive_terminal_uses_application_shell(self) -> None:
         mode = select_portable_ui_mode(
-            force_plain=False,
+            requested_mode=None,
             stdin_is_tty=True,
             stdout_is_tty=True,
             term="xterm-256color",
         )
 
         self.assertIs(mode, PortableUiMode.APPLICATION)
+
+    def test_launcher_can_preserve_application_mode_when_python_tty_probe_disagrees(self) -> None:
+        requested = requested_portable_ui_mode(
+            explicit_mode=None,
+            environment={PORTABLE_UI_MODE_ENVIRONMENT_VARIABLE: "application"},
+        )
+
+        mode = select_portable_ui_mode(
+            requested_mode=requested,
+            stdin_is_tty=False,
+            stdout_is_tty=True,
+            term="dumb",
+        )
+
+        self.assertIs(mode, PortableUiMode.APPLICATION)
+
+    def test_explicit_plain_mode_wins_over_launcher_application_mode(self) -> None:
+        requested = requested_portable_ui_mode(
+            explicit_mode=PortableUiMode.PLAIN,
+            environment={PORTABLE_UI_MODE_ENVIRONMENT_VARIABLE: "application"},
+        )
+
+        self.assertIs(requested, PortableUiMode.PLAIN)
 
 
 class PortableViewModelTests(unittest.TestCase):

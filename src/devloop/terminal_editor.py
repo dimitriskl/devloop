@@ -285,7 +285,10 @@ class TerminalEditor:
         handler raises KeyboardInterrupt on the main thread), not as a
         raw \\x03 byte.
         """
-        from .portable_runtime import active_portable_runtime
+        from .portable_runtime import (
+            active_portable_runtime,
+            portable_plain_mode_active,
+        )
 
         portable_runtime = active_portable_runtime()
         if portable_runtime is not None:
@@ -294,7 +297,7 @@ class TerminalEditor:
                 self.history.append(line)
             return line
 
-        keys = open_key_source()
+        keys = None if portable_plain_mode_active() else open_key_source()
         if keys is None:
             if self._fallback_hint and not self._fallback_hint_shown:
                 self._fallback_hint_shown = True

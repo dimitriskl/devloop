@@ -10,6 +10,11 @@ if [ ! -x "$PYTHON_BIN" ]; then
   exit 1
 fi
 export PYTHONPATH="$BUNDLE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+if [[ -t 0 && -t 1 ]]; then
+  export DEVLOOP_UI_MODE=application
+else
+  export DEVLOOP_UI_MODE=plain
+fi
 
 exec "$PYTHON_BIN" -m devloop "$@"
 

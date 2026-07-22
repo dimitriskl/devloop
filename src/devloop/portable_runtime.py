@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from itertools import count
@@ -207,10 +208,27 @@ def route_worker_output(bridge: PortableRuntimeBridge) -> Iterator[None]:
 
 
 _active_bridge: PortableRuntimeBridge | None = None
+_plain_mode_active: ContextVar[bool] = ContextVar(
+    "devloop_portable_plain_mode_active",
+    default=False,
+)
 
 
 def active_portable_runtime() -> PortableRuntimeBridge | None:
     return _active_bridge
+
+
+def portable_plain_mode_active() -> bool:
+    return _plain_mode_active.get()
+
+
+@contextmanager
+def portable_plain_mode_session() -> Iterator[None]:
+    token = _plain_mode_active.set(True)
+    try:
+        yield
+    finally:
+        _plain_mode_active.reset(token)
 
 
 @contextmanager

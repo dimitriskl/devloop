@@ -67,17 +67,25 @@ _WORKFLOW_KEY_COMMANDS = {
 
 
 def clear_terminal_screen() -> None:
+    from .portable_runtime import portable_plain_mode_active
+
+    if portable_plain_mode_active():
+        return
     if sys.stdout.isatty() and prepare_terminal_output():
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
 
 
 def render_app_screen(content: str) -> None:
-    from .portable_runtime import active_portable_runtime
+    from .portable_runtime import active_portable_runtime, portable_plain_mode_active
 
     portable_runtime = active_portable_runtime()
     if portable_runtime is not None:
         portable_runtime.show_screen(content)
+        return
+    if portable_plain_mode_active():
+        if content:
+            print(content)
         return
     clear_terminal_screen()
     if content:
@@ -97,7 +105,7 @@ def choose_menu_option(
     cancel_key: str | None = None,
 ) -> str:
     """Choose from a menu with arrows on a TTY and line input everywhere else."""
-    from .portable_runtime import active_portable_runtime
+    from .portable_runtime import active_portable_runtime, portable_plain_mode_active
 
     portable_runtime = active_portable_runtime()
     if portable_runtime is not None:
@@ -107,6 +115,9 @@ def choose_menu_option(
             cancel_key=cancel_key,
             render=render,
         )
+    if portable_plain_mode_active():
+        render(default_key)
+        return fallback()
     keys = _open_navigation_source()
     if keys is None:
         render(default_key)
@@ -155,7 +166,7 @@ def read_workflow_command(
     actions: Sequence[MenuAction],
 ) -> str:
     """Read one workflow action using navigation keys or the legacy command line."""
-    from .portable_runtime import active_portable_runtime
+    from .portable_runtime import active_portable_runtime, portable_plain_mode_active
 
     portable_runtime = active_portable_runtime()
     if portable_runtime is not None:
@@ -170,6 +181,8 @@ def read_workflow_command(
             cancel_key="cancel",
             render=lambda _selected: None,
         )
+    if portable_plain_mode_active():
+        return fallback(prompt)
     keys = _open_navigation_source()
     if keys is None:
         return fallback(prompt)
@@ -278,6 +291,10 @@ def _escape_key_event(source: TerminalKeySource) -> KeyEvent:
 
 
 def _open_navigation_source() -> TerminalKeySource | None:
+    from .portable_runtime import portable_plain_mode_active
+
+    if portable_plain_mode_active():
+        return None
     stdout_isatty = getattr(sys.stdout, "isatty", None)
     if not (stdout_isatty and stdout_isatty()):
         return None

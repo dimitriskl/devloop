@@ -170,16 +170,42 @@ class PortableRuntimePackagingTests(unittest.TestCase):
         )
 
     def test_launchers_use_only_the_bundle_runtime_and_do_not_print_a_logo(self) -> None:
-        launchers = (
-            (ROOT / "bin" / "devloop.ps1").read_text(encoding="utf-8"),
-            (ROOT / "bin" / "devloop-plan.ps1").read_text(encoding="utf-8"),
-            (ROOT / "bin" / "devloop.sh").read_text(encoding="utf-8"),
-            (ROOT / "bin" / "devloop-plan.sh").read_text(encoding="utf-8"),
-        )
+        launchers = {
+            "powershell-runner": (ROOT / "bin" / "devloop.ps1").read_text(
+                encoding="utf-8"
+            ),
+            "powershell-planner": (ROOT / "bin" / "devloop-plan.ps1").read_text(
+                encoding="utf-8"
+            ),
+            "shell-runner": (ROOT / "bin" / "devloop.sh").read_text(
+                encoding="utf-8"
+            ),
+            "shell-planner": (ROOT / "bin" / "devloop-plan.sh").read_text(
+                encoding="utf-8"
+            ),
+        }
 
-        for launcher in launchers:
+        for launcher in launchers.values():
             self.assertIn(".venv", launcher)
             self.assertNotIn("devloop.logo", launcher)
+
+        for name, launcher in launchers.items():
+            with self.subTest(name=name):
+                self.assertIn("DEVLOOP_UI_MODE", launcher)
+
+        for launcher in (
+            launchers["powershell-runner"],
+            launchers["powershell-planner"],
+        ):
+            self.assertIn("[Console]::IsInputRedirected", launcher)
+            self.assertIn("[Console]::IsOutputRedirected", launcher)
+
+        for launcher in (
+            launchers["shell-runner"],
+            launchers["shell-planner"],
+        ):
+            self.assertIn("-t 0", launcher)
+            self.assertIn("-t 1", launcher)
 
     def test_installers_stage_and_validate_a_replacement_runtime(self) -> None:
         installers = (

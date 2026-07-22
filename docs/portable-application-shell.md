@@ -229,9 +229,11 @@ safe append-only formatting may remain available to Portable Plain Mode.
 
 ## UI Mode Selection
 
-The full-screen shell is the default when standard input and standard output
-are interactive TTYs, the terminal is not explicitly dumb, and --plain was not
-provided.
+The launchers select one UI mode for the complete process lifetime. On Windows
+they use `[Console]::IsInputRedirected` and `[Console]::IsOutputRedirected`; on
+Linux and macOS they use the shell TTY checks. An interactive console selects
+the full-screen shell. Direct Python entry-point calls fall back to Python's TTY
+and terminal-capability checks.
 
 Portable Plain Mode is selected when:
 
@@ -246,8 +248,9 @@ does not itself disable the full-screen shell. --help prints ordinary CLI help
 without launching the application.
 
 Plain output is append-only, sanitized, stable enough for logs, and free of
-animation or control sequences. It reports the same statuses and final exit
-code as the full-screen shell.
+animation, raw-key menus, or control sequences. It reports the same statuses
+and final exit code as the full-screen shell. `--plain` always overrides the
+launcher-selected application mode.
 
 ## Installation And Startup
 

@@ -21,6 +21,15 @@ $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
 else {
     "$pythonPath$([IO.Path]::PathSeparator)$env:PYTHONPATH"
 }
+$env:DEVLOOP_UI_MODE = if (
+    -not [Console]::IsInputRedirected -and
+    -not [Console]::IsOutputRedirected
+) {
+    'application'
+}
+else {
+    'plain'
+}
 
 if ($Help) {
     & $python -m devloop --help
@@ -29,4 +38,3 @@ if ($Help) {
 
 & $python -m devloop @RemainingArgs
 exit $LASTEXITCODE
-

@@ -1109,12 +1109,19 @@ class IssueDashboard:
         self._frame_seconds = frame_seconds
         self._terminal_size = terminal_size
         isatty = getattr(self._stream, "isatty", None)
-        from .portable_runtime import active_portable_runtime
+        from .portable_runtime import (
+            active_portable_runtime,
+            portable_plain_mode_active,
+        )
 
         self._portable_runtime = active_portable_runtime()
         self._enabled = bool(
             self._portable_runtime is not None
-            or (callable(isatty) and isatty())
+            or (
+                not portable_plain_mode_active()
+                and callable(isatty)
+                and isatty()
+            )
         )
         self._unicode = _can_encode("─⠋›", self._stream)
         self._statuses = {
@@ -1471,12 +1478,19 @@ class WaitingIndicator:
         self._context = _safe_progress_text(context)
         self._workflow_progress = workflow_progress
         isatty = getattr(self._stream, "isatty", None)
-        from .portable_runtime import active_portable_runtime
+        from .portable_runtime import (
+            active_portable_runtime,
+            portable_plain_mode_active,
+        )
 
         self._portable_runtime = active_portable_runtime()
         self._enabled = bool(
             self._portable_runtime is not None
-            or (callable(isatty) and isatty())
+            or (
+                not portable_plain_mode_active()
+                and callable(isatty)
+                and isatty()
+            )
         )
         self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1689,6 +1703,10 @@ def _stream(stream=None):
 
 
 def _use_color(stream=None) -> bool:
+    from .portable_runtime import portable_plain_mode_active
+
+    if portable_plain_mode_active():
+        return False
     if os.environ.get("NO_COLOR"):
         return False
     stream = _stream(stream)
