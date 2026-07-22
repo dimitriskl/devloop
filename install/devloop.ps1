@@ -105,7 +105,127 @@ function Resolve-InstallDir {
     return $reply
 }
 
+function ConvertTo-AbsoluteInstallPath {
+    param([string] $Path)
+
+    try {
+        if ([System.IO.Path]::IsPathRooted($Path)) {
+            return [System.IO.Path]::GetFullPath($Path)
+        }
+        $providerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        return [System.IO.Path]::GetFullPath($providerPath)
+    }
+    catch {
+        throw "devloop-install: error: Install directory '$Path' is not a valid filesystem path: $($_.Exception.Message)"
+    }
+}
+
+function Assert-InstallRootAvailable {
+    param([string] $Path)
+
+    $root = [System.IO.Path]::GetPathRoot($Path)
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        throw "devloop-install: error: Install directory '$Path' does not have a filesystem root."
+    }
+
+    $rootAvailable = $false
+    try {
+        $rootAvailable = Test-Path -LiteralPath $root -PathType Container
+    }
+    catch {
+        $rootAvailable = $false
+    }
+    if (-not $rootAvailable) {
+        throw "devloop-install: error: Install drive '$root' is not available for '$Path'. Choose a mounted, writable drive."
+    }
+}
+
+function Assert-InstallParentWritable {
+    param([string] $Path)
+
+    $root = [System.IO.Path]::GetPathRoot($Path)
+    $parent = Split-Path -Parent $Path
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        $parent = $root
+    }
+
+    $writeProbe = $null
+    try {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        $writeProbe = Join-Path $parent ".devloop-write-test-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $writeProbe | Out-Null
+        New-Item -ItemType File -Path (Join-Path $writeProbe 'write-test') | Out-Null
+    }
+    catch {
+        $failureMessage = $_.Exception.Message
+        if ($null -ne $writeProbe -and (Test-Path -LiteralPath $writeProbe -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $writeProbe -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw "devloop-install: error: Install directory parent '$parent' cannot be created or written for '$Path': $failureMessage"
+    }
+
+    try {
+        if (Test-Path -LiteralPath $writeProbe) {
+            Remove-Item -LiteralPath $writeProbe -Recurse -Force
+        }
+    }
+    catch {
+        throw "devloop-install: error: Install directory parent '$parent' is not safely writable for '$Path': $($_.Exception.Message)"
+    }
+}
+
+function Invoke-GitCloneAttempt {
+    param([string[]] $Arguments)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    $previousNativeErrorPreference = if ($null -ne $nativeErrorPreference) {
+        $nativeErrorPreference.Value
+    }
+    else {
+        $null
+    }
+    try {
+        $ErrorActionPreference = 'Continue'
+        if ($null -ne $nativeErrorPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $outputLines = @(& git @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($null -ne $nativeErrorPreference) {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+        }
+    }
+    foreach ($line in $outputLines) {
+        Write-Host "$line"
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output = $outputLines -join [Environment]::NewLine
+    }
+}
+
+function Test-GitCloneRefFailure {
+    param([string] $Output)
+
+    return $Output -match '(Could not find remote branch .+ to clone|Remote branch .+ not found in upstream origin)'
+}
+
+function Remove-FailedCloneDirectory {
+    param([string] $Path)
+
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+}
+
 function Sync-Bundle {
+    Assert-InstallRootAvailable -Path $InstallDir
+
     if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
         Write-InstallLog "Updating existing install at $InstallDir"
         & git -C $InstallDir fetch --depth 1 origin $Ref
@@ -128,23 +248,29 @@ function Sync-Bundle {
     }
 
     Write-InstallLog "Installing Dev Loop to $InstallDir"
-    $parent = Split-Path -Parent $InstallDir
-    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-        New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    }
+    Assert-InstallParentWritable -Path $InstallDir
 
-    & git clone --depth 1 --branch $Ref $RepoUrl $InstallDir
-    if ($LASTEXITCODE -ne 0) {
-        if (Test-Path -LiteralPath $InstallDir) {
-            Remove-Item -LiteralPath $InstallDir -Recurse -Force
+    $cloneResult = Invoke-GitCloneAttempt -Arguments @(
+        'clone', '--depth', '1', '--branch', $Ref, $RepoUrl, $InstallDir
+    )
+    if ($cloneResult.ExitCode -ne 0) {
+        Remove-FailedCloneDirectory -Path $InstallDir
+
+        if (-not (Test-GitCloneRefFailure -Output $cloneResult.Output)) {
+            throw "devloop-install: error: git clone failed for ref '$Ref' into '$InstallDir'. See the Git diagnostic above."
         }
-        & git clone --depth 1 $RepoUrl $InstallDir
-        if ($LASTEXITCODE -ne 0) {
-            throw "devloop-install: error: git clone failed for $RepoUrl"
+
+        $fallbackResult = Invoke-GitCloneAttempt -Arguments @(
+            'clone', '--depth', '1', $RepoUrl, $InstallDir
+        )
+        if ($fallbackResult.ExitCode -ne 0) {
+            Remove-FailedCloneDirectory -Path $InstallDir
+            throw "devloop-install: error: git clone fallback failed for ref '$Ref' into '$InstallDir'. See the Git diagnostic above."
         }
         & git -C $InstallDir checkout -f $Ref
         if ($LASTEXITCODE -ne 0) {
-            throw "devloop-install: error: git checkout failed for ref $Ref"
+            Remove-FailedCloneDirectory -Path $InstallDir
+            throw "devloop-install: error: git checkout failed for ref '$Ref' in '$InstallDir'"
         }
     }
 }
@@ -308,7 +434,7 @@ if ($Help) {
 
 Assert-CommandAvailable -Name 'git' -Hint 'Git is required. Install Git and rerun this installer.'
 [void](Get-DevLoopPython)
-$InstallDir = Resolve-InstallDir
+$InstallDir = ConvertTo-AbsoluteInstallPath -Path (Resolve-InstallDir)
 Sync-Bundle
 Install-PortableRuntime
 Install-BundledSkills
