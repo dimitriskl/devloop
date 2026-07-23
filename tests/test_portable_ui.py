@@ -7,7 +7,7 @@ from pathlib import Path
 from textual.containers import Horizontal
 from textual.widgets import OptionList, Static
 
-from devloop.portable_runtime import PortableRuntimeBridge
+from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
 from devloop.issue_pack import Issue
 from devloop.cli import choose_run_review_action
 from devloop.run_review import RunReviewAction, build_run_review
@@ -19,6 +19,62 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_running_workflow_keeps_implementation_context_visible(self) -> None:
+        bridge = PortableRuntimeBridge()
+        release_operation = threading.Event()
+
+        def operation() -> int:
+            bridge.update_run_context(
+                PortableRunContext(
+                    project_root=r"E:\LocalCode\eConnectorV2",
+                    implementation_branch="devloop/fulfillment-tools-repair",
+                    implementation_worktree=(
+                        r"E:\Worktrees\eConnectorV2-fulfillment-tools-repair-dev"
+                    ),
+                    prd_path=(
+                        r"E:\LocalCode\eConnectorV2\prd\fulfillment-tools-repair"
+                        r"\fulfillment-tools-repair.md"
+                    ),
+                )
+            )
+            bridge.show_screen("CURRENT ISSUE · 0001\nDEVELOPMENT WORKING pass 1")
+            release_operation.wait(timeout=2)
+            return 0
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(120, 34)) as pilot:
+            try:
+                context = app.query_one("#portable-run-context", Static)
+                for _ in range(20):
+                    await pilot.pause()
+                    if context.display:
+                        break
+
+                rendered = str(context.render())
+                self.assertIn(r"E:\LocalCode\eConnectorV2", rendered)
+                self.assertIn("devloop/fulfillment-tools-repair", rendered)
+                self.assertIn(
+                    r"E:\Worktrees\eConnectorV2-fulfillment-tools-repair-dev",
+                    rendered,
+                )
+                self.assertIn(
+                    "CURRENT ISSUE",
+                    str(app.query_one("#portable-detail", Static).render()),
+                )
+
+                await pilot.press("f5")
+                self.assertIsInstance(app.screen, PortableTextOverlay)
+                full_context = str(
+                    app.screen.query_one(
+                        ".portable-overlay-content",
+                        Static,
+                    ).render()
+                )
+                self.assertIn("Implementation branch", full_context)
+                self.assertIn("fulfillment-tools-repair.md", full_context)
+            finally:
+                release_operation.set()
+
     async def test_shell_keeps_one_frame_and_refreshes_selection_preview(self) -> None:
         bridge = PortableRuntimeBridge()
 
@@ -114,6 +170,10 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     "Dev Loop > Working",
                     str(app.query_one("#portable-detail", Static).render()),
                 )
+                self.assertIn(
+                    "F5 Context",
+                    str(app.query_one("#portable-actions", Static).render()),
+                )
 
                 await pilot.press("escape")
                 self.assertIsInstance(app.screen, PortableTextOverlay)
@@ -191,6 +251,33 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                         app.query_one("#portable-size-warning", Static).display
                     )
                     self.assertEqual(len(app.query("#portable-shell")), 1)
+
+    async def test_run_context_keeps_navigation_visible_at_minimum_size(self) -> None:
+        bridge = PortableRuntimeBridge()
+
+        def operation() -> int:
+            bridge.update_run_context(
+                PortableRunContext(
+                    project_root=r"E:\Code\Project",
+                    implementation_branch="devloop/feature",
+                    implementation_worktree=r"E:\Worktrees\Project-feature",
+                )
+            )
+            return 0
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(80, 24)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            context = app.query_one("#portable-run-context", Static)
+            navigation = app.query_one("#portable-navigation", OptionList)
+
+            self.assertGreater(context.region.height, 0)
+            self.assertGreater(navigation.region.height, 0)
+            self.assertIn("Changes:", str(context.render()))
 
     async def test_shell_reports_the_detail_pane_size_to_the_runtime(self) -> None:
         bridge = PortableRuntimeBridge()

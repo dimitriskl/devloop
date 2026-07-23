@@ -18,6 +18,7 @@ from ..portable_presentation import (
     PortableActivityStatus,
 )
 from ..portable_runtime import (
+    PortableRunContext,
     PortableRuntimeBridge,
     PortableRuntimeEvent,
     PortableRuntimeEventKind,
@@ -37,6 +38,7 @@ DEFAULT_ACTION_BAR = (
 )
 CAPTURED_ACTIVITY_TITLE = "Captured Activity"
 COMPLETION_REVIEW_LOG_TITLE = "Completion Review and Captured Activity"
+RUN_CONTEXT_TITLE = "Run context"
 
 
 class PortableTextOverlay(ModalScreen[None]):
@@ -174,6 +176,20 @@ class PortableApplicationShell(App[None]):
         text-style: bold;
     }
 
+    #portable-run-context-title {
+        display: none;
+    }
+
+    #portable-run-context {
+        display: none;
+        height: auto;
+        max-height: 12;
+        padding: 0 1 1 1;
+        overflow-y: auto;
+        border-bottom: solid #3a96dd;
+        background: #001b3d;
+    }
+
     #portable-detail {
         height: 2fr;
         padding: 0 1;
@@ -303,6 +319,7 @@ class PortableApplicationShell(App[None]):
         self._workflow_complete = False
         self._captured_output: list[str] = []
         self._completion_review_content: str | None = None
+        self._run_context: PortableRunContext | None = None
         self._activity_feed = PortableActivityFeed()
         self._latest_screen_content = render_logo().rstrip()
         self._input_history: tuple[str, ...] = ()
@@ -321,6 +338,16 @@ class PortableApplicationShell(App[None]):
             )
             with Horizontal(id="portable-body"):
                 with Vertical(id="portable-left-pane"):
+                    yield Static(
+                        RUN_CONTEXT_TITLE,
+                        id="portable-run-context-title",
+                        classes="portable-pane-title",
+                    )
+                    yield Static(
+                        "",
+                        id="portable-run-context",
+                        markup=False,
+                    )
                     yield Static("Navigation", classes="portable-pane-title")
                     yield OptionList(id="portable-navigation")
                 with Vertical(id="portable-right-pane"):
@@ -451,7 +478,9 @@ class PortableApplicationShell(App[None]):
         menu.add_option(Option("Exit Dev Loop", id="__exit__"))
         menu.highlighted = 0
         menu.focus()
-        self.query_one("#portable-actions", Static).update("Enter Exit | F4 Logs")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Exit | F4 Logs | F5 Context"
+        )
 
     def _drain_runtime_events(self) -> None:
         while True:
@@ -467,6 +496,9 @@ class PortableApplicationShell(App[None]):
             self._show_input(event)
         elif event.kind is PortableRuntimeEventKind.INTERACTION_COMPLETED:
             self._finish_interaction_transition(event.request_id)
+        elif event.kind is PortableRuntimeEventKind.RUN_CONTEXT_UPDATED:
+            if event.run_context is not None:
+                self._update_run_context(event.run_context)
         elif event.kind is PortableRuntimeEventKind.SCREEN_UPDATED:
             safe_content = sanitize_terminal_text(
                 event.content,
@@ -492,6 +524,50 @@ class PortableApplicationShell(App[None]):
                 self._captured_output.append(rendered)
                 del self._captured_output[:-500]
                 self._publish_activity(rendered)
+
+    def _update_run_context(self, context: PortableRunContext) -> None:
+        self._run_context = PortableRunContext(
+            project_root=sanitize_terminal_text(
+                context.project_root,
+                preserve_newlines=False,
+            ),
+            implementation_branch=sanitize_terminal_text(
+                context.implementation_branch,
+                preserve_newlines=False,
+            ),
+            implementation_worktree=sanitize_terminal_text(
+                context.implementation_worktree,
+                preserve_newlines=False,
+            ),
+            prd_path=sanitize_terminal_text(
+                context.prd_path,
+                preserve_newlines=False,
+            ),
+        )
+        context_title = self.query_one("#portable-run-context-title", Static)
+        context_view = self.query_one("#portable-run-context", Static)
+        context_title.display = True
+        context_view.display = True
+        context_view.update(self._render_compact_run_context())
+
+    def _render_compact_run_context(self) -> str:
+        assert self._run_context is not None
+        return (
+            f"Project: {self._run_context.project_root}\n"
+            f"Branch: {self._run_context.implementation_branch}\n"
+            f"Changes: {self._run_context.implementation_worktree}"
+        )
+
+    def _render_full_run_context(self) -> str:
+        assert self._run_context is not None
+        lines = [
+            f"Project checkout:       {self._run_context.project_root}",
+            f"Implementation branch:  {self._run_context.implementation_branch}",
+            f"Changes are written to: {self._run_context.implementation_worktree}",
+        ]
+        if self._run_context.prd_path:
+            lines.append(f"PRD:                    {self._run_context.prd_path}")
+        return "\n".join(lines)
 
     def _publish_activity(self, message: str) -> None:
         normalized = message.casefold()
@@ -675,7 +751,7 @@ class PortableApplicationShell(App[None]):
         )
         self.query_one("#portable-status", Static).update("WORKING")
         self.query_one("#portable-actions", Static).update(
-            "F1 Help | F4 Logs | Ctrl+C Stop | Esc Status"
+            "F1 Help | F4 Logs | F5 Context | Ctrl+C Stop | Esc Status"
         )
         self._publish_activity(f"RUNNING · {safe_message}")
 
@@ -698,6 +774,7 @@ class PortableApplicationShell(App[None]):
                 "Esc      Back, cancel, or close overlay\n"
                 "F2       Primary action\n"
                 "F4       Captured activity and output\n"
+                "F5       Project, branch, worktree, and PRD context\n"
                 "F9       Focus contextual actions\n"
                 "Ctrl+C   Request a safe stop",
             )
@@ -714,7 +791,15 @@ class PortableApplicationShell(App[None]):
         self._respond_to_shortcut("f3")
 
     def action_context(self) -> None:
-        self._respond_to_shortcut("f5")
+        if self._respond_to_shortcut("f5"):
+            return
+        if self._run_context is not None:
+            self.push_screen(
+                PortableTextOverlay(
+                    RUN_CONTEXT_TITLE,
+                    self._render_full_run_context(),
+                )
+            )
 
     def action_logs(self) -> None:
         captured_lines = list(self._captured_output)

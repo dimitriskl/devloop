@@ -178,7 +178,10 @@ unless the user explicitly names CodexCLI. See
 Interactive TTY sessions use one full-screen Midnight Commander-inspired shell
 through planning, development, review, QA, post-run tasks, and completion. Each
 view replaces the current panes instead of appending to terminal history. Use
-`--plain` for deterministic line-oriented output or redirected automation.
+`--plain` for deterministic line-oriented output or redirected automation. The
+left pane keeps the selected project, implementation branch, and exact
+checkout/worktree receiving changes visible throughout the run; F5 opens the
+full paths and PRD.
 
 ## Separate Optional Application: CodexCLI v0.1.0
 

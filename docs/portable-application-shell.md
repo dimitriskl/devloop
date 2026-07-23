@@ -39,21 +39,24 @@ The same workflow remains usable in automation through Portable Plain Mode.
 
 ## Standard Screen
 
-    ┌ Dev Loop ─ context path ─ project ─ branch/worktree ───────────────┐
-    │ Navigation / selection       │ Selected details / active work      │
-    │                               │                                     │
-    │ > highlighted item           │ Immediate selection preview         │
-    │   next item                  │                                     │
+    ┌ Dev Loop ─ context path ───────────────────────────────────────────┐
+    │ Run context                  │ Selected details / active work      │
+    │ Project / branch / changes   │                                     │
+    │ Navigation / selection       │ Immediate selection preview         │
+    │ > highlighted item           │                                     │
     │   next item                  ├ Activity ───────────────────────────┤
-    │                               │ Latest meaningful running activity  │
+    │   next item                  │ Latest meaningful running activity  │
     ├───────────────────────────────┴─────────────────────────────────────┤
     │ Status: workflow · issue · step · attempt · elapsed · health       │
     ├─────────────────────────────────────────────────────────────────────┤
     │ F1 Help  F2 Primary  F3 View  F4 Logs  F5 Context  F9 Actions     │
     └─────────────────────────────────────────────────────────────────────┘
 
-The frame is stable; labels and pane content change with context. The activity
-region is part of the right pane and may collapse when nothing is running.
+The frame is stable; labels and pane content change with context. Once a target
+is known, the left pane persistently shows the project checkout, implementation
+branch, and exact checkout/worktree receiving changes. F5 opens the full paths
+and PRD. The activity region is part of the right pane and may collapse when
+nothing is running.
 
 ### Layout Rules
 
@@ -84,7 +87,7 @@ region is part of the right pane and may collapse when nothing is running.
 | Workflow Editor | Workflow Steps | Selected settings, ports, routes, capabilities, guidance, and validation |
 | Catalog/capabilities | Searchable capability list | Highlighted capability details and selection state |
 | Development handoff | Launch options | PRD, issue selection, workspace, branch, workflow snapshot, and wiki policy |
-| Running workflow | Workflow Steps and Issues | Selected Issue/Step details, attempts, result, and live Portable Activity Feed |
+| Running workflow | Persistent project/branch/worktree context plus Workflow Steps and Issues | Selected Issue/Step details, attempts, result, and live Portable Activity Feed |
 | Blocker resolution | Blocked and dependency-waiting Issues | Retry budget, dependency chain, attempt history, and current work |
 | Post-run tasks | Finalization tasks including wiki update | Current task activity, outcome, and diagnostic link |
 | Completion review | Rerun unfinished issues (when available), exit | Explicit finished state, completed/remaining counts, per-issue outcomes, loop-state path, and selected next action |
@@ -111,7 +114,7 @@ running-workflow view appropriate to its arguments and saved state.
 | F2 | Contextual primary action such as Apply or Start |
 | F3 | Toggle the contextual alternate view |
 | F4 | Open the filtered log viewer |
-| F5 | Contextual secondary action such as Add or Retry |
+| F5 | Open full project, branch, worktree, and PRD context; a view-specific command such as Add may override it |
 | F9 | Open the complete contextual Actions menu |
 | Ctrl+C | Open the context-aware stop dialog while work is running |
 
@@ -385,6 +388,9 @@ non-secret result logs inside the workspace for inspection.
 13. Every finite TTY choice is arrow-key driven with explicit Back/Cancel.
 14. The shell remains responsive and consistent during all workflow and
     post-run stages.
+15. Once selected, the project checkout, implementation branch, and exact
+    change location remain visible during planning, execution, retries, and
+    completion.
 
 ## Non-Goals
 

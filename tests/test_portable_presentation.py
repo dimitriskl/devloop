@@ -16,6 +16,7 @@ from devloop.portable_presentation import (
     select_portable_ui_mode,
 )
 from devloop.portable_runtime import (
+    PortableRunContext,
     PortableRoutedStream,
     PortableRuntimeBridge,
     PortableRuntimeEventKind,
@@ -120,6 +121,21 @@ class PortableActivityFeedTests(unittest.TestCase):
 
 
 class PortableRuntimeBridgeTests(unittest.TestCase):
+    def test_run_context_is_published_as_explicit_runtime_state(self) -> None:
+        bridge = PortableRuntimeBridge()
+        context = PortableRunContext(
+            project_root=r"E:\LocalCode\eConnectorV2",
+            implementation_branch="devloop/feature",
+            implementation_worktree=r"E:\Worktrees\eConnectorV2-feature-dev",
+            prd_path=r"E:\LocalCode\eConnectorV2\prd\feature\feature.md",
+        )
+
+        bridge.update_run_context(context)
+
+        event = bridge.next_event(timeout=1)
+        self.assertIs(event.kind, PortableRuntimeEventKind.RUN_CONTEXT_UPDATED)
+        self.assertEqual(event.run_context, context)
+
     def test_choice_request_round_trips_through_the_presentation_seam(self) -> None:
         bridge = PortableRuntimeBridge()
         selected: list[str] = []

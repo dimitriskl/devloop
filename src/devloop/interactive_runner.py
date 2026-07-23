@@ -181,9 +181,16 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         except (RuntimeError, ValueError) as exc:
             parser.error(str(exc))
 
+        branch = current_branch(repo_root) or "unknown"
+        publish_planning_run_context(
+            project_root=repo_root,
+            implementation_branch=branch,
+            implementation_worktree=repo_root,
+            prd_path=artifacts.prd_path,
+        )
         print()
         print(f"Target checkout: {repo_root}")
-        print(f"Current branch: {current_branch(repo_root) or 'unknown'}")
+        print(f"Current branch: {branch}")
         print(f"PRD: {artifacts.prd_path}")
         print(f"Issue index: {artifacts.issues_index}")
         print_prd_status(artifacts)
@@ -198,6 +205,11 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         )
 
     repo_root = choose_target_repo(args.repo)
+    publish_planning_run_context(
+        project_root=repo_root,
+        implementation_branch=current_branch(repo_root) or "unknown",
+        implementation_worktree=repo_root,
+    )
     if not args.goal:
         startup_result = choose_startup_artifacts(
             repo_root,
@@ -225,7 +237,13 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
                 codex=args.codex,
                 plain=args.plain,
             )
+    project_root = repo_root
     repo_root = apply_branch_strategy(repo_root)
+    publish_planning_run_context(
+        project_root=project_root,
+        implementation_branch=current_branch(repo_root) or "unknown",
+        implementation_worktree=repo_root,
+    )
 
     goal = args.goal.strip() if args.goal else ""
     collect_initial_message = not goal
@@ -1195,6 +1213,18 @@ def run_handoff(
     )
 
     while True:
+        publish_planning_run_context(
+            project_root=repo_root,
+            implementation_branch=(
+                params.branch_name
+                if params.use_worktree
+                else current_branch(repo_root) or "unknown"
+            ),
+            implementation_worktree=(
+                params.worktree_path if params.use_worktree else repo_root
+            ),
+            prd_path=artifacts.prd_path,
+        )
         lines = [
             statusui.render_banner(Stage.DEVELOPMENT),
             f"PRD:            {artifacts.prd_path}",
@@ -1299,6 +1329,25 @@ def run_handoff(
     print()
     print("Starting Dev Loop development.")
     return devloop_main(args, workflow_snapshot=workflow_snapshot)
+
+
+def publish_planning_run_context(
+    *,
+    project_root: Path,
+    implementation_branch: str,
+    implementation_worktree: Path,
+    prd_path: Path | None = None,
+) -> None:
+    from .portable_runtime import PortableRunContext, publish_active_run_context
+
+    publish_active_run_context(
+        PortableRunContext(
+            project_root=str(project_root),
+            implementation_branch=implementation_branch,
+            implementation_worktree=str(implementation_worktree),
+            prd_path=str(prd_path) if prd_path is not None else "",
+        )
+    )
 
 
 def adjust_handoff_params(params: HandoffParams) -> None:

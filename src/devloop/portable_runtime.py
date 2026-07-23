@@ -17,6 +17,7 @@ class PortableRuntimeEventKind(str, Enum):
     CHOICE_REQUESTED = "CHOICE_REQUESTED"
     INPUT_REQUESTED = "INPUT_REQUESTED"
     INTERACTION_COMPLETED = "INTERACTION_COMPLETED"
+    RUN_CONTEXT_UPDATED = "RUN_CONTEXT_UPDATED"
     SCREEN_UPDATED = "SCREEN_UPDATED"
     OUTPUT_WRITTEN = "OUTPUT_WRITTEN"
 
@@ -24,6 +25,14 @@ class PortableRuntimeEventKind(str, Enum):
 class _PortableInteractionKind(str, Enum):
     PREVIEW = "PREVIEW"
     RESPOND = "RESPOND"
+
+
+@dataclass(frozen=True)
+class PortableRunContext:
+    project_root: str
+    implementation_branch: str
+    implementation_worktree: str
+    prd_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -38,6 +47,7 @@ class PortableRuntimeEvent:
     shortcuts: tuple[tuple[str, str], ...] = ()
     content: str = ""
     is_error: bool = False
+    run_context: PortableRunContext | None = None
 
 
 class PortableRuntimeBridge:
@@ -116,6 +126,15 @@ class PortableRuntimeBridge:
                 kind=PortableRuntimeEventKind.SCREEN_UPDATED,
                 request_id=0,
                 content=content,
+            )
+        )
+
+    def update_run_context(self, context: PortableRunContext) -> None:
+        self._event_queue.put(
+            PortableRuntimeEvent(
+                kind=PortableRuntimeEventKind.RUN_CONTEXT_UPDATED,
+                request_id=0,
+                run_context=context,
             )
         )
 
@@ -236,6 +255,12 @@ _plain_mode_active: ContextVar[bool] = ContextVar(
 
 def active_portable_runtime() -> PortableRuntimeBridge | None:
     return _active_bridge
+
+
+def publish_active_run_context(context: PortableRunContext) -> None:
+    bridge = active_portable_runtime()
+    if bridge is not None:
+        bridge.update_run_context(context)
 
 
 def portable_plain_mode_active() -> bool:

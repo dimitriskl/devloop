@@ -20,6 +20,11 @@ from devloop.model_catalog import (
     CodexModelCatalog,
 )
 from devloop.portable_component_catalog import build_portable_component_catalog
+from devloop.portable_runtime import (
+    PortableRuntimeBridge,
+    PortableRuntimeEventKind,
+    portable_runtime_session,
+)
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
     DEVELOPMENT_COMPONENT_ID,
@@ -889,6 +894,54 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertIs(
             devloop_main.call_args.kwargs["workflow_snapshot"],
             workflow_snapshot,
+        )
+
+    def test_handoff_publishes_project_branch_and_worktree_context(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_artifacts(root)
+            issue = artifacts.issues_index.parent / "0001-run.md"
+            issue.write_text("# Run\n\nCompleted: [ ]\n", encoding="utf-8")
+            artifacts.issues_index.write_text(
+                "[Issue 0001](./0001-run.md)\n",
+                encoding="utf-8",
+            )
+            worktree = root / "feature-dev"
+            bridge = PortableRuntimeBridge()
+
+            with portable_runtime_session(bridge), mock.patch.object(
+                interactive_runner,
+                "default_worktree_path",
+                return_value=worktree,
+            ), mock.patch.object(
+                interactive_runner,
+                "choose_menu_option",
+                return_value="/quit",
+            ):
+                result = interactive_runner.run_handoff(
+                    root,
+                    root,
+                    artifacts,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    root / "devloop-plan.json",
+                )
+
+            event = bridge.next_event(timeout=1)
+
+        self.assertEqual(result, 0)
+        self.assertIs(
+            event.kind,
+            PortableRuntimeEventKind.RUN_CONTEXT_UPDATED,
+        )
+        assert event.run_context is not None
+        self.assertEqual(event.run_context.project_root, str(root))
+        self.assertEqual(
+            event.run_context.implementation_branch,
+            "devloop/feature",
+        )
+        self.assertEqual(
+            event.run_context.implementation_worktree,
+            str(worktree),
         )
 
     def test_handoff_options_opens_workflow_editor_with_current_run_snapshot(self) -> None:

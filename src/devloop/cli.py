@@ -468,6 +468,17 @@ def _run_devloop_attempt(
     repo_root = worktree.repo_root
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
     issues_index_in_repo = map_path_to_worktree(issues_index, source_repo, repo_root)
+    publish_devloop_run_context(
+        project_root=source_repo,
+        implementation_branch=(
+            git_current_branch(repo_root)
+            or args.branch_name
+            or source_branch
+            or "unknown"
+        ),
+        implementation_worktree=repo_root,
+        prd_path=prd_in_repo,
+    )
     if repo_root != source_repo and not args.dry_run:
         ensure_planning_artifacts_in_worktree(
             prd_path=prd_path,
@@ -1904,6 +1915,25 @@ def git_status_porcelain(repo_root: Path) -> str:
     if result.returncode != 0:
         return result.stderr.strip() or result.stdout.strip()
     return result.stdout.strip()
+
+
+def publish_devloop_run_context(
+    *,
+    project_root: Path,
+    implementation_branch: str,
+    implementation_worktree: Path,
+    prd_path: Path,
+) -> None:
+    from .portable_runtime import PortableRunContext, publish_active_run_context
+
+    publish_active_run_context(
+        PortableRunContext(
+            project_root=str(project_root),
+            implementation_branch=implementation_branch,
+            implementation_worktree=str(implementation_worktree),
+            prd_path=str(prd_path),
+        )
+    )
 
 
 def ask_yes_no(prompt: str, *, default: bool) -> bool:
