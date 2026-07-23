@@ -39,6 +39,7 @@ from .subprocess_utils import (
     run_captured_text,
     terminate_process,
     unregister_process_tree,
+    update_checkpoint_for_backend_event,
 )
 from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext, Preset, render_template
@@ -266,6 +267,7 @@ def run_streaming_codex_command(
         daemon=True,
     )
     turn_outcome: CodexTurnOutcome | None = None
+    active_backend_items: set[str] = set()
 
     if indicator is not None:
         indicator.start()
@@ -274,12 +276,18 @@ def run_streaming_codex_command(
     if budget is not None:
         budget.start()
     budget_expiration: str | None = None
+    budget_finished = False
     try:
         for line in process.stdout:
             if budget is not None:
                 budget.notify_activity()
             stdout_parts.append(line)
             event = parse_codex_event(line)
+            update_checkpoint_for_backend_event(
+                budget,
+                event,
+                active_backend_items,
+            )
             activity = render_safe_codex_activity(event)
             if activity_callback is not None:
                 activity_callback(activity)
@@ -296,13 +304,16 @@ def run_streaming_codex_command(
         if turn_outcome is None:
             returncode = process.wait()
         else:
+            if budget is not None:
+                budget_expiration = budget.finish()
+                budget_finished = True
             reap_process_after_terminal_event(process)
             returncode = _terminal_returncode(turn_outcome, process.returncode)
     except KeyboardInterrupt:
         terminate_process(process)
         raise
     finally:
-        if budget is not None:
+        if budget is not None and not budget_finished:
             budget_expiration = budget.finish()
         if indicator is not None:
             indicator.stop()

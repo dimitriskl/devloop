@@ -115,6 +115,88 @@ class CodexCommandSettingsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 124)
         self.assertIn("Execution Budget", result.stderr)
 
+    def test_streaming_checkpoint_allows_a_silent_active_repository_command(
+        self,
+    ) -> None:
+        script = (
+            "import json, time; "
+            "print(json.dumps({'type':'item.started','item':"
+            "{'id':'command-1','type':'command_execution','status':'in_progress'}}), "
+            "flush=True); "
+            "time.sleep(0.5); "
+            "print(json.dumps({'type':'item.completed','item':"
+            "{'id':'command-1','type':'command_execution','status':'completed'}}), "
+            "flush=True); "
+            "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = codex_runner.run_streaming_codex_command(
+                [sys.executable, "-c", script],
+                input_text="",
+                cwd=Path(raw),
+                stage=Stage.DEVELOPMENT,
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=2,
+                    checkpoint_seconds=0.1,
+                ),
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("checkpoint deadline", result.stderr)
+
+    def test_streaming_hard_timeout_still_limits_an_active_repository_command(
+        self,
+    ) -> None:
+        script = (
+            "import json, time; "
+            "print(json.dumps({'type':'item.started','item':"
+            "{'id':'command-1','type':'command_execution','status':'in_progress'}}), "
+            "flush=True); "
+            "time.sleep(5)"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            result = codex_runner.run_streaming_codex_command(
+                [sys.executable, "-c", script],
+                input_text="",
+                cwd=Path(raw),
+                stage=Stage.DEVELOPMENT,
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=0.3,
+                    checkpoint_seconds=0.1,
+                ),
+            )
+
+        self.assertEqual(result.returncode, 124)
+        self.assertIn(
+            "Execution Budget timeout (0.3 seconds) expired.",
+            result.stderr,
+        )
+        self.assertNotIn("checkpoint deadline", result.stderr)
+
+    def test_terminal_event_stops_checkpoint_before_process_reaping(self) -> None:
+        script = (
+            "import json; "
+            "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)"
+        )
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            codex_runner,
+            "reap_process_after_terminal_event",
+            side_effect=lambda _process: time.sleep(0.4),
+        ):
+            result = codex_runner.run_streaming_codex_command(
+                [sys.executable, "-c", script],
+                input_text="",
+                cwd=Path(raw),
+                stage=Stage.DEVELOPMENT,
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=2,
+                    checkpoint_seconds=0.2,
+                ),
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("checkpoint deadline", result.stderr)
+
     @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
     def test_streaming_budget_kills_child_retaining_inherited_pipes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

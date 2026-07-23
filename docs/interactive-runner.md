@@ -188,6 +188,9 @@ Every step also shows an independent Execution Budget. Use `budget` to set its
 overall timeout and checkpoint inactivity deadline without changing its model,
 reasoning effort, or Fast choice. These limits are snapshotted with the
 workflow and enforced for Analysis and each development role attempt.
+The checkpoint deadline remains paused while Codex reports an active repository
+command, MCP call, or web search; those operations remain bounded by the overall
+timeout. After the operation completes, a fresh inactivity window begins.
 If a role reaches either limit, Completion Review names the exact timeout
 instead of showing only exit code 124. Repository changes already written
 remain in the implementation worktree; rerun the unfinished issue to continue

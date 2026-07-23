@@ -88,6 +88,28 @@ class AnalysisExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(returncode, 124)
         self.assertIn("Execution Budget", output)
 
+    def test_streaming_analysis_keeps_an_active_backend_command_alive(self) -> None:
+        script = (
+            "import json, time; "
+            "print(json.dumps({'type':'item.started','item':"
+            "{'id':'command-1','type':'command_execution','status':'in_progress'}}), "
+            "flush=True); "
+            "time.sleep(0.5); "
+            "print(json.dumps({'type':'item.completed','item':"
+            "{'id':'command-1','type':'command_execution','status':'completed'}}), "
+            "flush=True); "
+            "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)"
+        )
+        with tempfile.TemporaryDirectory() as raw, redirect_stdout(StringIO()):
+            returncode, output = chat_loop.run_streaming(
+                [sys.executable, "-c", script, "--json"],
+                Path(raw),
+                execution_budget=ExecutionBudget(2, 0.1),
+            )
+
+        self.assertEqual(returncode, 0, output)
+        self.assertNotIn("checkpoint deadline", output)
+
 
 class ResumeCommandTests(unittest.TestCase):
     def test_resume_at_first_prompt_does_not_start_codex(self) -> None:

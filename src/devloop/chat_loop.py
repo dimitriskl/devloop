@@ -28,6 +28,7 @@ from .subprocess_utils import (
     reap_process_after_terminal_event,
     terminate_process,
     unregister_process_tree,
+    update_checkpoint_for_backend_event,
 )
 from .terminal_text import sanitize_terminal_text
 
@@ -246,6 +247,7 @@ def run_streaming(
     )
     waiting_indicator.start()
     turn_outcome: CodexTurnOutcome | None = None
+    active_backend_items: set[str] = set()
     budget = (
         ProcessExecutionBudget(
             process,
@@ -258,6 +260,7 @@ def run_streaming(
     if budget is not None:
         budget.start()
     budget_expiration: str | None = None
+    budget_finished = False
     try:
         for line in process.stdout:
             if budget is not None:
@@ -280,12 +283,21 @@ def run_streaming(
                 sys.stdout.flush()
                 waiting_indicator.start()
             if json_mode:
-                turn_outcome = _parse_codex_turn_outcome(line)
+                event = parse_codex_event(line)
+                update_checkpoint_for_backend_event(
+                    budget,
+                    event,
+                    active_backend_items,
+                )
+                turn_outcome = codex_turn_outcome(event)
                 if turn_outcome is not None:
                     break
         if turn_outcome is None:
             process.wait()
         else:
+            if budget is not None:
+                budget_expiration = budget.finish()
+                budget_finished = True
             reap_process_after_terminal_event(process)
     except KeyboardInterrupt:
         # Do not let the child linger: terminate it, drain any buffered output,
@@ -299,7 +311,7 @@ def run_streaming(
             pass
         return 130, "".join(captured)
     finally:
-        if budget is not None:
+        if budget is not None and not budget_finished:
             budget_expiration = budget.finish()
         waiting_indicator.stop()
         close = getattr(process.stdout, "close", None)
