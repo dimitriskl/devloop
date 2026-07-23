@@ -72,10 +72,10 @@ being ignored.
 Confirm the installed Codex CLI is authenticated, then use `retry-catalog` in
 the Workflow Editor. A stale cache is display-only and cannot authorize a run.
 If preflight names a Step Display Name and model, reasoning effort, or Fast
-setting, edit that exact Future Runs step in `/options` and retry. Dev Loop does
-not substitute another model, lower effort, or disable Fast silently. An
-already-started Current Run is immutable; it can retry live discovery but
-cannot adopt Future Runs edits.
+setting, edit that exact Workflow Default step in `/options` and retry. Dev Loop
+does not substitute another model, lower effort, or disable Fast silently.
+Matching execution preferences are adopted before the next resumed attempt.
+They cannot change a Codex turn that is already running; stop and rerun first.
 
 ## Dashboard rows wrap, lack color, or repeat in redirected output
 
@@ -135,7 +135,13 @@ issue attempt.
 ## Codex returns invalid JSON
 
 The runner marks the role `BLOCKED`. Inspect `.loop.logs/*last-message*`,
-`.loop.logs/*stdout*`, and `.loop.logs/*stderr*`.
+`.loop.logs/*stdout*`, and `.loop.logs/*stderr*`. On Windows, Dev Loop recovers
+the final structured agent message from the JSONL stdout log when Codex exits
+before writing `--output-last-message`, then persists the recovered
+`.last-message.json` for validation and resume. If stdout ends with a valid
+structured `agent_message` but an older Dev Loop build still reports this
+error, update Dev Loop, restart the application, and rerun the unfinished
+issues.
 
 ## Codex output crashes with cp1253 UnicodeDecodeError
 

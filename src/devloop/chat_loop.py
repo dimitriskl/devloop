@@ -54,7 +54,7 @@ KNOWN_COMMANDS = {
 HELP_TEXT = """Commands:
   Alt+V    attach a screenshot from the clipboard (use /paste if unavailable)
   /paste   attach a screenshot from the clipboard
-  /options open the Workflow Editor for future-run defaults
+  /options open the Workflow Editor for defaults and resumable preferences
   /resume  choose an unfinished PRD and continue its development handoff
   /status  show the stage banner, artifacts, and selection summary
   /done    detect the PRD and issue pack now (or enter paths manually)

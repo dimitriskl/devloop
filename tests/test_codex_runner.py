@@ -726,6 +726,106 @@ class RolePromptIdentityTests(unittest.TestCase):
             self.assertIn("Prompt session: `session-one`", prompt_text)
             self.assertIn("Prompt session: `session-two`", prompt_text)
 
+    def test_run_role_recovers_missing_last_message_from_jsonl(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Recover role output\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"coder": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+
+            captured_message_path: list[Path] = []
+            final_message = {
+                "status": "PASS",
+                "summary": "Recovered final role result.",
+                "changed_files": ["src/example.py"],
+                "verification_commands": ["python -m unittest"],
+                "findings": ["Focused verification passed."],
+                "fix_list": [],
+                "residual_risks": [],
+            }
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": json.dumps(
+                                    {
+                                        **final_message,
+                                        "status": "FAIL",
+                                        "summary": "Intermediate update.",
+                                    }
+                                ),
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": json.dumps(final_message),
+                            },
+                        }
+                    ),
+                    '{"type":"turn.completed","usage":{}}',
+                ]
+            )
+            completed = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout=stdout,
+                stderr="",
+            )
+
+            def build_command(**arguments: object) -> list[str]:
+                captured_message_path.append(Path(arguments["message_path"]))
+                return ["codex"]
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                side_effect=build_command,
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=completed,
+            ):
+                result = runner.run_role(
+                    role="coder",
+                    issue=Issue("0001", "Recover role output", issue_path, False),
+                    pass_number=1,
+                )
+
+            persisted = json.loads(
+                captured_message_path[0].read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.summary, "Recovered final role result.")
+        self.assertEqual(persisted, final_message)
+
     def test_blocker_resolution_role_artifacts_fit_legacy_windows_path_limit(self) -> None:
         repository_root = Path(__file__).parents[1]
         with tempfile.TemporaryDirectory() as raw:

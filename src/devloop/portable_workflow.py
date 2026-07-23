@@ -6,7 +6,7 @@ import math
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -648,6 +648,35 @@ class WorkflowDefinition:
                 for step in self.steps
             ],
         }
+
+
+def refresh_resumable_execution_preferences(
+    workflow: WorkflowDefinition,
+    preferred_workflow: WorkflowDefinition,
+) -> WorkflowDefinition:
+    """Refresh settings that are safe to adopt before a resumed attempt starts."""
+    preferred_steps = {
+        step.instance_id: step
+        for step in preferred_workflow.steps
+    }
+    refreshed_steps = tuple(
+        _refresh_step_execution_preferences(step, preferred_steps.get(step.instance_id))
+        for step in workflow.steps
+    )
+    return replace(workflow, steps=refreshed_steps)
+
+
+def _refresh_step_execution_preferences(
+    step: WorkflowStep,
+    preferred_step: WorkflowStep | None,
+) -> WorkflowStep:
+    if preferred_step is None or preferred_step.component_id != step.component_id:
+        return step
+    return replace(
+        step,
+        codex_settings=preferred_step.codex_settings,
+        capability_profile=preferred_step.capability_profile,
+    )
 
 
 @dataclass(frozen=True)

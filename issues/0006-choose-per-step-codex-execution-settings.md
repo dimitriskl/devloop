@@ -18,7 +18,14 @@ CodexCLI RunStore, Workflow Runs, or Textual settings screens.
 
 Give every Codex-backed Step Instance authoritative model, reasoning-effort, and Fast settings in the portable runner. Populate choices through a small portable model-catalog adapter that queries the installed Codex backend, filter effort and Fast choices by advertised support, and use cached data only to keep the editor informative when discovery is unavailable. Add Retry Catalog and actionable discovery/preflight errors. Local deterministic steps must clearly show that Codex settings do not apply.
 
-Persist the chosen values in the User Workflow Default and portable immutable run state. Before starting a run, refresh the catalog and fail closed if any exact combination is unavailable. Build every fresh or resumed `codex exec` command with the snapshotted model, reasoning effort, and explicit Fast-on/Fast-off configuration so global settings cannot leak in. Remove automatic FULL/LIGHTWEIGHT intelligence switching; retain timeouts and checkpoints as a separate Execution Budget.
+Persist the chosen values in the User Workflow Default and the portable run
+definition. Before starting or resuming an attempt, refresh the catalog and fail
+closed if any exact combination is unavailable. At resume, matching Step
+Instances adopt the latest model, reasoning effort, Fast, and capability
+preferences before the state hash is replaced. Build every fresh or resumed
+`codex exec` command with those authorized values so global settings cannot leak
+in. Remove automatic FULL/LIGHTWEIGHT intelligence switching; retain timeouts
+and checkpoints as a separate Execution Budget.
 
 The built-in defaults are Analysis = Sol/xhigh/Fast Off, Development = Luna/high/Fast Off, Code Review = Sol/xhigh/Fast Off, and QA = Terra/high/Fast Off.
 
@@ -33,7 +40,7 @@ Covers parent PRD user stories 46-65.
 - [x] Cached catalog data is display-only, is visibly stale, and cannot authorize execution.
 - [x] Retry Catalog recovers the editor after a temporary discovery failure.
 - [x] Run preflight refreshes availability and names the exact step and invalid setting without silently substituting another value.
-- [x] Portable `codex exec` command construction receives the exact snapshotted model, reasoning effort, and Fast configuration for each step.
+- [x] Portable `codex exec` command construction receives the exact authorized model, reasoning effort, and Fast configuration from the current run definition for each step.
 - [x] Fast Off is explicit per step and is not changed by global Codex defaults or `/fast` state.
 - [x] Automatic FULL/LIGHTWEIGHT model or effort switching is removed, while Execution Budget remains independently configurable.
 - [x] Built-in workflow defaults match the four approved model/effort/Fast combinations.

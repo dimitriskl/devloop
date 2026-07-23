@@ -19,10 +19,10 @@ bounded Step Guidance.
 validation, execution, rework routing, and typed attempt records.
 `portable_component_catalog.py` and `catalog.py` adapt installed portable roles
 and capabilities without importing the CodexCLI registry. `workflow_editor.py`
-owns the transactional Future Runs draft. `workflow_defaults.py` atomically
-replaces the user default. `state.py` stores the immutable Current Run snapshot,
-canonical hash, generic Step Runtime States, interrupted-attempt identity, and
-ordered Step Attempt Records.
+owns the transactional Workflow Default draft. `workflow_defaults.py`
+atomically replaces the user default. `state.py` stores the Current Run
+definition, canonical hash, generic Step Runtime States, interrupted-attempt
+identity, and ordered Step Attempt Records.
 
 The deep execution seam is `PortableWorkflowExecutor.run`: callers provide a
 resolved Workflow Definition, component catalog, and role-runner adapter. The
@@ -30,13 +30,17 @@ executor owns navigation, exact changes-requested record routing, typed input
 resolution, pass accounting, checkpoint recovery, and attempt construction.
 Tests and the CLI use the same interface.
 
-## Run Immutability And Recovery
+## Run Stability And Recovery
 
 A new run validates and snapshots the current User Workflow Default before its
-first attempt. Once `resolved_workflow` and `resolved_workflow_hash` exist in
-the loop state, reruns load that exact snapshot; `/options` exposes it as
-read-only Current Run and edits only Future Runs. A hash mismatch or unknown
-field stops recovery instead of normalizing corrupted state.
+first attempt. Once `resolved_workflow` and `resolved_workflow_hash` exist,
+reruns preserve the graph, Step Instance IDs, component types, bindings,
+budgets, and guidance. Before the next resumed attempt, matching Step Instances
+adopt the latest saved model, reasoning effort, Fast preference, Skills, and
+Agent References, and the state definition and hash are replaced atomically.
+The editor exposes Current Run as read-only and the Workflow Default as
+editable. A hash mismatch or unknown field stops recovery instead of
+normalizing corrupted state.
 
 Every attempt retains Step Instance ID, optional Issue ID, pass, prompt session
 and attempt identity, outcome, typed outputs, timing, safe context, and rework
@@ -55,8 +59,8 @@ catalog. Cached data exists only to render the editor. Before a new run,
 effort, and Fast preference for every Codex-backed instance. Validation names
 the affected Step Display Name and setting and never falls back. Command
 construction in `codex_runner.py` passes model, reasoning effort, and explicit
-Fast On or Off from the immutable snapshot. Timeouts and checkpoint deadlines
-remain separate Execution Budget values.
+Fast On or Off from the currently authorized run definition. Timeouts and
+checkpoint deadlines remain separate Execution Budget values.
 
 ## Terminal Projection
 

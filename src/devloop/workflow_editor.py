@@ -130,7 +130,7 @@ WORKFLOW_ACTION_BAR: tuple[tuple[str, str], ...] = (
 WORKFLOW_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("Help", "Keyboard and screen guide", "help"),
     MenuAction("View", "Inspect current run", "current"),
-    MenuAction("View", "Edit future runs", "future"),
+    MenuAction("View", "Edit workflow default", "future"),
     MenuAction("View", "Show or hide route map", "graph"),
     MenuAction("View", "Show or hide technical details", "advanced"),
     MenuAction("Step", "Select any workflow step", "select"),
@@ -155,7 +155,7 @@ WORKFLOW_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("Draft", "Reset selected step", "reset-step"),
     MenuAction("Draft", "Reset entire workflow", "reset-workflow"),
     MenuAction("Catalog", "Retry model catalog", "retry-catalog"),
-    MenuAction("Finish", "Apply future-run default", "apply"),
+    MenuAction("Finish", "Apply workflow preferences", "apply"),
     MenuAction("Finish", "Cancel without saving", "cancel"),
 )
 
@@ -1119,13 +1119,24 @@ class _WorkflowEditorSession:
         scope_label = (
             "Current Run (read-only)"
             if self._scope is EditorScope.CURRENT_RUN
-            else "Future Runs (editable)"
+            else "Workflow Default (editable)"
         )
         lines = [
             f"Dev Loop > Workflow Editor > {scope_label} > {selected.display_name}",
             "",
             *detail_lines,
         ]
+        if (
+            self._current_workflow is not None
+            and self._scope is EditorScope.FUTURE_RUNS
+        ):
+            lines.extend(
+                (
+                    "",
+                    "Resume: matching model, effort, Fast, and capabilities refresh "
+                    "before the next attempt.",
+                )
+            )
         if self._notice:
             lines.extend(("", f"Status: {self._notice}"))
         portable_runtime.show_screen("\n".join(lines))
@@ -1397,7 +1408,8 @@ class _WorkflowEditorSession:
         }:
             return False
         self._message(
-            "Current Run cannot be edited. Switch to Future Runs with 'future'."
+            "Current Run cannot be edited. Switch to the editable Workflow Default "
+            "with 'future'."
         )
         return True
 
@@ -2291,7 +2303,11 @@ class _WorkflowEditorSession:
         except ValueError as error:
             self._message(f"Cannot apply workflow: {error}")
             return None
-        self._message("Future Runs workflow default applied.")
+        self._message(
+            "Workflow default applied. Matching model, reasoning effort, Fast, and "
+            "capabilities will be used when unfinished work is resumed; structural "
+            "changes apply to new runs."
+        )
         return EditorResult.APPLIED
 
     def _cancel(self) -> EditorResult:
@@ -2345,7 +2361,7 @@ def render_workflow_help(
             "  Enter or F9   Open the complete action list",
             "",
             "Common actions",
-            "  F2 Apply      Save the Future Runs workflow default",
+            "  F2 Apply      Save defaults and resumable execution preferences",
             "  F3 Route map Show or hide workflow routes",
             "  F4 Details   Show summary or technical settings",
             "  F5 Add       Add a workflow step",
@@ -2456,7 +2472,7 @@ def render_workflow_editor(
     scope_label = (
         "Current Run (read-only)"
         if scope is EditorScope.CURRENT_RUN
-        else "Future Runs (editable)"
+        else "Workflow Default (editable)"
     )
     position_label = (
         "branch-only"
@@ -2486,6 +2502,11 @@ def render_workflow_editor(
         header.append(
             f"Current Run hash: {canonical_workflow_hash(current_workflow)[:12]}…"
         )
+        if scope is EditorScope.FUTURE_RUNS:
+            header.append(
+                "Resume: matching model, effort, Fast, and capabilities refresh "
+                "before the next attempt"
+            )
     if notice:
         header.append(f"Status: {notice}")
     if show_graph:

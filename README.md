@@ -312,12 +312,15 @@ the active issue when known, and last activity. The same catalog is available
 through `/resume` during planning. Chat with Codex to sharpen a new change; when
 the PRD and issue pack are written, press Enter on the summary screen to start
 development. Type `/options` at any prompt to open the Workflow Editor for
-future-run defaults, including independent `model`, `reasoning`, and `fast`
+workflow defaults, including independent `model`, `reasoning`, and `fast`
 choices for each Codex-backed step and a separate `budget` timeout/checkpoint
 for every step. Its `capabilities` command still lets you
 search and toggle agents and skills for the selected Step Instance, reset that
 profile to its component defaults, or install new ones from GitHub. Required
-capabilities stay enabled and show the component-contract reason. Use `guidance`
+capabilities stay enabled and show the component-contract reason. Applying the
+draft makes model, effort, Fast, and capability changes available to matching
+steps when unfinished work is resumed; it never changes a Codex turn already
+in progress. Structural, budget, and guidance edits apply to new runs. Use `guidance`
 for bounded multiline instructions specific to the selected step; the editor
 shows that contracts, execution policy, permissions, safety, and output rules
 take precedence. Type `/help` for all commands. The
@@ -347,8 +350,10 @@ Press Enter on that summary screen to start development immediately with
 sensible defaults (all pending issues, a dedicated worktree, the
 self-improvement wiki always on). Type `/run-options` to change the start issue,
 worktree parent path, worktree folder name, or branch first. Type `/options` to
-edit the User Workflow Default for Future Runs and, when resuming an existing
-implementation worktree, inspect its immutable Current Run snapshot. When a
+edit the User Workflow Default and, when resuming an existing implementation
+worktree, inspect its read-only Current Run. Matching model, effort, Fast, and
+capability changes are adopted before the next resumed attempt; the active
+workflow structure remains fixed. When a
 run finishes successfully, the runner asks whether to merge the implementation
 branch or worktree into another branch.
 

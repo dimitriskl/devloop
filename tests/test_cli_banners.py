@@ -13,6 +13,8 @@ from devloop import cli, statusui
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue, parse_issue_index
 from devloop.portable_workflow import (
+    DEVELOPMENT_STEP_ID,
+    FastPreference,
     PortableWorkflowExecutor,
     SECURITY_REVIEW_STEP_ID,
     canonical_workflow_hash,
@@ -70,7 +72,9 @@ class RoleResultRenderingTests(unittest.TestCase):
 
 
 class ResolveRunWorkflowTests(unittest.TestCase):
-    def test_new_run_snapshots_latest_user_default_without_changing_active_run(self) -> None:
+    def test_rerun_refreshes_execution_preferences_without_changing_active_structure(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             configuration_path = root / "devloop-plan.json"
@@ -102,9 +106,31 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 if step["instance_id"] == SECURITY_REVIEW_STEP_ID
             )
             second_security_review["display_name"] = "Second Default Review"
+            second_development = next(
+                step
+                for step in second_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            second_development["codex_settings"] = {
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "fast": "ON",
+            }
+            second_development["capability_profile"] = {
+                "skills": ["skills/codex/tdd/SKILL.md"],
+                "agent_references": [],
+            }
+            second_development["execution_budget"] = {
+                "timeout_seconds": 900,
+                "checkpoint_seconds": 300,
+            }
+            second_development["guidance"] = {
+                "text": "This guidance is for newly created runs.",
+                "review_state": "READY",
+            }
             second_default = load_portable_workflow(second_document, catalog)
             store.replace(second_default)
-            unchanged_active = cli.resolve_run_workflow(
+            refreshed_active = cli.resolve_run_workflow(
                 LoopStateWriter(first_index),
                 catalog,
                 user_workflow_path=configuration_path,
@@ -116,22 +142,47 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 catalog,
                 user_workflow_path=configuration_path,
             )
+            refreshed_state_hash = LoopStateWriter(first_index).state[
+                "resolved_workflow_hash"
+            ]
 
         self.assertEqual(
             active.step(SECURITY_REVIEW_STEP_ID).display_name,
             "First Default Review",
         )
-        self.assertEqual(unchanged_active, active)
         self.assertEqual(
-            active_writer.state["resolved_workflow_hash"],
-            canonical_workflow_hash(first_default),
+            refreshed_active.step(SECURITY_REVIEW_STEP_ID).display_name,
+            "First Default Review",
+        )
+        self.assertEqual(
+            refreshed_active.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
+            ("gpt-5.6-sol", "xhigh", FastPreference.ON),
+        )
+        self.assertEqual(
+            refreshed_active.step(DEVELOPMENT_STEP_ID).capability_profile.skills,
+            ("skills/codex/tdd/SKILL.md",),
+        )
+        self.assertEqual(
+            refreshed_active.step(DEVELOPMENT_STEP_ID).capability_profile.agent_references,
+            (),
+        )
+        self.assertEqual(
+            refreshed_active.step(DEVELOPMENT_STEP_ID).execution_budget,
+            active.step(DEVELOPMENT_STEP_ID).execution_budget,
+        )
+        self.assertIsNone(refreshed_active.step(DEVELOPMENT_STEP_ID).guidance)
+        self.assertEqual(
+            refreshed_state_hash,
+            canonical_workflow_hash(refreshed_active),
         )
         self.assertEqual(
             subsequent.step(SECURITY_REVIEW_STEP_ID).display_name,
             "Second Default Review",
         )
 
-    def test_analysis_snapshot_is_persisted_even_after_future_default_changes(self) -> None:
+    def test_analysis_snapshot_adopts_latest_execution_preferences_before_development(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             configuration_path = root / "devloop-plan.json"
@@ -144,6 +195,16 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 if step["instance_id"] == SECURITY_REVIEW_STEP_ID
             )
             security_review["display_name"] = "Future Review"
+            development = next(
+                step
+                for step in changed_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            development["codex_settings"] = {
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "fast": "OFF",
+            }
             WorkflowDefaultStore(configuration_path, catalog).replace(
                 load_portable_workflow(changed_document, catalog)
             )
@@ -158,11 +219,43 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 workflow_snapshot=analysis_snapshot,
             )
 
-        self.assertEqual(resolved, analysis_snapshot)
+        self.assertEqual(
+            resolved.step(SECURITY_REVIEW_STEP_ID).display_name,
+            analysis_snapshot.step(SECURITY_REVIEW_STEP_ID).display_name,
+        )
+        self.assertEqual(
+            resolved.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
+            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+        )
         self.assertEqual(
             writer.state["resolved_workflow_hash"],
-            canonical_workflow_hash(analysis_snapshot),
+            canonical_workflow_hash(resolved),
         )
+
+    def test_rerun_without_a_saved_default_keeps_current_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_index = root / "issues.md"
+            issue_index.write_text("", encoding="utf-8")
+            catalog = default_portable_component_catalog()
+            current_document = default_portable_workflow().to_dict()
+            development = next(
+                step
+                for step in current_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            development["codex_settings"]["model"] = "run-specific-model"
+            current_workflow = load_portable_workflow(current_document, catalog)
+            writer = LoopStateWriter(issue_index)
+            writer.record_resolved_workflow(current_workflow, catalog)
+
+            resolved = cli.resolve_run_workflow(
+                LoopStateWriter(issue_index),
+                catalog,
+                user_workflow_path=root / "missing-devloop-plan.json",
+            )
+
+        self.assertEqual(resolved, current_workflow)
 
 
 class IssueProgressLabelTests(unittest.TestCase):

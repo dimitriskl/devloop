@@ -25,7 +25,7 @@ Covers parent PRD user stories 81, 85, and 87-93.
 ## Acceptance criteria
 
 - [x] Rerunning the same portable `devloop` command resumes at every Step Instance in the four-step reference workflow using persisted generic loop state.
-- [x] Recovery restores the exact Step Instance, Issue, pass, attempt history, and immutable workflow snapshot.
+- [x] Recovery restores the exact Step Instance, Issue, pass, attempt history, and stable workflow structure; a rerun may refresh matching execution preferences before the next attempt.
 - [x] Changes requested by either Review instance follow the configured route to Development and then re-enter the successful path.
 - [x] The rework attempt receives the exact changes-requested record that triggered it.
 - [x] Ordinary downstream bindings resolve the latest compatible successful artifact.
@@ -62,7 +62,9 @@ Completed: 2026-07-16T01:23:28
 - `python3 -m compileall -q src tests`
 
 ### Review
-No blocking findings. Generic step recovery, exact rework-record propagation, compatible artifact selection, immutable workflow snapshots, and retained attempt history match the issue requirements.
+No blocking findings. Generic step recovery, exact rework-record propagation,
+compatible artifact selection, stable workflow structure, resumable execution
+preferences, and retained attempt history match the issue requirements.
 
 ### QA
 All acceptance criteria have sufficient automated coverage. Focused and full suites passed; compilation, diff validation, shared Bash/Python wrapper smoke, persisted workflow snapshot, and per-step prompt identities were verified.

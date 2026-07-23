@@ -37,6 +37,7 @@ from .portable_workflow import (
     load_portable_workflow,
     parse_issue_status,
     preflight_codex_execution_settings,
+    refresh_resumable_execution_preferences,
 )
 from .run_review import (
     RunReview,
@@ -1352,13 +1353,26 @@ def resolve_run_workflow(
     require_codex_preflight: bool = False,
     workflow_snapshot: WorkflowDefinition | None = None,
 ) -> WorkflowDefinition:
+    saved_default = (
+        WorkflowDefaultStore(user_workflow_path, catalog).load_saved()
+        if user_workflow_path is not None
+        else None
+    )
     if (
         "resolved_workflow" in state_writer.state
         or "resolved_workflow_hash" in state_writer.state
     ):
-        workflow = state_writer.resolved_workflow(catalog)
-        if workflow_snapshot is not None:
-            state_writer.record_resolved_workflow(workflow_snapshot, catalog)
+        current_workflow = state_writer.resolved_workflow(catalog)
+        workflow = current_workflow
+        preferred_workflow = saved_default or workflow_snapshot
+        if preferred_workflow is not None:
+            workflow = load_portable_workflow(
+                refresh_resumable_execution_preferences(
+                    current_workflow,
+                    preferred_workflow,
+                ).to_dict(),
+                catalog,
+            )
         if require_codex_preflight:
             if live_model_catalog is None:
                 raise ValueError("A fresh live Codex Model Catalog is required.")
@@ -1367,15 +1381,24 @@ def resolve_run_workflow(
                 catalog,
                 live_model_catalog,
             )
+        if workflow != current_workflow and preferred_workflow is not None:
+            workflow = state_writer.refresh_resolved_workflow_execution_preferences(
+                preferred_workflow,
+                catalog,
+            )
         return workflow
     if workflow_snapshot is not None:
         workflow = load_portable_workflow(workflow_snapshot.to_dict(), catalog)
+        if saved_default is not None:
+            workflow = load_portable_workflow(
+                refresh_resumable_execution_preferences(
+                    workflow,
+                    saved_default,
+                ).to_dict(),
+                catalog,
+            )
     else:
-        workflow = (
-            WorkflowDefaultStore(user_workflow_path, catalog).load()
-            if user_workflow_path is not None
-            else default_portable_workflow()
-        )
+        workflow = saved_default or default_portable_workflow()
     if require_codex_preflight:
         if live_model_catalog is None:
             raise ValueError("A fresh live Codex Model Catalog is required.")
@@ -1401,7 +1424,7 @@ def resolve_run_workflow_with_repair(
     """Authorize and snapshot a run, with a reachable terminal repair loop."""
     reader = read_line or input
     writer = write or print
-    immutable_snapshot = workflow_snapshot is not None or (
+    has_current_snapshot = workflow_snapshot is not None or (
         "resolved_workflow" in state_writer.state
         or "resolved_workflow_hash" in state_writer.state
     )
@@ -1424,10 +1447,11 @@ def resolve_run_workflow_with_repair(
                     "repair the User Workflow Default before starting the command."
                 ) from error
             writer(f"Codex Execution Settings preflight failed: {safe_error}")
-            if immutable_snapshot:
+            if has_current_snapshot:
                 writer(
-                    "The Current Run snapshot is immutable. retry-catalog retries "
-                    "live discovery; /quit leaves it unchanged."
+                    "The Current Run structure is fixed. /options can update model, "
+                    "reasoning effort, Fast, and capabilities for the resumed attempt; "
+                    "retry-catalog retries live discovery; /quit stops the run."
                 )
             else:
                 writer(
@@ -1437,7 +1461,13 @@ def resolve_run_workflow_with_repair(
         action = reader(
             "Preflight action [/options/retry-catalog/quit]: "
         ).strip().casefold()
-        if action == "/options" and not immutable_snapshot:
+        if action == "/options":
+            current_workflow = workflow_snapshot
+            if state_writer.has_resolved_workflow():
+                try:
+                    current_workflow = state_writer.resolved_workflow(catalog)
+                except ValueError:
+                    current_workflow = None
             run_workflow_editor(
                 user_workflow_path,
                 read_line=reader,
@@ -1451,16 +1481,13 @@ def resolve_run_workflow_with_repair(
                     shutil.get_terminal_size(fallback=(100, 24)).lines,
                 ),
                 catalog=catalog,
+                current_workflow=current_workflow,
                 model_catalog_loader=model_catalog_loader,
             )
         elif action in {"retry-catalog", "/retry-catalog"}:
             continue
         elif action in {"quit", "/quit"}:
             return None
-        elif action == "/options":
-            writer(
-                "Current Run settings cannot be edited; use retry-catalog or /quit."
-            )
         else:
             writer("Choose /options, retry-catalog, or /quit.")
 

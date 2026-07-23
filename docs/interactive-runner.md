@@ -122,7 +122,7 @@ Clipboard capture depends on tools already present on most machines:
 | --- | --- |
 | Alt+V | attach a screenshot from the clipboard (use `/paste` if unavailable) |
 | `/paste` | attach a screenshot from the clipboard |
-| `/options` | open the Workflow Editor for future-run defaults and capabilities |
+| `/options` | open the Workflow Editor for defaults and resumable preferences |
 | `/resume` | list unfinished PRDs and continue the selected handoff |
 | `/status` | show the stage banner, artifacts, and selection summary |
 | `/done` | detect the PRD and issue pack now (or enter paths manually) |
@@ -200,17 +200,23 @@ Guidance marked `NEEDS_REVIEW` must be explicitly kept, edited, or cleared
 before Apply.
 Use `rename`, `undo`, `reset-step`, or `reset-workflow` for the remaining draft
 actions. `apply` atomically replaces the User Workflow Default; `cancel`
-discards the workflow and capability-selection draft.
+discards the workflow and capability-selection draft. Matching model,
+reasoning-effort, Fast, and capability changes are adopted before the next
+attempt when unfinished work is resumed.
 
 When an existing implementation worktree contains loop state, the editor also
-shows its immutable **Current Run** configuration. Enter `current` to inspect
-it and `future` to return to the editable **Future Runs** draft. The editor
-states explicitly that saved changes affect newly created runs only.
+shows its read-only **Current Run** configuration. Enter `current` to inspect
+it and `future` to return to the editable **Workflow Default**. Applying that
+draft does not change a Codex turn already in progress. Stop and rerun to use
+updated model, reasoning effort, Fast, Skills, or Agent References on the next
+attempt. Workflow structure, bindings, budgets, and guidance remain fixed for
+the existing run and apply only to new runs.
 
-If live catalog discovery or exact-setting validation fails before a new run,
+If live catalog discovery or exact-setting validation fails before an attempt,
 the preflight prompt can open `/options`, run `retry-catalog`, and revalidate
-without exiting to an unavailable command surface. An already-started Current
-Run remains immutable and can only retry live discovery or stop.
+without exiting to an unavailable command surface. A resumed run can therefore
+repair its execution preferences while retaining the same workflow graph and
+recovery cursor.
 
 Enter `capabilities` to open the existing capability choices without leaving
 the workflow draft:
@@ -225,8 +231,10 @@ the workflow draft:
    selections are persisted together with `apply`.
 
 Applied capability profiles and Step Guidance are stored in the User Workflow
-Default. A new run snapshots them per Step Instance, and every attempt prompt
-and saved attempt context uses that immutable snapshot.
+Default. New runs snapshot both per Step Instance. Resumed runs refresh matching
+capability profiles before the next attempt, while guidance remains part of the
+original run definition. Saved attempt context records the capability profile
+and guidance used by that attempt.
 
 ## Handoff To Development
 

@@ -143,7 +143,9 @@ execution settings, capabilities, guidance, runtime state, and attempt history.
 
 Press Enter on the development summary to start with the shown defaults. Use
 `/run-options` to adjust this launch before starting, or `/options` to edit the
-User Workflow Default for Future Runs.
+User Workflow Default. Model, reasoning-effort, Fast, and capability changes
+are adopted by matching steps before the next resumed attempt. They do not
+change a Codex turn already running.
 
 Inside the Workflow Editor, select a Codex-backed step and use `model`,
 `reasoning`, or `fast` to choose its execution settings. Choices are filtered
@@ -154,7 +156,7 @@ setting instead of silently falling back. Fast Off is passed explicitly, so a
 global Codex `/fast` setting cannot change the saved step choice.
 Use `budget` to edit the selected step's separate timeout and checkpoint
 inactivity deadline. Budget changes never alter model, reasoning, or Fast.
-When preflight fails interactively, choose `/options` to repair a future-run
+When preflight fails interactively, choose `/options` to repair the workflow
 default or `retry-catalog` to retry live discovery before execution.
 
 Use `route` to edit any supported outcome. A route can target an existing
@@ -184,7 +186,7 @@ Inside `devloop-plan`, these commands are available:
 | --- | --- |
 | Alt+V | Attach a clipboard screenshot in a real interactive terminal. |
 | `/paste` | Attach a clipboard screenshot when Alt+V is unavailable. |
-| `/options` | Open the Workflow Editor for future-run defaults and capability choices. |
+| `/options` | Open the Workflow Editor for defaults and resumable preferences. |
 | `/resume` | List unfinished PRDs and continue the selected development handoff. |
 | `/status` | Show the stage banner, artifacts, and current selection. |
 | `/done` | Detect PRD/issues now or enter artifact paths manually. |
@@ -317,9 +319,11 @@ For PRD-folder runs, it also writes:
 - `devloop.status.md`
 - `devloop.status.json`
 
-Each new run stores an immutable resolved `devloop.portable-workflow/v2`
-snapshot and canonical hash in the JSON state. Editing Future Runs never
-changes that snapshot. The same state keeps generic Step Runtime States and an
+Each new run stores a resolved `devloop.portable-workflow/v2` definition and
+canonical hash in the JSON state. On rerun, matching model, reasoning-effort,
+Fast, and capability preferences refresh atomically before the next attempt;
+the graph, bindings, budgets, and guidance remain unchanged. The same state
+keeps generic Step Runtime States and an
 ordered Step Attempt Record for every execution, so duplicate reviews,
 changes-requested rework, interruption, and resume remain inspectable. Portable
 workflow schema v1 is intentionally rejected; repair or recreate an old local

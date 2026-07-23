@@ -37,6 +37,7 @@ from .portable_workflow import (
     canonical_workflow_hash,
     load_portable_workflow,
     parse_issue_status,
+    refresh_resumable_execution_preferences,
     step_attempt_record_to_dict,
 )
 from .step_configuration import StepAttemptContext, StepCapabilityProfile
@@ -111,7 +112,11 @@ class LoopStateWriter:
             existing_workflow = self.resolved_workflow(catalog)
             if canonical_workflow_hash(existing_workflow) == workflow_hash:
                 return existing_workflow
-            raise ValueError("The resolved portable workflow is immutable for an active run.")
+            raise ValueError(
+                "The resolved portable workflow structure is fixed for an active run. "
+                "Refresh only resumable execution preferences through the dedicated "
+                "state transition."
+            )
         self.state["resolved_workflow"] = validated_workflow.to_dict()
         self.state["resolved_workflow_hash"] = workflow_hash
         self.flush()
@@ -130,6 +135,28 @@ class LoopStateWriter:
         if expected_hash != actual_hash:
             raise ValueError("Resolved portable workflow hash does not match its content.")
         return workflow
+
+    def refresh_resolved_workflow_execution_preferences(
+        self,
+        preferred_workflow: WorkflowDefinition,
+        catalog: PortableStepComponentCatalog,
+    ) -> WorkflowDefinition:
+        current_workflow = self.resolved_workflow(catalog)
+        refreshed_workflow = load_portable_workflow(
+            refresh_resumable_execution_preferences(
+                current_workflow,
+                preferred_workflow,
+            ).to_dict(),
+            catalog,
+        )
+        if refreshed_workflow == current_workflow:
+            return current_workflow
+        self.state["resolved_workflow"] = refreshed_workflow.to_dict()
+        self.state["resolved_workflow_hash"] = canonical_workflow_hash(
+            refreshed_workflow
+        )
+        self.flush()
+        return refreshed_workflow
 
     def record_step_runtime_state(
         self,

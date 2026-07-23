@@ -29,7 +29,7 @@ Covers parent PRD user stories 26, 34-39, 55-58, 73-76, and 101-110.
 - [x] Malformed schema-v2 defaults, graphs, bindings, catalogs, and unsupported model/effort/Fast combinations fail closed with actionable messages.
 - [x] Schema v1 is rejected explicitly; no compatibility reader, migration, or dual-write path is introduced.
 - [x] The complete automated suite, Python syntax gate, repository dry-run, and whitespace/diff checks pass in the workspace sandbox.
-- [x] Documentation explains editing Future Runs, inspecting Current Run, immutable snapshots, graph and binding repair, model discovery/preflight, guidance safety, and dashboard behavior.
+- [x] Documentation explains editing the Workflow Default, inspecting Current Run, stable run structure, resumable execution preferences, graph and binding repair, model discovery/preflight, guidance safety, and dashboard behavior.
 - [x] Existing composer, slash commands, approvals, interruption/stop behavior, capability installation, and wrapper parity have no regressions.
 - [x] Any credential-dependent real backend validation is handed to the operator as exactly one paste-ready command that writes a non-secret workspace log.
 - [x] Final evidence identifies every automated, inspected, and operator-only gate without claiming unexecuted coverage.

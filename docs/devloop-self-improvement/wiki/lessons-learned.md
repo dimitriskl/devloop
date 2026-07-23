@@ -14,11 +14,11 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Retry Equivalent Blockers Only After State Changes
 
-- Applies to: blocked retry rounds, role-output validation, external prerequisites and long-running issue packs
-- Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round.
-- Evidence: Issue 0003 received five attempts on July 21 that reproduced the same missing platform prerequisites. On July 22, Issue 0001 timed out once and then five blocker-resolution attempts returned the same invalid role-schema result while seven dependent issues remained waiting.
-- Action: Fingerprint normalized blocker reasons with their relevant environment or contract state; after an equivalent retry, stop until that state or guidance changes, surface a concise validation diagnostic, and leave one operator or runner action on the loop board.
-- Last seen: 2026-07-22
+- Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
+- Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round, including after a run is resumed.
+- Evidence: Issue 0003 received five attempts on July 21 that reproduced the same missing platform prerequisites. Issue 0001 then returned the same invalid role-schema result through five July 22 blocker-resolution attempts and five more after an unfinished-run resume on July 23, while seven dependent issues remained waiting.
+- Action: Persist a normalized blocker fingerprint with its relevant environment or contract state; after one equivalent retry, suppress further attempts across retries and resumed runs until that state or guidance changes, surface a concise validation diagnostic, and leave one operator or runner action on the loop board.
+- Last seen: 2026-07-23
 
 ## Validate Every Component Of Derived Data
 

@@ -24,8 +24,8 @@ from devloop.cli_ui import (
 class CliUiTests(unittest.TestCase):
     def test_render_context_path_prefixes_app_title(self) -> None:
         self.assertEqual(
-            render_context_path("Workflow Editor", "Future Runs", "Development"),
-            "Dev Loop > Workflow Editor > Future Runs > Development",
+            render_context_path("Workflow Editor", "Workflow Default", "Development"),
+            "Dev Loop > Workflow Editor > Workflow Default > Development",
         )
         self.assertEqual(render_context_path(), APP_TITLE)
 

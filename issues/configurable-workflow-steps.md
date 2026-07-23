@@ -30,7 +30,7 @@ As a result, a user cannot construct the workflow that fits the work. The user c
 
 Provide a transactional Workflow Editor through `/options`. Treat each Workflow Step as an independently configured object with a permanent UUIDv4 Step Instance ID, a unique editable display name, a selected installed Workflow Step Type, a position on the Primary Path or an outcome branch, typed Port Bindings, explicit Outcome Transitions, per-step capabilities, optional Step Guidance, an Execution Budget, and—when the component is Codex-backed—authoritative model, reasoning-effort, and Fast settings.
 
-The User Workflow Default remains freely editable and applies to new Workflow Runs. Each new run captures an immutable resolved Workflow Definition and per-step configuration so pause, resume, recovery, evidence, and auditing remain deterministic. Runtime state, attempt history, Issue progress, and dashboard projections become generic and Step Instance ID keyed rather than hardcoded around Development, Review, and QA.
+The User Workflow Default remains freely editable and applies in full to new Workflow Runs. Each run captures a resolved Workflow Definition and per-step configuration so pause, resume, recovery, evidence, and auditing remain deterministic. At a resume boundary, matching Step Instances refresh only model, reasoning effort, Fast, and capabilities from the latest default. Runtime state, attempt history, Issue progress, and dashboard projections become generic and Step Instance ID keyed rather than hardcoded around Development, Review, and QA.
 
 The same dynamic Workflow Progress Dashboard serves the portable planning intake, the bounded implementation console, Bash and PowerShell entry points, and redirected output. Every distinct step—including multiple instances of the same component type—has its own status, pass, timer, result, and activity presentation.
 
@@ -47,7 +47,7 @@ The same dynamic Workflow Progress Dashboard serves the portable planning intake
 9. As a Dev Loop user, I want to enter a one-based Position number, so that I can move a step directly in a long workflow.
 10. As a Dev Loop user, I want positions renumbered without gaps, so that the Primary Path remains easy to read.
 11. As a Dev Loop user, I want Undo while editing, so that I can safely explore workflow changes.
-12. As a Dev Loop user, I want Cancel to discard the entire draft, so that an experiment cannot alter my future runs accidentally.
+12. As a Dev Loop user, I want Cancel to discard the entire draft, so that an experiment cannot alter new or resumed runs accidentally.
 13. As a Dev Loop user, I want Apply to be atomic, so that the saved workflow is always complete and valid.
 14. As a Dev Loop user, I want Reset Step to restore component defaults, so that I can recover from complicated per-step edits.
 15. As a Dev Loop user, I want Reset Workflow to restore the built-in workflow, so that I can return to a known working baseline.
@@ -116,10 +116,10 @@ The same dynamic Workflow Progress Dashboard serves the portable planning intake
 78. As a Dev Loop user, I want Type changes to reset type-dependent settings, so that configuration from the old component is not carried into the new one.
 79. As a Dev Loop user, I want `/options` changes saved as my User Workflow Default, so that they apply across future Dev Loop sessions.
 80. As a Dev Loop user, I want Apply to replace that default atomically, so that partial configuration cannot be observed.
-81. As a Dev Loop user, I want an active run's workflow to remain immutable, so that pause, resume, and recovery are deterministic.
-82. As a Dev Loop user, I want `/options` during a run to separate Current Run from Future Runs, so that the scope of my changes is obvious.
+81. As a Dev Loop user, I want an active attempt and its workflow structure to remain stable, so that pause, resume, and recovery are deterministic.
+82. As a Dev Loop user, I want `/options` during a run to separate Current Run from the editable Workflow Default, so that the scope of my changes is obvious.
 83. As a Dev Loop user, I want Current Run settings inspectable but read-only, so that I can see exactly what the run is using.
-84. As a Dev Loop user, I want a clear message that edits affect new runs only, so that I do not expect a running thread to change.
+84. As a Dev Loop user, I want model, reasoning-effort, Fast, and capability edits adopted before the next resumed attempt, with a clear message that they cannot alter a running Codex turn.
 85. As a Dev Loop user, I want each `*.loop.state.json` run state to store its resolved workflow and canonical hash, so that later resume and diagnosis use exact configuration.
 86. As a Dev Loop user, I want no workflow revision archive, so that local configuration remains simple while run snapshots preserve evidence.
 87. As a Dev Loop user, I want Issue Status to use the generic `IN_PROGRESS` enum member, so that lifecycle does not encode a fixed component type.
@@ -170,10 +170,10 @@ The same dynamic Workflow Progress Dashboard serves the portable planning intake
 - Preserve user-authored Step Guidance across a Type change but mark it `NEEDS_REVIEW`; block Apply until the user chooses Keep, Edit, or Clear.
 - On Type change, preserve UUIDv4, display name, and position while resetting Type-dependent capabilities, Codex settings, Execution Budget, ports, bindings, and supported outcomes to new component defaults.
 - Replace component-keyed user capability defaults with one mutable User Workflow Default containing the complete per-step configuration. Apply writes it atomically; Cancel does not write; Reset restores the built-in default.
-- Do not add an immutable workflow-revision archive. Every portable development run instead stores its immutable resolved Workflow Definition and canonical hash in the issue pack's `*.loop.state.json`.
-- During an active run, `/options` shows a read-only Current Run view and an editable Future Runs view with an explicit scope message. It cannot mutate unstarted steps in the current Run Snapshot.
+- Do not add a workflow-revision archive. Every portable development run stores its resolved Workflow Definition and current canonical hash in the issue pack's `*.loop.state.json`.
+- During an active run, `/options` shows a read-only Current Run view and an editable Workflow Default with an explicit scope message. It cannot mutate a running Codex turn. A later rerun refreshes model, reasoning effort, Fast, and capabilities for matching Step Instance and component IDs while preserving the graph, bindings, budgets, and guidance.
 - Extend component execution defaults to provide optional Codex Execution Settings and an independent Execution Budget. Remove FULL/LIGHTWEIGHT intelligence profiles and issue-size-based model or effort switching.
-- For agent-backed steps, Codex Execution Settings contain model, reasoning effort, and explicit Fast preference. Every attempt uses the values frozen in the Run Snapshot.
+- For agent-backed steps, Codex Execution Settings contain model, reasoning effort, and explicit Fast preference. Every attempt uses the values authorized and stored at its start or resume boundary.
 - For local deterministic components, omit Codex settings and display a local-execution explanation rather than disabled meaningless fields.
 - Load the live account-aware model picker through a small portable Codex Model Catalog adapter beside `codex_runner.py`. The adapter may query the installed Codex backend, but it must not depend on CodexCLI RunStore, Workflow Runs, Textual UI, or CodexCLI application/domain modules.
 - Cache the most recently loaded model catalog for display only. A fresh preflight must authorize every selected model/effort/Fast combination before a run starts.
@@ -201,7 +201,7 @@ The same dynamic Workflow Progress Dashboard serves the portable planning intake
 ## Testing Decisions
 
 - Good tests assert externally observable portable-runner behavior: what `/options` displays and saves, which workflow a new run snapshots, which `codex exec` command is built, which transition is selected, which role result reaches a downstream input, what rerun resume restores, and what the user sees on the dashboard. Tests should not assert helper call order or incidental serialization implementation.
-- Use the public `interactive_runner`, fake editor, command builder, issue loop, and `statusui` projection seams as the highest user-facing automated tests. Exercise opening `/options`, adding/duplicating/moving/deleting/retargeting steps, selecting Type/model/effort/Fast, editing capabilities and guidance, resolving validation, Apply/Cancel/Reset, narrow/wide layouts, and read-only Current Run versus editable Future Runs.
+- Use the public `interactive_runner`, fake editor, command builder, issue loop, and `statusui` projection seams as the highest user-facing automated tests. Exercise opening `/options`, adding/duplicating/moving/deleting/retargeting steps, selecting Type/model/effort/Fast, editing capabilities and guidance, resolving validation, Apply/Cancel/Reset, narrow/wide layouts, and read-only Current Run versus the editable Workflow Default.
 - Exercise the Workflow Editor through portable configuration functions and temporary directories. Verify atomic Apply, no write on Cancel, built-in Reset, GUID stability, unique names, deterministic positions, deletion impact, Duplicate semantics, stale-guidance acknowledgement, and full round-trip equality.
 - Extend Workflow Definition contract tests for schema v2, UUIDv4 identities, open Component IDs, Primary Path derivation, branch-local ordering, loops, supported outcomes, start/terminal reachability, scope compatibility, and typed Port Binding validation.
 - Add explicit rejection coverage for v1 workflows. Do not add migration fixtures or compatibility behavior.
@@ -209,7 +209,7 @@ The same dynamic Workflow Progress Dashboard serves the portable planning intake
 - Test portable `codex exec` command construction. Assert exact model, reasoning-effort configuration, Fast-on/Fast-off override, selected capability paths, component instructions, and bounded Step Guidance composition.
 - Test that a user-global Codex model or Fast change cannot alter an explicitly configured Run Snapshot.
 - Replace execution-profile tests that expect automatic LIGHTWEIGHT selection with tests proving per-step model/effort/Fast authority and independent Execution Budget selection.
-- Extend `LoopStateWriter` round-trip and recovery tests for immutable resolved workflow snapshots, canonical hashes, generic Step Runtime States, Step Attempt Records, independent duplicate review sessions, branch cursors, and latest-compatible result resolution.
+- Extend `LoopStateWriter` round-trip and recovery tests for stable workflow structure, atomic execution-preference refreshes and canonical hashes, generic Step Runtime States, Step Attempt Records, independent duplicate review sessions, branch cursors, and latest-compatible result resolution.
 - Extend portable issue-loop tests so Issue Status remains generic `IN_PROGRESS` while current Step Instance ID changes through arbitrary issue-scoped paths and rework loops.
 - Verify that two instances of the same component execute independently, receive distinct portable role prompts and Codex sessions, retain distinct outputs, and both appear in history and dashboard projections.
 - Verify ordinary binding selection chooses the latest successful output, rework chooses the triggering changes-requested record, and disallowed outcomes never flow downstream.
@@ -225,7 +225,7 @@ The same dynamic Workflow Progress Dashboard serves the portable planning intake
 - Changing or extending the separate CodexCLI Textual application, its `RunStore`, Workflow Runs, App Server execution threads, launcher, or modules under `src/devloop/application/`, `components/`, `domain/`, `execution/`, `persistence/`, `ui/`, and `workflow/`.
 
 - Migrating, reading, resuming, or preserving v1 Workflow Definitions or v1 workflow snapshots.
-- Mutating the workflow graph, execution settings, guidance, capabilities, or bindings of an already-started Workflow Run.
+- Mutating the workflow graph, guidance, budgets, or bindings of an already-started Workflow Run, or changing execution preferences inside an active Codex turn.
 - Keeping immutable history or user-visible revisions of the mutable User Workflow Default.
 - Adaptive or automatic model, reasoning-effort, or Fast selection based on Issue size, retry count, cost, or elapsed time.
 - Silent model fallback, effort reduction, Fast disabling, or substitution when catalog validation fails.

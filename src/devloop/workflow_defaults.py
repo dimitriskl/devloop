@@ -70,10 +70,13 @@ class WorkflowDefaultStore:
         self._catalog = catalog
 
     def load(self) -> WorkflowDefinition:
+        return self.load_saved() or default_portable_workflow()
+
+    def load_saved(self) -> WorkflowDefinition | None:
         data = self._load_configuration()
         document = data.get(USER_WORKFLOW_DEFAULT_KEY)
         if document is None:
-            return default_portable_workflow()
+            return None
         if not isinstance(document, dict):
             raise ValueError("The User Workflow Default must be a JSON object.")
         workflow = load_portable_workflow(document, self._catalog)

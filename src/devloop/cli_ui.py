@@ -43,7 +43,7 @@ def terminal_dimensions(*, fallback: tuple[int, int] = (100, 24)) -> tuple[int, 
 
 
 def render_context_path(*segments: str) -> str:
-    """Render a breadcrumb-style path such as ``Future Runs > Security Review``."""
+    """Render a breadcrumb path such as ``Workflow Default > Security Review``."""
     cleaned = [segment for segment in segments if segment]
     if not cleaned:
         return APP_TITLE

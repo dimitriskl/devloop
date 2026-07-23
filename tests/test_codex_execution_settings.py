@@ -524,6 +524,51 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         self.assertNotIn("resolved_workflow", writer.state)
         self.assertNotIn("resolved_workflow_hash", writer.state)
 
+    def test_rerun_preflight_keeps_current_preferences_when_refresh_is_unavailable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            configuration_path = root / "devloop-plan.json"
+            issue_index = root / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            catalog = default_portable_component_catalog()
+            current_workflow = default_portable_workflow()
+            writer = LoopStateWriter(issue_index)
+            writer.record_resolved_workflow(current_workflow, catalog)
+            original_hash = writer.state["resolved_workflow_hash"]
+
+            unavailable_document = current_workflow.to_dict()
+            development = next(
+                step
+                for step in unavailable_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            development["codex_settings"]["model"] = "missing-model"
+            WorkflowDefaultStore(configuration_path, catalog).replace(
+                load_portable_workflow(unavailable_document, catalog)
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Development.*model.*missing-model.*options",
+            ):
+                cli.resolve_run_workflow(
+                    writer,
+                    catalog,
+                    user_workflow_path=configuration_path,
+                    live_model_catalog=self._live_catalog(),
+                    require_codex_preflight=True,
+                )
+
+            restored = LoopStateWriter(issue_index)
+
+        self.assertEqual(
+            restored.resolved_workflow(catalog),
+            current_workflow,
+        )
+        self.assertEqual(restored.state["resolved_workflow_hash"], original_hash)
+
     def test_cli_preflight_repair_can_open_options_and_retry_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -577,6 +622,72 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         editor.assert_called_once()
         self.assertEqual(discovery_count, 3)
         self.assertIn("resolved_workflow", writer.state)
+
+    def test_existing_run_preflight_repair_adopts_edited_execution_preferences(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            configuration_path = root / "devloop-plan.json"
+            issue_index = root / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            catalog = default_portable_component_catalog()
+            current_workflow = default_portable_workflow()
+            writer = LoopStateWriter(issue_index)
+            writer.record_resolved_workflow(current_workflow, catalog)
+
+            invalid_document = current_workflow.to_dict()
+            invalid_development = next(
+                step
+                for step in invalid_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            invalid_development["codex_settings"]["model"] = "missing-model"
+            store = WorkflowDefaultStore(configuration_path, catalog)
+            store.replace(load_portable_workflow(invalid_document, catalog))
+
+            repaired_document = current_workflow.to_dict()
+            repaired_development = next(
+                step
+                for step in repaired_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            repaired_development["codex_settings"] = {
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "fast": "OFF",
+            }
+            repaired_workflow = load_portable_workflow(
+                repaired_document,
+                catalog,
+            )
+
+            def repair(*_args: object, **_kwargs: object) -> EditorResult:
+                store.replace(repaired_workflow)
+                return EditorResult.APPLIED
+
+            with mock.patch.object(
+                cli,
+                "run_workflow_editor",
+                side_effect=repair,
+            ) as editor:
+                resolved = cli.resolve_run_workflow_with_repair(
+                    writer,
+                    catalog,
+                    user_workflow_path=configuration_path,
+                    model_catalog_loader=self._live_catalog,
+                    read_line=lambda _prompt: "/options",
+                    write=lambda _message: None,
+                )
+
+        self.assertEqual(
+            resolved.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
+            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+        )
+        self.assertEqual(
+            editor.call_args.kwargs["current_workflow"],
+            current_workflow,
+        )
 
     def test_cli_preflight_sanitizes_backend_catalog_errors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -701,7 +812,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         )
         self.assertTrue(all(call["pass_number"] == 3 for call in calls))
 
-    def test_loop_state_round_trips_the_immutable_per_step_settings(self) -> None:
+    def test_loop_state_round_trips_the_current_per_step_settings(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             issue_index = root / "README.md"

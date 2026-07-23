@@ -95,8 +95,9 @@ The portable adapters are `analysis`, `coder`, `reviewer`, and `qa`. The
 `analysis` adapter is the WORKFLOW-scoped planning adapter; the other adapters
 are ISSUE-scoped. Referenced skill and agent files must already be installed in
 the bundle. A custom component then appears in the Workflow Editor Type picker,
-persists in future-run defaults and snapshots, and executes with its configured
-role instructions through the selected adapter.
+persists in the Workflow Default and run definitions, and executes with its
+configured role instructions through the selected adapter. Capability changes
+for matching existing Step Instances are adopted before a resumed attempt.
 
 ## Install From GitHub
 

@@ -2057,7 +2057,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertIs(result, EditorResult.APPLIED)
         self.assertEqual(stored, default_portable_workflow())
 
-    def test_apply_renames_a_selected_step_and_persists_the_future_default(self) -> None:
+    def test_apply_renames_a_selected_step_and_persists_the_workflow_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "devloop-plan.json"
             fake = FakeEditor(["3", "rename", "Threat Review", "apply"])
@@ -2079,7 +2079,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertIs(result, EditorResult.APPLIED)
         self.assertIn("Workflow Steps", rendered)
         self.assertIn("Settings —", rendered)
-        self.assertIn("Future Runs (editable)", rendered)
+        self.assertIn("Workflow Default (editable)", rendered)
         self.assertEqual(stored.step(SECURITY_REVIEW_STEP_ID).display_name, "Threat Review")
 
     def test_cancel_discards_the_whole_draft_without_a_persistence_write(self) -> None:
@@ -2262,7 +2262,9 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertIn("reset-workflow", rendered)
         self.assertIn("must be reset before Apply", rendered)
 
-    def test_current_run_is_read_only_while_future_runs_remains_editable(self) -> None:
+    def test_current_run_is_read_only_while_workflow_default_remains_editable(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "devloop-plan.json"
             catalog = default_portable_component_catalog()
@@ -2300,7 +2302,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
 
         rendered = "\n".join(output)
         self.assertIn("Current Run (read-only)", rendered)
-        self.assertIn("Future Runs (editable)", rendered)
+        self.assertIn("Workflow Default (editable)", rendered)
+        self.assertIn("matching model, effort, Fast, and capabilities", rendered)
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Current Run cannot be edited", rendered)
         self.assertIn("Snapshot Review", rendered)

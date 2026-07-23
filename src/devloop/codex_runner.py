@@ -20,6 +20,7 @@ from .codex_events import (
     RunWideBlocker,
     classify_run_wide_blocker,
     codex_turn_outcome,
+    extract_text,
     parse_codex_event,
     render_safe_codex_activity,
 )
@@ -576,8 +577,30 @@ class CodexRunner:
                 raw_message=result.stderr,
             )
 
-        message = message_path.read_text(encoding="utf-8") if message_path.is_file() else result.stdout
+        message = self.load_or_recover_role_message(
+            message_path=message_path,
+            stdout=result.stdout,
+        )
         return RoleResult.from_message(message)
+
+    def load_or_recover_role_message(
+        self,
+        *,
+        message_path: Path,
+        stdout: str,
+        log_root: Path | None = None,
+    ) -> str:
+        if message_path.is_file():
+            return message_path.read_text(encoding="utf-8")
+
+        message = extract_last_structured_agent_message(stdout)
+        if message is None and extract_json_object(stdout) is not None:
+            message = stdout
+        if message is None:
+            return stdout
+
+        self.write_log_text(message_path, message, log_root=log_root)
+        return message
 
     def run_codex_exec_with_connection_retries(
         self,
@@ -776,7 +799,11 @@ class CodexRunner:
                 raw_message=result.stderr,
             )
 
-        message = message_path.read_text(encoding="utf-8") if message_path.is_file() else result.stdout
+        message = self.load_or_recover_role_message(
+            message_path=message_path,
+            stdout=result.stdout,
+            log_root=log_root,
+        )
         return RoleResult.from_message(message)
 
     def build_prompt(
@@ -1026,6 +1053,33 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
             return None
 
     return None
+
+
+def extract_last_structured_agent_message(text: str) -> str | None:
+    last_message: str | None = None
+    for line in text.splitlines():
+        payload = parse_codex_event(line)
+        if payload is None or payload.get("type") != "item.completed":
+            continue
+
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "message" and item.get("role") != "assistant":
+            continue
+        if item_type not in {"agent_message", "assistant_message", "message"}:
+            continue
+
+        message = (
+            extract_text(item.get("text"))
+            or extract_text(item.get("message"))
+            or extract_text(item.get("content"))
+        )
+        if message and extract_json_object(message) is not None:
+            last_message = message
+
+    return last_message
 
 
 def is_retryable_codex_connection_failure(stderr: str) -> bool:

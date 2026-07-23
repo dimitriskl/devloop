@@ -18,7 +18,12 @@ modules. Do not implement this in the CodexCLI Textual UI.
 
 Turn portable `devloop-plan` `/options` into the entry point for a transactional terminal Workflow Editor. Present the Primary Path and a focused selected-step inspector through the existing line editor. Load the User Workflow Default from portable planner configuration when it exists and otherwise load the built-in workflow. Allow unique display-name edits while keeping machine GUIDs out of the normal view and available in an advanced view.
 
-Maintain an isolated draft with Undo, Reset Step, Reset Workflow, atomic Apply, and whole-draft Cancel. During a run, show Current Run as inspectable but read-only and Future Runs as editable, with explicit copy that changes apply only to newly created runs. A new run must capture the resolved default and canonical hash; the active run must remain unchanged.
+Maintain an isolated draft with Undo, Reset Step, Reset Workflow, atomic Apply,
+and whole-draft Cancel. During a run, show Current Run as inspectable but
+read-only and the Workflow Default as editable. A new run must capture the
+resolved default and canonical hash. A resumed run must adopt matching model,
+reasoning-effort, Fast, and capability preferences before its next attempt
+without changing its graph, bindings, budgets, guidance, or recovery cursor.
 
 Covers parent PRD user stories 1-3, 11-20, and 79-86.
 
@@ -30,9 +35,9 @@ Covers parent PRD user stories 1-3, 11-20, and 79-86.
 - [x] UUIDs are hidden in the normal editor and inspectable through an advanced detail.
 - [x] Undo, Reset Step, and Reset Workflow operate only on the current draft.
 - [x] Cancel performs no persistence write; Apply validates and replaces the default atomically.
-- [x] During an active run, Current Run is read-only and Future Runs remains editable with an explicit scope message.
-- [x] Editing Future Runs does not mutate the active run snapshot, cursor, or hash.
-- [x] A subsequent run captures the newly resolved workflow and canonical hash.
+- [x] During an active run, Current Run is read-only and the Workflow Default remains editable with an explicit scope message.
+- [x] Editing the Workflow Default does not mutate a running Codex turn or the active run's graph, bindings, budgets, guidance, or cursor.
+- [x] A subsequent or resumed run captures the newly authorized execution preferences and canonical hash.
 - [x] Fake-editor and public planner-flow coverage exercises Apply, Cancel, reset, undo, current/future scope, and narrow and wide terminal layouts.
 - [x] Bash and PowerShell wrappers reach the same editor behavior without invoking CodexCLI.
 
