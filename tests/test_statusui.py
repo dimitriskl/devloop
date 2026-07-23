@@ -653,6 +653,63 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         )
         self.assertIn("WORKING   Development · pass 2 · 00:00:10", transition)
 
+    def test_same_step_rework_active_line_shows_current_attempt_elapsed(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        progress = statusui.project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                    attempt_id="attempt-current",
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+        progress = replace(
+            progress,
+            issue_steps=tuple(
+                replace(step, elapsed_seconds=7200.0)
+                if step.step_instance_id == DEVELOPMENT_STEP_ID
+                else step
+                for step in progress.issue_steps
+            ),
+        )
+        clock = Clock()
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0009",
+            issue_title="Current attempt timing",
+            position=9,
+            total=10,
+            stream=output,
+            clock=clock,
+            frame_seconds=60,
+        )
+        dashboard.show_workflow_progress(progress)
+        clock.value = 15
+        dashboard.close()
+
+        rendered = re.sub(
+            r"\x1b\[[0-?]*[ -/]*[@-~]",
+            "",
+            output.getvalue(),
+        )
+        self.assertIn("WORKING   Development · pass 1 · 02:00:15", rendered)
+        self.assertIn(
+            "pass 1 · elapsed 00:00:15 · event 00:00:15 ago",
+            rendered,
+        )
+
     def test_tty_redraw_clears_rows_when_active_details_disappear(self) -> None:
         progress = statusui.project_workflow_progress(
             default_portable_workflow(),

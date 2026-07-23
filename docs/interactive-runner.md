@@ -280,10 +280,12 @@ devloop calls its own implementation runner directly rather than spawning a
 new process. The shared dashboard renders every configured Workflow Step
 instance by display name, including two instances backed by the same component.
 Workflow-scoped rows are separated from current-Issue rows. Completed status,
-pass, Last Result, and elapsed time remain frozen while the active row shows
-model, reasoning effort, Fast, a spinner, elapsed time, event freshness, and
-safe activity. Rework adds time to the same step row without overwriting its
-older Step Attempt Records. Long workflows keep the active row in view.
+pass, Last Result, and total elapsed time remain frozen while the active detail
+shows model, reasoning effort, Fast, a spinner, current-attempt elapsed time,
+event freshness, and safe activity. Rework adds time to the same step row
+without making a fresh attempt appear to have inherited that historical
+duration, and without overwriting older Step Attempt Records. Long workflows
+keep the active row in view.
 Interactive terminals update one bounded region; redirected output is
 append-only and contains no cursor movement. `NO_COLOR=1`, narrow terminals,
 and non-Unicode consoles retain complete text labels. The self-improvement

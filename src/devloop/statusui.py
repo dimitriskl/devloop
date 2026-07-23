@@ -92,6 +92,7 @@ class WorkflowStepProgress:
 class WorkflowProgressActivity:
     event_freshness_seconds: float
     safe_text: str
+    attempt_elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -252,6 +253,7 @@ def project_workflow_progress(
         activity=WorkflowProgressActivity(
             event_freshness_seconds=max(0.0, event_freshness_seconds),
             safe_text=_safe_progress_text(activity),
+            attempt_elapsed_seconds=max(0.0, active_elapsed_seconds),
         ),
         issue_title=_safe_progress_text(issue_title),
         issue_position=max(0, issue_position),
@@ -687,7 +689,8 @@ def render_workflow_progress(
                     (
                         f"{active.status.value} {frame}",
                         f"pass {active.pass_number}",
-                        f"elapsed {format_duration(active.elapsed_seconds)}",
+                        "elapsed "
+                        f"{format_duration(projection.activity.attempt_elapsed_seconds)}",
                         "event "
                         f"{format_duration(projection.activity.event_freshness_seconds)} ago",
                     )
@@ -1109,6 +1112,7 @@ def _live_workflow_progress(
         activity=WorkflowProgressActivity(
             event_freshness_seconds=max(0.0, inactivity_seconds),
             safe_text=_safe_progress_text(activity),
+            attempt_elapsed_seconds=max(0.0, elapsed_seconds),
         ),
         issue_title=_safe_progress_text(issue_title),
         issue_position=max(0, issue_position),

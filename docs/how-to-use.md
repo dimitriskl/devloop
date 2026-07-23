@@ -173,8 +173,9 @@ references explicitly before applying.
 The shared dashboard lists every configured instance separately. Workflow and
 current-Issue rows are separated, completed timers freeze, rework time
 accumulates on the same row, and the active line includes model, reasoning,
-Fast, elapsed time, event freshness, and safe activity. Interactive terminals
-reuse one bounded region; redirected output is append-only. `NO_COLOR=1`
+Fast, current-attempt elapsed time, event freshness, and safe activity.
+Interactive terminals reuse one bounded region; redirected output is
+append-only. `NO_COLOR=1`
 disables color, and terminals that cannot encode Unicode use ASCII markers
 without losing status labels.
 
