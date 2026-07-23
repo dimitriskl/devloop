@@ -364,6 +364,21 @@ class RunIssueSignatureTests(unittest.TestCase):
                 ("qa", "qa"),
             ],
         )
+        self.assertEqual(
+            [
+                (
+                    step[7].timeout_seconds,
+                    step[7].checkpoint_seconds,
+                )
+                for step in runner.roles
+            ],
+            [
+                (1800, 300),
+                (1800, 240),
+                (1800, 240),
+                (1800, 240),
+            ],
+        )
 
     def test_dry_run_bounds_and_sanitizes_hostile_issue_metadata(self) -> None:
         class DryRunRunner:

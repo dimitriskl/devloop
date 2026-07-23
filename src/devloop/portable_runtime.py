@@ -9,7 +9,7 @@ from enum import Enum
 from itertools import count
 from queue import Empty
 from queue import Queue
-from threading import RLock, get_ident
+from threading import Event, RLock, get_ident
 from typing import Any, Iterator, TextIO
 
 
@@ -25,6 +25,11 @@ class PortableRuntimeEventKind(str, Enum):
 class _PortableInteractionKind(str, Enum):
     PREVIEW = "PREVIEW"
     RESPOND = "RESPOND"
+    STOP = "STOP"
+
+
+class PortableRuntimeStopped(RuntimeError):
+    """Raised in the workflow thread when the application is shutting down."""
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,7 @@ class PortableRuntimeBridge:
         self._request_ids = count(1)
         self._response_lock = RLock()
         self._content_size: tuple[int, int] | None = None
+        self._stop_requested = Event()
 
     def choose(
         self,
@@ -70,6 +76,8 @@ class PortableRuntimeBridge:
         request_id = next(self._request_ids)
         response: Queue[tuple[_PortableInteractionKind, str]] = Queue()
         with self._response_lock:
+            if self._stop_requested.is_set():
+                raise PortableRuntimeStopped("Portable application stopped.")
             self._responses[request_id] = response
         self._event_queue.put(
             PortableRuntimeEvent(
@@ -84,6 +92,8 @@ class PortableRuntimeBridge:
         render(default_key)
         while True:
             interaction, value = response.get()
+            if interaction is _PortableInteractionKind.STOP:
+                raise PortableRuntimeStopped("Portable application stopped.")
             if interaction is _PortableInteractionKind.PREVIEW:
                 render(value)
                 continue
@@ -105,6 +115,8 @@ class PortableRuntimeBridge:
         request_id = next(self._request_ids)
         response: Queue[tuple[_PortableInteractionKind, str]] = Queue()
         with self._response_lock:
+            if self._stop_requested.is_set():
+                raise PortableRuntimeStopped("Portable application stopped.")
             self._responses[request_id] = response
         self._event_queue.put(
             PortableRuntimeEvent(
@@ -114,11 +126,22 @@ class PortableRuntimeBridge:
                 input_history=tuple(history),
             )
         )
-        _interaction, value = response.get()
+        interaction, value = response.get()
+        if interaction is _PortableInteractionKind.STOP:
+            raise PortableRuntimeStopped("Portable application stopped.")
         with self._response_lock:
             self._responses.pop(request_id, None)
         self._publish_interaction_completed(request_id)
         return value
+
+    def request_stop(self) -> None:
+        """Release every blocking interaction when the application exits."""
+        self._stop_requested.set()
+        with self._response_lock:
+            responses = tuple(self._responses.values())
+            self._responses.clear()
+        for response in responses:
+            response.put((_PortableInteractionKind.STOP, ""))
 
     def show_screen(self, content: str) -> None:
         self._event_queue.put(

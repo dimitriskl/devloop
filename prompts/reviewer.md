@@ -20,6 +20,10 @@ You are the senior code reviewer gate for a local PRD issue loop.
 
 {{RUN_GOAL}}
 
+## Execution Budget
+
+{{EXECUTION_BUDGET}}
+
 ## Required Reading
 
 Read the issue file, PRD, repository diff, and relevant repository docs:

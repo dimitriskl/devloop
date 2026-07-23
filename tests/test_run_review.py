@@ -128,6 +128,42 @@ class RunReviewTests(unittest.TestCase):
         self.assertIn("FAILED     0004", rendered)
         self.assertIn("Focused verification failed.", rendered)
 
+    def test_review_upgrades_legacy_timeout_and_preserves_the_full_log_path(
+        self,
+    ) -> None:
+        log_path = (
+            r"E:\Worktrees\eConnectorV2-fulfillment-tools-unroutable-order-repair-dev"
+            r"\prd\fulfillment-tools-unroutable-order-repair\issues\.loop.logs"
+            r"\0001-attempt-9bb7217-760c5f7a-portable-step-step-"
+            r"9c30a1c0-57b4-4cf6-8b6d-a568dac11e01-coder-pass1.stderr.txt"
+        )
+        review = build_run_review(
+            [Issue("0001", "Long-running development", Path("0001.md"), False)],
+            {
+                "0001": {
+                    "status": "BLOCKED",
+                    "blocked_summary": (
+                        "codex exec failed with exit code 124. "
+                        f"See {log_path}."
+                    ),
+                }
+            },
+            loop_state_path=Path("README.loop.md"),
+            rerun_available=True,
+        )
+
+        rendered = render_run_review(review, RunReviewAction.EXIT)
+
+        self.assertIn(
+            "Execution Budget timeout expired before Codex returned a final "
+            "role result.",
+            rendered,
+        )
+        self.assertIn("Rerun the unfinished issue", rendered)
+        self.assertIn(log_path, rendered)
+        self.assertNotIn("exit code 124", rendered)
+        self.assertNotIn("...", review.issues[0].detail)
+
 
 if __name__ == "__main__":
     unittest.main()

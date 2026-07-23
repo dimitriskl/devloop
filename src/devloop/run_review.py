@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -7,13 +8,16 @@ from typing import Any, Mapping, Sequence
 
 from .issue_pack import Issue
 from .portable_workflow import IssueStatus, parse_issue_status
-from .terminal_text import compact_terminal_text
+from .terminal_text import compact_terminal_text, sanitize_terminal_text
 
 
 REVIEW_SCREEN_PATH = "Dev Loop > Completion Review"
 REVIEW_SUCCESS_HEADING = "WORKFLOW FINISHED - SUCCESS"
 REVIEW_ATTENTION_HEADING = "WORKFLOW FINISHED - ATTENTION REQUIRED"
-ISSUE_DETAIL_MAX_LENGTH = 100
+ISSUE_DETAIL_MAX_LENGTH = 4096
+LEGACY_CODEX_TIMEOUT_PATTERN = re.compile(
+    r"^codex exec failed with exit code 124\. See (?P<log_path>.+)\.$"
+)
 
 
 class RunReviewAction(str, Enum):
@@ -161,17 +165,11 @@ def _issue_detail(status: IssueStatus, state: Mapping[str, Any]) -> str:
         if isinstance(waiting_on, list):
             dependencies = ", ".join(str(item) for item in waiting_on if item)
             if dependencies:
-                return compact_terminal_text(
-                    f"waiting on {dependencies}",
-                    max_length=ISSUE_DETAIL_MAX_LENGTH,
-                )
+                return _normalize_issue_detail(f"waiting on {dependencies}")
     for key in ("blocked_summary", "qa_summary", "review_summary"):
         value = state.get(key)
         if value:
-            return compact_terminal_text(
-                value,
-                max_length=ISSUE_DETAIL_MAX_LENGTH,
-            )
+            return _normalize_issue_detail(value)
     passes = state.get("passes")
     if isinstance(passes, list):
         for pass_entry in reversed(passes):
@@ -188,11 +186,26 @@ def _issue_detail(status: IssueStatus, state: Mapping[str, Any]) -> str:
                         detail = values[0]
                         break
             if detail:
-                return compact_terminal_text(
-                    detail,
-                    max_length=ISSUE_DETAIL_MAX_LENGTH,
-                )
+                return _normalize_issue_detail(detail)
     return ""
+
+
+def _normalize_issue_detail(value: object) -> str:
+    normalized = " ".join(
+        sanitize_terminal_text(value, preserve_newlines=False).split()
+    )
+    legacy_timeout = LEGACY_CODEX_TIMEOUT_PATTERN.fullmatch(normalized)
+    if legacy_timeout is not None:
+        normalized = (
+            "Execution Budget timeout expired before Codex returned a final "
+            "role result. Changes already written remain in the worktree. "
+            "Rerun the unfinished issue to continue from them. Full log: "
+            f"{legacy_timeout.group('log_path')}"
+        )
+    return compact_terminal_text(
+        normalized,
+        max_length=ISSUE_DETAIL_MAX_LENGTH,
+    )
 
 
 def _render_issue_item(item: IssueReviewItem) -> str:
@@ -215,12 +228,18 @@ def _selected_action_summary(
     if selected_action is RunReviewAction.RERUN_REMAINING:
         issue_label = _counted_issue(review.remaining_count)
         return (
-            f"Rerun only the {review.remaining_count} unfinished {issue_label} now. "
+            f"Press Enter to rerun only the {review.remaining_count} "
+            f"unfinished {issue_label}. "
             "Completed issues remain skipped."
         )
     if review.remaining_count:
-        return "Exit now. The unfinished issue state is saved for a later run."
-    return "Exit Dev Loop. No unfinished selected issues remain."
+        return (
+            "Press Enter to exit. The unfinished issue state is saved for a "
+            "later run."
+        )
+    return (
+        "Press Enter to exit Dev Loop. No unfinished selected issues remain."
+    )
 
 
 def _counted_issue(count: int) -> str:

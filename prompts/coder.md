@@ -20,6 +20,10 @@ You are the coding worker for a local PRD issue loop.
 
 {{RUN_GOAL}}
 
+## Execution Budget
+
+{{EXECUTION_BUDGET}}
+
 ## Required Reading
 
 Read the issue file and PRD first. Then read every existing repository document

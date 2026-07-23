@@ -92,6 +92,20 @@ class DevLoopAttemptResult:
     review_action: RunReviewAction
 
 
+def renew_exhausted_scheduler_for_explicit_start(
+    state_writer: LoopStateWriter,
+    issues: list[Issue],
+    *,
+    dry_run: bool,
+) -> bool:
+    if dry_run or state_writer.scheduling_phase() is not SchedulingPhase.EXHAUSTED:
+        return False
+    state_writer.reset_scheduler_retry_budget(
+        issue.number for issue in issues
+    )
+    return True
+
+
 def execute_dependency_schedule(
     *,
     issues: list[Issue],
@@ -311,9 +325,14 @@ def choose_run_review_action(
     if not interactive:
         render_app_screen(render_run_review(review, RunReviewAction.EXIT))
         return RunReviewAction.EXIT
+    default_action = (
+        RunReviewAction.RERUN_REMAINING
+        if review.rerun_available
+        else RunReviewAction.EXIT
+    )
     selected = choose_menu_option(
         options,
-        default_key=RunReviewAction.EXIT.value,
+        default_key=default_action.value,
         cancel_key=RunReviewAction.EXIT.value,
         render=lambda value: render_app_screen(
             render_run_review(review, RunReviewAction(value))
@@ -543,6 +562,16 @@ def _run_devloop_attempt(
                 return 0
     except ValueError as exc:
         parser.error(f"Codex Execution Settings preflight failed: {exc}")
+    if renew_exhausted_scheduler_for_explicit_start(
+        state_writer,
+        issues,
+        dry_run=args.dry_run,
+    ):
+        print(
+            f"Start development renewed {len(issues)} unfinished issue "
+            f"{'budget' if len(issues) == 1 else 'budgets'} from the "
+            "previous exhausted run."
+        )
     state_writer.record_run_start(
         repo_root=repo_root,
         prd_path=prd_in_repo,
@@ -998,6 +1027,7 @@ def run_issue(
                     step.capability_profile.skills,
                     step.capability_profile.agent_references,
                     step.guidance.text if step.guidance is not None else None,
+                    step.execution_budget,
                 )
                 for step in workflow.primary_path()
                 if catalog.resolve(step.component_id).scope is StepScope.ISSUE

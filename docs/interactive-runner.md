@@ -188,6 +188,23 @@ Every step also shows an independent Execution Budget. Use `budget` to set its
 overall timeout and checkpoint inactivity deadline without changing its model,
 reasoning effort, or Fast choice. These limits are snapshotted with the
 workflow and enforced for Analysis and each development role attempt.
+If a role reaches either limit, Completion Review names the exact timeout
+instead of showing only exit code 124. Repository changes already written
+remain in the implementation worktree; rerun the unfinished issue to continue
+from that partial work. Each role prompt also states its limits so Codex can
+reserve time for focused verification and its required structured response.
+Previously saved exit-code-124 summaries are upgraded when displayed, and
+failure details retain and wrap their full sanitized log path instead of
+truncating it to 100 characters.
+When unfinished issues remain, Completion Review selects `Rerun unfinished
+issues` by default, so Enter renews their exhausted scheduler budgets and
+continues from changes already present in the worktree. Esc still selects
+`Exit Dev Loop`. Moving the highlight only previews an action; the details,
+status row, and action bar explicitly say that Enter confirms it.
+Starting development for a resumed PRD also renews an already exhausted
+scheduler before its first projection. The explicit Start development
+confirmation therefore launches the unfinished work directly instead of
+immediately returning to the previous Completion Review.
 Each step owns an independent capability profile. Enter `capabilities` to
 search and toggle installed Skills and Agent References for the selected Step
 Instance. Required capabilities remain enabled and locked with the

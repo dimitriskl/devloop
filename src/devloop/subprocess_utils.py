@@ -13,6 +13,8 @@ PROCESS_EXIT_GRACE_SECONDS = 1.0
 PROCESS_TERMINATE_GRACE_SECONDS = 5.0
 BUDGET_POLL_SECONDS = 0.05
 PROCESS_TREE_ATTRIBUTE = "_devloop_process_group_id"
+_ACTIVE_PROCESS_TREES: set[subprocess.Popen[str]] = set()
+_ACTIVE_PROCESS_TREES_LOCK = threading.RLock()
 
 
 class AttemptExecutionBudget:
@@ -150,6 +152,8 @@ def process_tree_creation_kwargs() -> dict[str, int | bool]:
 
 
 def register_process_tree(process: subprocess.Popen[str]) -> None:
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        _ACTIVE_PROCESS_TREES.add(process)
     if os.name != "nt":
         try:
             process_group_id = os.getpgid(process.pid)
@@ -159,22 +163,41 @@ def register_process_tree(process: subprocess.Popen[str]) -> None:
             setattr(process, PROCESS_TREE_ATTRIBUTE, process_group_id)
 
 
-def terminate_process(process: subprocess.Popen[str]) -> None:
-    _signal_process_tree(process, force=False)
-    try:
-        process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-    if not _process_tree_is_alive(process):
-        return
+def unregister_process_tree(process: subprocess.Popen[str]) -> None:
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        _ACTIVE_PROCESS_TREES.discard(process)
 
-    _signal_process_tree(process, force=True)
+
+def terminate_active_process_trees() -> None:
+    """Terminate subprocess trees still owned by the active application."""
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        processes = tuple(_ACTIVE_PROCESS_TREES)
+    for process in processes:
+        if getattr(process, "poll", lambda: None)() is None:
+            terminate_process(process)
+        else:
+            unregister_process_tree(process)
+
+
+def terminate_process(process: subprocess.Popen[str]) -> None:
     try:
-        process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        # Never hold the workflow indefinitely because an OS process refuses
-        # to be reaped.
-        pass
+        _signal_process_tree(process, force=False)
+        try:
+            process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        if not _process_tree_is_alive(process):
+            return
+
+        _signal_process_tree(process, force=True)
+        try:
+            process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            # Never hold the workflow indefinitely because an OS process refuses
+            # to be reaped.
+            pass
+    finally:
+        unregister_process_tree(process)
 
 
 def _signal_process_tree(process: subprocess.Popen[str], *, force: bool) -> None:

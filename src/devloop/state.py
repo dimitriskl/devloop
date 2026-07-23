@@ -777,6 +777,22 @@ class LoopStateWriter:
             raise ValueError("Active scheduling attempt has a terminal phase.")
         return {"issue": issue, "phase": phase, "ordinal": ordinal}
 
+    def scheduling_phase(self) -> SchedulingPhase | None:
+        scheduler_state = self.state.get("dependency_scheduler", {})
+        if not isinstance(scheduler_state, dict):
+            raise ValueError("Dependency Scheduler state must be an object.")
+        phase = scheduler_state.get("phase")
+        if phase is None:
+            return None
+        if not isinstance(phase, str):
+            raise ValueError("Dependency Scheduler phase must be a string.")
+        try:
+            return SchedulingPhase(phase)
+        except ValueError as error:
+            raise ValueError(
+                f"Unsupported Dependency Scheduler phase: {phase!r}."
+            ) from error
+
     def normal_attempted_issues(self) -> frozenset[str]:
         scheduler_state = self.state.get("dependency_scheduler", {})
         if not isinstance(scheduler_state, dict):

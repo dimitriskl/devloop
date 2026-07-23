@@ -20,6 +20,10 @@ You are the QA automation gate for a local PRD issue loop.
 
 {{RUN_GOAL}}
 
+## Execution Budget
+
+{{EXECUTION_BUDGET}}
+
 ## Required Reading
 
 Read the issue file, PRD, changed tests, changed production files, and relevant

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from textual.containers import Horizontal
 from textual.widgets import OptionList, Static
@@ -10,7 +11,8 @@ from textual.widgets import OptionList, Static
 from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
 from devloop.issue_pack import Issue
 from devloop.cli import choose_run_review_action
-from devloop.run_review import RunReviewAction, build_run_review
+from devloop.run_review import RunReviewAction, build_run_review, render_run_review
+from devloop.statusui import IssueDashboard, Stage
 from devloop.portable_ui.app import (
     PortableApplicationShell,
     PortableLogOverlay,
@@ -218,6 +220,57 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(app.operation_result, 0)
 
+    async def test_shell_shutdown_releases_worker_and_terminates_processes(
+        self,
+    ) -> None:
+        bridge = PortableRuntimeBridge()
+        operation_finished = threading.Event()
+        fallback_cleanup_used = threading.Event()
+
+        def operation() -> int:
+            try:
+                bridge.choose(
+                    (("continue", "Continue"), ("quit", "Quit")),
+                    default_key="continue",
+                    cancel_key="quit",
+                    render=lambda _key: None,
+                )
+                return 0
+            finally:
+                operation_finished.set()
+
+        app = PortableApplicationShell(bridge, operation)
+        with mock.patch(
+            "devloop.portable_ui.app.terminate_active_process_trees",
+        ) as terminate_processes:
+            async with app.run_test(size=(100, 30)) as pilot:
+                menu = app.query_one("#portable-navigation", OptionList)
+                for _ in range(20):
+                    await pilot.pause()
+                    if menu.option_count == 2:
+                        break
+
+                request_id = app._active_request_id
+                self.assertIsNotNone(request_id)
+
+                def release_broken_shutdown() -> None:
+                    if not operation_finished.wait(timeout=0.5):
+                        fallback_cleanup_used.set()
+                        bridge.respond(request_id or 0, "quit")
+
+                cleanup = threading.Thread(
+                    target=release_broken_shutdown,
+                    daemon=True,
+                )
+                cleanup.start()
+                app.exit()
+
+        cleanup.join(timeout=1)
+        self.assertTrue(operation_finished.is_set())
+        self.assertFalse(fallback_cleanup_used.is_set())
+        self.assertEqual(app.operation_result, 130)
+        terminate_processes.assert_called_once_with()
+
     async def test_help_and_logs_open_inside_the_application(self) -> None:
         app = PortableApplicationShell(PortableRuntimeBridge(), lambda: 0)
         async with app.run_test(size=(100, 30)) as pilot:
@@ -279,18 +332,55 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(navigation.region.height, 0)
             self.assertIn("Changes:", str(context.render()))
 
-    async def test_shell_reports_the_detail_pane_size_to_the_runtime(self) -> None:
+    async def test_shell_reports_the_allocated_detail_pane_size_to_the_runtime(
+        self,
+    ) -> None:
         bridge = PortableRuntimeBridge()
-        app = PortableApplicationShell(bridge, lambda: 0)
+        release_operation = threading.Event()
 
-        async with app.run_test(size=(160, 40)) as pilot:
-            await pilot.pause()
-            detail_size = app.query_one("#portable-detail", Static).content_size
-
-            self.assertEqual(
-                bridge.content_size(fallback=(1, 1)),
-                (detail_size.width, detail_size.height),
+        def operation() -> int:
+            dashboard = IssueDashboard(
+                issue_number="0001",
+                issue_title="Trace and Classify One FT Order",
+                position=1,
+                total=8,
+                frame_seconds=0.05,
             )
+            try:
+                dashboard.show_scheduler_status(
+                    "SCHEDULER · BLOCKER RESOLUTION · round 5/5 · "
+                    "1 ready · 7 waiting · next 0001"
+                )
+                dashboard.begin_role(Stage.DEVELOPMENT, 1)
+                release_operation.wait(timeout=2)
+                return 0
+            finally:
+                dashboard.close()
+
+        app = PortableApplicationShell(bridge, operation)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            try:
+                detail = app.query_one("#portable-detail", Static)
+                for _ in range(20):
+                    await pilot.pause()
+                    if "SCHEDULER" in str(detail.render()):
+                        break
+                await pilot.resize_terminal(190, 40)
+                for _ in range(20):
+                    await pilot.pause()
+                    if "next 0001" in str(detail.render()):
+                        break
+                detail_size = detail.content_region.size
+
+                self.assertEqual(
+                    bridge.content_size(fallback=(1, 1)),
+                    (detail_size.width, detail_size.height),
+                )
+                self.assertGreaterEqual(detail_size.width, 140)
+                self.assertIn("next 0001", str(detail.render()))
+            finally:
+                release_operation.set()
 
     async def test_input_view_supports_history_and_alt_v(self) -> None:
         bridge = PortableRuntimeBridge()
@@ -356,6 +446,46 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Last workflow view", detail)
             self.assertIn("WORKFLOW FINISHED", status)
 
+    async def test_completion_review_wraps_the_full_failure_log_path(self) -> None:
+        bridge = PortableRuntimeBridge()
+        log_path = (
+            r"E:\Worktrees\eConnectorV2-fulfillment-tools-unroutable-order-repair-dev"
+            r"\prd\fulfillment-tools-unroutable-order-repair\issues\.loop.logs"
+            r"\0001-attempt-9bb7217-760c5f7a-portable-step-step-"
+            r"9c30a1c0-57b4-4cf6-8b6d-a568dac11e01-coder-pass1.stderr.txt"
+        )
+        review = build_run_review(
+            [Issue("0001", "Long-running development", Path("0001.md"), False)],
+            {
+                "0001": {
+                    "status": "BLOCKED",
+                    "blocked_summary": (
+                        "codex exec failed with exit code 124. "
+                        f"See {log_path}."
+                    ),
+                }
+            },
+            loop_state_path=Path("README.loop.md"),
+            rerun_available=True,
+        )
+
+        def operation() -> int:
+            bridge.show_screen(render_run_review(review, RunReviewAction.EXIT))
+            return 2
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            rendered = str(app.query_one("#portable-detail", Static).render())
+
+            self.assertIn("Execution Budget timeout expired", rendered)
+            self.assertIn("coder-pass1.stderr.txt", rendered)
+            self.assertNotIn("...", rendered)
+
     async def test_f4_starts_with_all_completion_review_failures(self) -> None:
         bridge = PortableRuntimeBridge()
 
@@ -388,7 +518,9 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("WAITING    0003", review_log)
             self.assertIn("waiting on 0002", review_log)
 
-    async def test_completion_review_can_rerun_unfinished_issues(self) -> None:
+    async def test_completion_review_defaults_to_rerun_unfinished_issues(
+        self,
+    ) -> None:
         bridge = PortableRuntimeBridge()
         selected_actions: list[RunReviewAction] = []
         review = build_run_review(
@@ -412,8 +544,12 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 if menu.option_count == 2:
                     break
 
-            self.assertEqual(menu.highlighted, 1)
-            await pilot.press("up", "enter")
+            self.assertEqual(menu.highlighted, 0)
+            self.assertIn(
+                "Enter Select",
+                str(app.query_one("#portable-actions", Static).render()),
+            )
+            await pilot.press("enter")
             for _ in range(20):
                 await pilot.pause()
                 if app.operation_result is not None:
@@ -424,7 +560,7 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 [RunReviewAction.RERUN_REMAINING],
             )
             self.assertIn(
-                "Rerun only the 1 unfinished issue now",
+                "Press Enter to rerun only the 1 unfinished issue",
                 str(app.query_one("#portable-detail", Static).render()),
             )
 

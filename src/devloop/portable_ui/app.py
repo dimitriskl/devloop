@@ -22,10 +22,12 @@ from ..portable_runtime import (
     PortableRuntimeBridge,
     PortableRuntimeEvent,
     PortableRuntimeEventKind,
+    PortableRuntimeStopped,
     portable_runtime_session,
     route_worker_output,
 )
 from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
+from ..subprocess_utils import terminate_active_process_trees
 from ..terminal_text import sanitize_terminal_text
 from ..version import VERSION
 
@@ -36,9 +38,26 @@ DEFAULT_ACTION_BAR = (
     "F1 Help | F2 Primary | F3 View | F4 Logs | F5 Context | "
     "F9 Actions | Esc Back"
 )
+SELECTION_ACTION_BAR = f"Enter Select | {DEFAULT_ACTION_BAR}"
 CAPTURED_ACTIVITY_TITLE = "Captured Activity"
 COMPLETION_REVIEW_LOG_TITLE = "Completion Review and Captured Activity"
 RUN_CONTEXT_TITLE = "Run context"
+
+
+class PortableDetail(Static):
+    def __init__(
+        self,
+        content: str,
+        *,
+        report_content_size: Callable[[int, int], None],
+        **kwargs: object,
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._report_content_size = report_content_size
+
+    def on_resize(self, _event: events.Resize) -> None:
+        size = self.content_region.size
+        self._report_content_size(size.width, size.height)
 
 
 class PortableTextOverlay(ModalScreen[None]):
@@ -328,6 +347,7 @@ class PortableApplicationShell(App[None]):
         self._option_labels: dict[str, str] = {}
         self._pending_working_state: tuple[int, str] | None = None
         self._terminal_too_small = False
+        self._operation_stop_requested = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="portable-shell"):
@@ -352,8 +372,9 @@ class PortableApplicationShell(App[None]):
                     yield OptionList(id="portable-navigation")
                 with Vertical(id="portable-right-pane"):
                     yield Static("Selected details", classes="portable-pane-title")
-                    yield Static(
+                    yield PortableDetail(
                         render_logo().rstrip(),
+                        report_content_size=self._bridge.set_content_size,
                         id="portable-detail",
                         markup=False,
                     )
@@ -403,8 +424,22 @@ class PortableApplicationShell(App[None]):
             )
         self.call_after_refresh(self._sync_runtime_content_size)
 
+    def on_unmount(self) -> None:
+        self._stop_operation()
+
+    def _stop_operation(self) -> None:
+        if self._operation_stop_requested:
+            return
+        self._operation_stop_requested = True
+        self._active_request_id = None
+        self._cancel_key = None
+        if self.operation_result is None:
+            self.operation_result = 130
+        self._bridge.request_stop()
+        terminate_active_process_trees()
+
     def _sync_runtime_content_size(self) -> None:
-        size = self.query_one("#portable-detail", Static).content_size
+        size = self.query_one("#portable-detail", Static).content_region.size
         self._bridge.set_content_size(size.width, size.height)
 
     def _execute_operation(self) -> None:
@@ -417,6 +452,10 @@ class PortableApplicationShell(App[None]):
             return
         except KeyboardInterrupt:
             self.call_from_thread(self._operation_finished, 130)
+            return
+        except PortableRuntimeStopped:
+            if self.operation_result is None:
+                self.operation_result = 130
             return
         except Exception as error:
             self.call_from_thread(self._operation_failed, error)
@@ -626,8 +665,10 @@ class PortableApplicationShell(App[None]):
         )
         menu.highlighted = highlighted
         menu.focus()
-        self.query_one("#portable-status", Static).update("WAITING FOR SELECTION")
-        self.query_one("#portable-actions", Static).update(DEFAULT_ACTION_BAR)
+        self.query_one("#portable-status", Static).update(
+            "WAITING FOR SELECTION · ENTER TO CONFIRM"
+        )
+        self.query_one("#portable-actions", Static).update(SELECTION_ACTION_BAR)
 
     def _show_input(self, event: PortableRuntimeEvent) -> None:
         self._active_request_id = event.request_id

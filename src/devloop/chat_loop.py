@@ -27,6 +27,7 @@ from .subprocess_utils import (
     register_process_tree,
     reap_process_after_terminal_event,
     terminate_process,
+    unregister_process_tree,
 )
 from .terminal_text import sanitize_terminal_text
 
@@ -304,6 +305,7 @@ def run_streaming(
         close = getattr(process.stdout, "close", None)
         if callable(close):
             close()
+        unregister_process_tree(process)
     if budget_expiration is not None:
         message = f"{budget_expiration}\n"
         captured.append(message)

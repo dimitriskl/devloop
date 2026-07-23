@@ -12,6 +12,38 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: Preflight every non-repository prerequisite, show which acceptance gates are unavailable, and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
 - Last seen: 2026-07-21
 
+## Validate Authenticated External Endpoints Before Use
+
+- Applies to: coder, reviewer, QA, stored integration configuration and authenticated HTTP clients
+- Lesson: Treat a stored service URL as untrusted input; validate an absolute HTTPS base URI immediately before constructing a client or attaching credentials, and do not expose unused raw endpoint fields.
+- Evidence: Issue 0001 review found that a stored Fulfillment Tools URL could receive bearer-authenticated requests without an absolute-HTTPS check, allowing credentials to be sent to an unsafe or plaintext destination.
+- Action: Reject malformed, relative, and non-HTTPS endpoints before any authenticated request, return a generic safe error, and add regressions proving no client call or credential transmission occurs.
+- Last seen: 2026-07-23
+
+## Classify Remote Absence Only After Complete Retrieval
+
+- Applies to: coder, reviewer, QA, paginated APIs and diagnostic classification
+- Lesson: A locally filtered first page cannot prove that a remote record is missing when the source supports pagination.
+- Evidence: Issue 0001 read only the first 500 facility listings before classifying missing data, while an existing integration helper showed that the same listing source can span multiple pages.
+- Action: Use a supported targeted lookup or bounded complete pagination, include required identity variants, and test a match beyond the first page before returning a missing classification.
+- Last seen: 2026-07-23
+
+## Use Authoritative Evidence For Diagnostic Inference
+
+- Applies to: coder, reviewer, QA, diagnostic services and multi-source classification
+- Lesson: Do not substitute adjacent inventory or balance data for required routing or decision evidence, and do not collapse missing and ambiguous identities into the same result.
+- Evidence: Issue 0001 inferred a facility from ERP warehouse and balance rows without the required process, reservation, and routing evidence; it also mapped both missing and multiple canonical identities to one generic warning.
+- Action: Map each decision to its authoritative evidence source, infer only when exactly one valid candidate remains, preserve distinct missing and ambiguous outcomes, and test every evidence path through the full service boundary.
+- Last seen: 2026-07-23
+
+## Keep Reviewer Rework Within The Execution Budget
+
+- Applies to: coder rework, reviewer fix lists, Codex execution timeouts and resumed attempts
+- Lesson: A broad review fix list needs a dependency-ordered, time-budgeted rework plan that leaves enough time for focused verification and a valid structured result.
+- Evidence: Issue 0001 review returned six fixes spanning security, pagination, inference, state modeling, tests, and repository hygiene; the following coder rework reached the 1,800-second timeout and left the issue blocked.
+- Action: At rework start, inspect the current partial diff, group fixes into coherent high-severity-first slices, reserve time for gates and schema output, and make the next attempt continue verified partial edits instead of restarting.
+- Last seen: 2026-07-23
+
 ## Retry Equivalent Blockers Only After State Changes
 
 - Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
@@ -158,11 +190,11 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Check Frontend Dependency Availability Before Angular Gates
 
-- Applies to: coder, reviewer, QA, Angular worktrees
-- Lesson: Missing `node_modules`, `package-lock.json`, or `@angular/build` builder packages are setup residuals, not application failures.
-- Evidence: Issues 0001 and 0005 repeatedly could not start Karma or Angular build because the worktree lacked local frontend dependencies/builders, including the July 4 SQL Navigator logs run where dependency probes returned missing before Angular compilation.
-- Action: Start Angular verification with `Test-Path` checks for web `node_modules`, `package-lock.json`, and required builder packages; report unavailable browser/build gates explicitly and use TypeScript, i18n, and backend gates where available.
-- Last seen: 2026-07-04
+- Applies to: coder, reviewer, QA, Angular worktrees and dependency-cache hygiene
+- Lesson: Missing `node_modules`, lockfiles, or Angular builder packages are setup residuals rather than application failures, but restoring dependencies must not leave large untracked caches in the repository.
+- Evidence: Issue 0001 could not run Angular build or Karma because the required `@angular/build` builders were unavailable; review also found about 744 MB of untracked npm caches in the worktree.
+- Action: Preflight the lockfile, `node_modules`, and required builders; keep package caches outside the worktree or narrowly ignored, remove generated caches before review, and report any unavailable browser/build gate explicitly.
+- Last seen: 2026-07-23
 
 ## Treat Disk-Full Runtime Failures As Infrastructure Blockers
 

@@ -38,6 +38,7 @@ from .subprocess_utils import (
     reap_process_after_terminal_event,
     run_captured_text,
     terminate_process,
+    unregister_process_tree,
 )
 from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext, Preset, render_template
@@ -62,6 +63,10 @@ MAX_PORTABLE_LOG_PATH_LENGTH = 259
 LONGEST_ROLE_LOG_SUFFIX = ".last-message.json"
 FAST_CLI_SERVICE_TIER = "fast"
 STANDARD_CLI_SERVICE_TIER = "default"
+EXECUTION_BUDGET_EXPIRATION_PATTERN = re.compile(
+    r"Execution Budget (?:timeout|checkpoint deadline) "
+    r"\([^)\r\n]+\) expired\."
+)
 ROLE_STAGES = {
     "coder": Stage.DEVELOPMENT,
     "reviewer": Stage.REVIEW,
@@ -307,6 +312,7 @@ def run_streaming_codex_command(
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
+        unregister_process_tree(process)
 
     if budget_expiration is not None:
         stderr_parts.append(f"{budget_expiration}\n")
@@ -489,6 +495,7 @@ class CodexRunner:
             skill_paths=skill_paths,
             agent_paths=agent_paths,
             step_guidance=step_guidance,
+            execution_budget=execution_budget,
         )
 
         prefix_parts = [slugify_log_token(issue.number) or "issue"]
@@ -573,7 +580,11 @@ class CodexRunner:
         if result.returncode != 0:
             return RoleResult(
                 status="BLOCKED",
-                summary=f"codex exec failed with exit code {result.returncode}. See {stderr_path}.",
+                summary=role_execution_failure_summary(
+                    returncode=result.returncode,
+                    stderr=result.stderr,
+                    stderr_path=stderr_path,
+                ),
                 raw_message=result.stderr,
             )
 
@@ -700,6 +711,7 @@ class CodexRunner:
             skill_paths = raw_step[4] if len(raw_step) > 4 else None
             agent_paths = raw_step[5] if len(raw_step) > 5 else None
             step_guidance = raw_step[6] if len(raw_step) > 6 else None
+            execution_budget = raw_step[7] if len(raw_step) > 7 else None
             prompt_session_id = f"dry-run-{instance_id}"
             prompt = self.build_prompt(
                 role=role,
@@ -714,6 +726,7 @@ class CodexRunner:
                 skill_paths=skill_paths,
                 agent_paths=agent_paths,
                 step_guidance=step_guidance,
+                execution_budget=execution_budget,
             )
             issue_slug = slugify_log_token(issue.number) or "issue"
             step_slug = slugify_log_token(display_name) or "step"
@@ -823,6 +836,7 @@ class CodexRunner:
         skill_paths: Iterable[str] | None = None,
         agent_paths: Iterable[str] | None = None,
         step_guidance: str | None = None,
+        execution_budget: ExecutionBudget | None = None,
     ) -> str:
         role_config = self.preset.roles.get(role, {})
         execution_role = role_adapter or role
@@ -858,6 +872,9 @@ class CodexRunner:
             ),
             "REQUIRED_DOCS": self.preset.required_docs,
             "RUN_GOAL": DEVLOOP_RUN_GOAL,
+            "EXECUTION_BUDGET": execution_budget_prompt_guidance(
+                execution_budget
+            ),
             "BUNDLE_MEMORY_DOCS": self.bundle_memory_docs(),
             "SKILL_PATHS": (
                 tuple(skill_paths)
@@ -928,6 +945,45 @@ def result_to_dict(result: RoleResult | None) -> dict[str, Any]:
         "fix_list": result.fix_list,
         "residual_risks": result.residual_risks,
     }
+
+
+def execution_budget_prompt_guidance(
+    execution_budget: ExecutionBudget | None,
+) -> str:
+    if execution_budget is None:
+        return (
+            "No explicit Execution Budget was supplied. Still finish with the "
+            "Required Final Response promptly."
+        )
+    return (
+        f"- Hard timeout: {execution_budget.timeout_seconds:g} seconds from "
+        "attempt start.\n"
+        "- Inactivity checkpoint: "
+        f"{execution_budget.checkpoint_seconds:g} seconds without backend "
+        "activity.\n\n"
+        "The runner enforces both limits. Plan the work and focused "
+        "verification so you stop repository activity and return the Required "
+        "Final Response before the hard timeout. Do not start an optional or "
+        "broad verification command when the remaining time may be "
+        "insufficient; record any unrun gate in `residual_risks`."
+    )
+
+
+def role_execution_failure_summary(
+    *,
+    returncode: int,
+    stderr: str,
+    stderr_path: Path,
+) -> str:
+    expiration = EXECUTION_BUDGET_EXPIRATION_PATTERN.search(stderr)
+    if returncode == 124 and expiration is not None:
+        return (
+            f"{expiration.group(0)} Codex did not return a final role result "
+            "before termination. Changes already written remain in the "
+            "worktree. Rerun the unfinished issue to continue from them. "
+            f"See {stderr_path}."
+        )
+    return f"codex exec failed with exit code {returncode}. See {stderr_path}."
 
 
 def list_of_strings(value: Any) -> list[str]:

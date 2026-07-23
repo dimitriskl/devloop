@@ -187,6 +187,55 @@ class CodexCommandSettingsTests(unittest.TestCase):
 
 
 class RolePromptIdentityTests(unittest.TestCase):
+    def test_role_prompt_explains_the_enforced_execution_budget(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Long-running development\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"coder": {"skills": [], "agents": []}},
+            )
+            runner.use_self_improvement_wiki = False
+
+            prompt = runner.build_prompt(
+                role="coder",
+                issue=Issue(
+                    "0001",
+                    "Long-running development",
+                    issue_path,
+                    False,
+                ),
+                pass_number=1,
+                fix_list=[],
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=1800,
+                    checkpoint_seconds=300,
+                ),
+            )
+
+        self.assertIn("## Execution Budget", prompt)
+        self.assertIn("Hard timeout: 1800 seconds", prompt)
+        self.assertIn(
+            "Inactivity checkpoint: 300 seconds without backend activity",
+            prompt,
+        )
+        self.assertIn(
+            "return the Required Final Response before the hard timeout",
+            prompt,
+        )
+
     def test_step_capabilities_and_guidance_override_role_defaults_in_the_prompt(
         self,
     ) -> None:
@@ -1133,6 +1182,77 @@ class RolePromptIdentityTests(unittest.TestCase):
 
 
 class StreamingCodexRunnerTests(unittest.TestCase):
+    def test_role_timeout_reports_the_execution_budget_cause_and_recovery(
+        self,
+    ) -> None:
+        repository_root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Long-running development\n", encoding="utf-8")
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(
+                root=repository_root,
+                prompts=repository_root / "prompts",
+                schemas=repository_root / "schemas",
+            )
+            runner.repo_root = root
+            runner.prd_path = root / "prd.md"
+            runner.issues_index = root / "README.md"
+            runner.preset = Preset(
+                name="test",
+                required_docs=[],
+                roles={"coder": {"skills": [], "agents": []}},
+            )
+            runner.codex = "codex"
+            runner.sandbox = "workspace-write"
+            runner.approval_policy = "never"
+            runner.log_root = root / ".loop.logs"
+            runner.use_self_improvement_wiki = False
+            runner.ensure_log_root()
+            completed = codex_runner.subprocess.CompletedProcess(
+                ["codex"],
+                124,
+                stdout="",
+                stderr="Execution Budget timeout (1800 seconds) expired.\n",
+            )
+
+            with mock.patch.object(
+                codex_runner,
+                "build_codex_exec_command",
+                return_value=["codex"],
+            ), mock.patch.object(
+                runner,
+                "run_codex_exec_with_connection_retries",
+                return_value=completed,
+            ):
+                result = runner.run_role(
+                    role="coder",
+                    issue=Issue(
+                        "0001",
+                        "Long-running development",
+                        issue_path,
+                        False,
+                    ),
+                    pass_number=1,
+                    execution_budget=ExecutionBudget(
+                        timeout_seconds=1800,
+                        checkpoint_seconds=300,
+                    ),
+                )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn(
+            "Execution Budget timeout (1800 seconds) expired.",
+            result.summary,
+        )
+        self.assertIn(
+            "Changes already written remain in the worktree",
+            result.summary,
+        )
+        self.assertIn("Rerun the unfinished issue", result.summary)
+        self.assertNotIn("failed with exit code 124", result.summary)
+
     def test_every_delivery_role_maps_to_its_visible_phase(self) -> None:
         self.assertIs(codex_runner.stage_for_role("coder"), Stage.DEVELOPMENT)
         self.assertIs(codex_runner.stage_for_role("reviewer"), Stage.REVIEW)

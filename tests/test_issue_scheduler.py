@@ -202,6 +202,57 @@ class DependencySchedulerTests(unittest.TestCase):
             "unfinished-rerun-requested",
         )
 
+    def test_explicit_start_renews_an_exhausted_run_before_scheduling(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            index = root / "README.md"
+            index.write_text("", encoding="utf-8")
+            issue = Issue("0001", "First", root / "0001.md", False)
+            writer = LoopStateWriter(index)
+            writer.issue_state(issue)["status"] = IssueStatus.BLOCKED.value
+            writer.state["dependency_scheduler"] = {
+                "normal_attempted": ["0001"],
+                "additional_passes": {"0001": 5},
+                "phase": SchedulingPhase.EXHAUSTED.value,
+            }
+            writer.flush()
+            calls: list[tuple[str, SchedulingPhase, int]] = []
+
+            def execute(
+                scheduled: Issue,
+                phase: SchedulingPhase,
+                ordinal: int,
+            ) -> RoleResult:
+                calls.append((scheduled.number, phase, ordinal))
+                writer.issue_state(scheduled)["status"] = IssueStatus.COMPLETED.value
+                return RoleResult(status="PASS")
+
+            with redirect_stderr(StringIO()):
+                renewed = cli.renew_exhausted_scheduler_for_explicit_start(
+                    writer,
+                    [issue],
+                    dry_run=False,
+                )
+            self.assertIs(
+                writer.scheduling_phase(),
+                SchedulingPhase.NORMAL_SCHEDULING,
+            )
+            result = execute_dependency_schedule(
+                issues=[issue],
+                graph=IssueDependencyGraph([issue]),
+                state_writer=writer,
+                execute_issue=execute,
+            )
+
+        self.assertTrue(renewed)
+        self.assertTrue(result.completed)
+        self.assertEqual(
+            calls,
+            [("0001", SchedulingPhase.BLOCKER_RESOLUTION, 1)],
+        )
+
     def test_rerun_unlocks_issue_whose_completed_dependency_was_filtered_out(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -20,6 +20,7 @@ from devloop.portable_runtime import (
     PortableRoutedStream,
     PortableRuntimeBridge,
     PortableRuntimeEventKind,
+    PortableRuntimeStopped,
 )
 from devloop.portable_runtime import portable_runtime_session
 from devloop.terminal_editor import TerminalEditor
@@ -121,6 +122,35 @@ class PortableActivityFeedTests(unittest.TestCase):
 
 
 class PortableRuntimeBridgeTests(unittest.TestCase):
+    def test_stop_request_releases_a_blocked_choice(self) -> None:
+        bridge = PortableRuntimeBridge()
+        stopped: list[PortableRuntimeStopped] = []
+
+        def choose() -> None:
+            try:
+                bridge.choose(
+                    (("continue", "Continue"), ("exit", "Exit")),
+                    default_key="continue",
+                    cancel_key="exit",
+                    render=lambda _key: None,
+                )
+            except PortableRuntimeStopped as error:
+                stopped.append(error)
+
+        worker = Thread(target=choose)
+        worker.start()
+        request = bridge.next_event(timeout=1)
+
+        bridge.request_stop()
+        worker.join(timeout=1)
+
+        self.assertIs(
+            request.kind,
+            PortableRuntimeEventKind.CHOICE_REQUESTED,
+        )
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(stopped), 1)
+
     def test_run_context_is_published_as_explicit_runtime_state(self) -> None:
         bridge = PortableRuntimeBridge()
         context = PortableRunContext(

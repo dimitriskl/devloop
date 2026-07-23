@@ -173,6 +173,10 @@ actionable result inside the final view rather than a scrolling error block.
   workflow, Git, state, or Codex operations.
 - Ctrl+C opens a stop dialog instead of terminating the renderer. Available
   choices reflect what the current operation can safely do.
+- If the terminal delivers Ctrl+C as a process-level interrupt, application
+  teardown releases blocked menu/input waits and terminates owned subprocess
+  trees before asyncio closes its worker executor. The shell prompt therefore
+  returns without the 300-second executor-join warning.
 - Recoverable failures appear in an error overlay with Retry, Details, Back, or
   Exit actions as appropriate.
 - An unhandled error restores the terminal before reporting one concise startup
