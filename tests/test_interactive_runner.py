@@ -896,6 +896,41 @@ class BuildDevloopArgsTests(unittest.TestCase):
             workflow_snapshot,
         )
 
+    def test_handoff_reuses_checkout_already_on_implementation_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = self.make_artifacts(root)
+            issue = artifacts.issues_index.parent / "0001-run.md"
+            issue.write_text("# Run\n\nCompleted: [ ]\n", encoding="utf-8")
+            artifacts.issues_index.write_text(
+                "[Issue 0001](./0001-run.md)\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                interactive_runner,
+                "current_branch",
+                return_value="devloop/feature",
+            ), mock.patch.object(
+                interactive_runner,
+                "read_prompt",
+                return_value="",
+            ), mock.patch(
+                "devloop.cli.main",
+                return_value=0,
+            ) as devloop_main, redirect_stdout(StringIO()):
+                interactive_runner.run_handoff(
+                    root,
+                    root,
+                    artifacts,
+                    interactive_runner.catalog_module.Selection.defaults(),
+                    root / "devloop-plan.json",
+                )
+
+        launched_args = devloop_main.call_args.args[0]
+        self.assertIn("--no-worktree", launched_args)
+        self.assertNotIn("--create-worktree", launched_args)
+
     def test_handoff_publishes_project_branch_and_worktree_context(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

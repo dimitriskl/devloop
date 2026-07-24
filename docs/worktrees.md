@@ -44,6 +44,10 @@ Use the current worktree directly:
 .\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --no-worktree
 ```
 
+When `devloop-plan` resumes from a checkout that is already on the default
+`devloop/<feature>` implementation branch, the development handoff selects this
+mode automatically instead of trying to create another worktree for that branch.
+
 Rerunning the same `--create-worktree --worktree-path ... --branch-name ...`
 command after a crash reuses the existing path when it is already a registered
 worktree or Git checkout. The existing checkout's current branch is kept, even

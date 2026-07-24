@@ -1204,12 +1204,13 @@ def run_handoff(
 ) -> int:
     component_catalog = build_portable_component_catalog(bundle_root)
     slug = artifact_slug(artifacts)
+    branch_name = sanitize_branch_name(f"devloop/{slug}")
     params = HandoffParams(
         start_issue=None,
         run_all=True,
-        use_worktree=True,
+        use_worktree=current_branch(repo_root) != branch_name,
         worktree_path=default_worktree_path(repo_root, slug, parent=load_last_worktree_parent()),
-        branch_name=sanitize_branch_name(f"devloop/{slug}"),
+        branch_name=branch_name,
     )
 
     while True:
