@@ -44,12 +44,20 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: At rework start, inspect the current partial diff, group fixes into coherent high-severity-first slices, reserve time for gates and schema output, and make the next attempt continue verified partial edits instead of restarting.
 - Last seen: 2026-07-23
 
+## Enforce Watchdog Deadlines Within A Bounded Grace Period
+
+- Applies to: Codex execution budgets, backend process supervision, checkpoint watchdogs and blocked retries
+- Lesson: A watchdog is not effective when an expired inactivity deadline still allows the backend attempt or cleanup to run far beyond the configured threshold.
+- Evidence: Issue 0001's final retry reported a 300-second no-backend-activity deadline but finished after 745.6 seconds; two preceding retries each consumed the full 1,800-second execution budget without a final role result.
+- Action: Persist the timeout-detection timestamp, emit the blocker immediately, request graceful shutdown once, terminate the process tree after a short fixed grace period, classify cleanup delay separately, and regression-test the elapsed bound with an inert backend.
+- Last seen: 2026-07-23
+
 ## Retry Equivalent Blockers Only After State Changes
 
 - Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
 - Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round, including after a run is resumed.
-- Evidence: Issue 0003 received five attempts on July 21 that reproduced the same missing platform prerequisites. Issue 0001 then returned the same invalid role-schema result through five July 22 blocker-resolution attempts and five more after an unfinished-run resume on July 23, while seven dependent issues remained waiting.
-- Action: Persist a normalized blocker fingerprint with its relevant environment or contract state; after one equivalent retry, suppress further attempts across retries and resumed runs until that state or guidance changes, surface a concise validation diagnostic, and leave one operator or runner action on the loop board.
+- Evidence: Issue 0003 received five attempts on July 21 that reproduced the same missing platform prerequisites. On July 23, Issue 0001 consumed all five blocker-resolution retries while two structured results repeated the same Angular dependency and cache blocker, two attempts timed out, the last hit the inactivity watchdog, and seven dependent issues remained waiting without a relevant environment change.
+- Action: Persist a normalized blocker fingerprint with its relevant environment, repository, and contract state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries and resumed runs until that state or guidance changes, surface a concise diagnostic, and leave one operator or runner action on the loop board.
 - Last seen: 2026-07-23
 
 ## Validate Every Component Of Derived Data
@@ -192,8 +200,8 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: coder, reviewer, QA, Angular worktrees and dependency-cache hygiene
 - Lesson: Missing `node_modules`, lockfiles, or Angular builder packages are setup residuals rather than application failures, but restoring dependencies must not leave large untracked caches in the repository.
-- Evidence: Issue 0001 could not run Angular build or Karma because the required `@angular/build` builders were unavailable; review also found about 744 MB of untracked npm caches in the worktree.
-- Action: Preflight the lockfile, `node_modules`, and required builders; keep package caches outside the worktree or narrowly ignored, remove generated caches before review, and report any unavailable browser/build gate explicitly.
+- Evidence: Issue 0001 repeatedly could not run Angular build or Karma because `node_modules` was incomplete; restoration then failed with npm cache permission or offline-cache errors, while generated worktree caches could not be removed under the active filesystem policy.
+- Action: Preflight the lockfile, `node_modules`, required builders, and a writable approved cache path before execution; if restoration needs user-profile access or an installation outside the sandbox, stop retrying and hand off one paste-ready operator gate that writes a non-secret workspace result log.
 - Last seen: 2026-07-23
 
 ## Treat Disk-Full Runtime Failures As Infrastructure Blockers
