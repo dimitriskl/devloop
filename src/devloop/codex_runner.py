@@ -1,55 +1,41 @@
+"""The portable role runner: prompts, durable logs, and backend dispatch.
+
+The runner owns everything that is independent of the agent provider: prompt
+construction, durable log-path resolution with confinement and compaction, and
+the role result contract. It reaches a provider only through the Execution
+Backend boundary.
+"""
+
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import shutil
-import subprocess
-import sys
-import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, TextIO
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
-from .codex_events import (
-    CodexTurnOutcome,
-    RunWideBlocker,
-    classify_run_wide_blocker,
-    codex_turn_outcome,
-    extract_text,
-    parse_codex_event,
-    render_safe_codex_activity,
-)
 from .issue_pack import Issue
+from .portable_execution_backend import (
+    ActivityCallback,
+    ExecutionBackend,
+    LogWriter,
+    RunWideBlocker,
+    RunWideBlockerPolicy,
+    StepAttemptRequest,
+    extract_json_object,
+)
 from .portable_text import normalize_single_line_display_name
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
-from .statusui import Stage, WaitingIndicator
+from .statusui import Stage
 from .step_configuration import STEP_GUIDANCE_PRECEDENCE, StepGuidance
-from .subprocess_utils import (
-    AttemptExecutionBudget,
-    ProcessExecutionBudget,
-    output_text,
-    process_tree_creation_kwargs,
-    register_process_tree,
-    reap_process_after_terminal_event,
-    run_captured_text,
-    terminate_process,
-    unregister_process_tree,
-    update_checkpoint_for_backend_event,
-)
-from .terminal_text import sanitize_terminal_text
 from .templates import BundleContext, Preset, render_template
 
 if TYPE_CHECKING:
     from .portable_workflow import CodexExecutionSettings, ExecutionBudget
 
-_LEGACY_APPROVAL_FLAG: bool | None = None
-CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
-STREAM_THREAD_JOIN_SECONDS = 1.0
 PORTABLE_LOG_MARKER = "portable-step"
 PORTABLE_LOG_TOKEN_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 PORTABLE_STEP_INSTANCE_ID_PATTERN = (
@@ -61,9 +47,13 @@ LOG_FALLBACK_ATTEMPT_TOKEN_MAX_LENGTH = 16
 LOG_FALLBACK_ROLE_TOKEN_MAX_LENGTH = 12
 LOG_TOKEN_HASH_LENGTH = 8
 MAX_PORTABLE_LOG_PATH_LENGTH = 259
-LONGEST_ROLE_LOG_SUFFIX = ".last-message.json"
-FAST_CLI_SERVICE_TIER = "fast"
-STANDARD_CLI_SERVICE_TIER = "default"
+PROMPT_LOG_SUFFIX = ".prompt.md"
+STDOUT_LOG_SUFFIX = ".stdout.jsonl"
+STDERR_LOG_SUFFIX = ".stderr.txt"
+MESSAGE_LOG_SUFFIX = ".last-message.json"
+LONGEST_ROLE_LOG_SUFFIX = MESSAGE_LOG_SUFFIX
+ROLE_RESULT_SCHEMA_FILENAME = "role-result.schema.json"
+SELF_IMPROVEMENT_LOG_PREFIX = "self-improvement-compiler"
 EXECUTION_BUDGET_EXPIRATION_PATTERN = re.compile(
     r"Execution Budget (?:timeout|checkpoint deadline) "
     r"\([^)\r\n]+\) expired\."
@@ -77,7 +67,6 @@ DEVLOOP_RUN_GOAL = (
     "All selected issues from the issue pack must be developed, reviewed, "
     "and tested so the finished product has as few bugs and deficiencies as practical."
 )
-ActivityCallback = Callable[[str | None], None]
 
 
 class RunWideBlockerError(RuntimeError):
@@ -86,301 +75,11 @@ class RunWideBlockerError(RuntimeError):
         self.blocker = blocker
 
 
-def resolve_codex_executable(codex: str) -> str:
-    """Resolve a Codex command name to a concrete executable path.
-
-    On Windows the Codex CLI is typically an npm shim (``codex.cmd`` /
-    ``codex.ps1``) with no ``codex.exe``. ``subprocess`` with ``shell=False``
-    invokes Win32 ``CreateProcess``, which does not consult ``PATHEXT``, so a
-    bare ``"codex"`` fails with ``FileNotFoundError`` (WinError 2).
-    ``shutil.which`` does honour ``PATHEXT``, so resolving up front fixes
-    Windows while staying a no-op on POSIX. If resolution fails (Codex not on
-    PATH), return the original value so the downstream error still names what
-    the user asked for.
-    """
-    resolved = shutil.which(codex)
-    if resolved:
-        return resolved
-
-    candidate = Path(codex).expanduser()
-    if candidate.is_file():
-        return str(candidate.resolve())
-
-    if sys.platform.startswith("win") and candidate.name == codex:
-        appdata = os.environ.get("APPDATA")
-        npm_dirs = []
-        if appdata:
-            npm_dirs.append(Path(appdata) / "npm")
-        npm_dirs.append(Path.home() / "AppData" / "Roaming" / "npm")
-        for npm_dir in npm_dirs:
-            for suffix in (".cmd", ".exe", ""):
-                npm_candidate = npm_dir / f"{codex}{suffix}"
-                if npm_candidate.is_file():
-                    return str(npm_candidate.resolve())
-
-    return codex
-
-
-def uses_legacy_approval_flag(codex: str) -> bool:
-    global _LEGACY_APPROVAL_FLAG
-    if _LEGACY_APPROVAL_FLAG is None:
-        result = run_captured_text(
-            [codex, "exec", "--help"],
-        )
-        help_text = f"{result.stdout}\n{result.stderr}"
-        _LEGACY_APPROVAL_FLAG = "  -a," in help_text or "  -a <" in help_text
-    return _LEGACY_APPROVAL_FLAG
-
-
-def build_codex_exec_command(
-    codex: str,
-    repo_root: Path,
-    sandbox: str,
-    approval_policy: str,
-    schema_path: Path,
-    message_path: Path,
-    codex_settings: CodexExecutionSettings | None = None,
-) -> list[str]:
-    command = [
-        codex,
-        "exec",
-        "-C",
-        str(repo_root),
-        "-s",
-        sandbox,
-    ]
-    if codex_settings is not None:
-        command.extend(codex_execution_settings_args(codex_settings))
-    if uses_legacy_approval_flag(codex):
-        command.extend(["-a", approval_policy])
-    else:
-        command.extend(["-c", f'approval_policy="{approval_policy}"'])
-    command.extend(
-        [
-            "--output-schema",
-            str(schema_path),
-            "-o",
-            str(message_path),
-            "--json",
-            "-",
-        ]
-    )
-    return command
-
-
-def codex_execution_settings_args(
-    settings: CodexExecutionSettings,
-) -> list[str]:
-    fast_enabled = settings.fast.value == "ON"
-    service_tier = (
-        FAST_CLI_SERVICE_TIER if fast_enabled else STANDARD_CLI_SERVICE_TIER
-    )
-    return [
-        "-m",
-        settings.model,
-        "-c",
-        f'model_reasoning_effort="{settings.reasoning_effort}"',
-        "-c",
-        f'service_tier="{service_tier}"',
-        "--enable" if fast_enabled else "--disable",
-        "fast_mode",
-    ]
-
-
 def stage_for_role(role: str) -> Stage:
     try:
         return ROLE_STAGES[role]
     except KeyError as error:
         raise ValueError(f"Unsupported Dev Loop role: {role}") from error
-
-
-def run_streaming_codex_command(
-    command: list[str],
-    *,
-    input_text: str,
-    cwd: Path,
-    stage: Stage,
-    activity_context: str = "",
-    activity_callback: ActivityCallback | None = None,
-    execution_budget: ExecutionBudget | None = None,
-    attempt_budget: AttemptExecutionBudget | None = None,
-) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        **process_tree_creation_kwargs(),
-    )
-    register_process_tree(process)
-    assert process.stdin is not None
-    assert process.stdout is not None
-    assert process.stderr is not None
-
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
-    indicator = (
-        WaitingIndicator(stage=stage, context=activity_context)
-        if activity_callback is None
-        else None
-    )
-    if activity_callback is not None:
-        stderr_activity_callback = activity_callback
-    else:
-        assert indicator is not None
-
-        def stderr_activity_callback(_activity: str | None) -> None:
-            indicator.notify_activity()
-    budget = (
-        ProcessExecutionBudget(
-            process,
-            timeout_seconds=execution_budget.timeout_seconds,
-            checkpoint_seconds=execution_budget.checkpoint_seconds,
-            attempt_budget=attempt_budget,
-        )
-        if execution_budget is not None
-        else None
-    )
-
-    def notify_stderr_activity(activity: str | None) -> None:
-        if budget is not None:
-            budget.notify_activity()
-        stderr_activity_callback(activity)
-
-    input_thread = threading.Thread(
-        target=_write_process_input,
-        args=(process.stdin, input_text),
-        daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=_drain_process_stream,
-        args=(
-            process.stderr,
-            stderr_parts,
-            notify_stderr_activity,
-        ),
-        daemon=True,
-    )
-    turn_outcome: CodexTurnOutcome | None = None
-    active_backend_items: set[str] = set()
-
-    if indicator is not None:
-        indicator.start()
-    input_thread.start()
-    stderr_thread.start()
-    if budget is not None:
-        budget.start()
-    budget_expiration: str | None = None
-    budget_finished = False
-    try:
-        for line in process.stdout:
-            if budget is not None:
-                budget.notify_activity()
-            stdout_parts.append(line)
-            event = parse_codex_event(line)
-            update_checkpoint_for_backend_event(
-                budget,
-                event,
-                active_backend_items,
-            )
-            activity = render_safe_codex_activity(event)
-            if activity_callback is not None:
-                activity_callback(activity)
-            elif indicator is not None:
-                indicator.notify_activity()
-            if activity and indicator is not None:
-                indicator.stop()
-                _print_codex_activity(stage, activity_context, activity)
-                indicator.start()
-            turn_outcome = codex_turn_outcome(event)
-            if turn_outcome is not None:
-                break
-
-        if turn_outcome is None:
-            returncode = process.wait()
-        else:
-            if budget is not None:
-                budget_expiration = budget.finish()
-                budget_finished = True
-            reap_process_after_terminal_event(process)
-            returncode = _terminal_returncode(turn_outcome, process.returncode)
-    except KeyboardInterrupt:
-        terminate_process(process)
-        raise
-    finally:
-        if budget is not None and not budget_finished:
-            budget_expiration = budget.finish()
-        if indicator is not None:
-            indicator.stop()
-        input_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
-        stderr_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
-        for stream in (process.stdout, process.stderr):
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()
-        unregister_process_tree(process)
-
-    if budget_expiration is not None:
-        stderr_parts.append(f"{budget_expiration}\n")
-        returncode = 124
-
-    return subprocess.CompletedProcess(
-        command,
-        returncode,
-        stdout="".join(stdout_parts),
-        stderr="".join(stderr_parts),
-    )
-
-
-def _write_process_input(stream: TextIO, input_text: str) -> None:
-    try:
-        stream.write(input_text)
-        stream.flush()
-    except (BrokenPipeError, OSError, ValueError):
-        pass
-    finally:
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
-
-
-def _drain_process_stream(
-    stream: TextIO,
-    captured: list[str],
-    notify_activity: ActivityCallback,
-) -> None:
-    try:
-        for line in stream:
-            captured.append(line)
-            notify_activity(None)
-    except (OSError, ValueError):
-        pass
-
-
-def _print_codex_activity(stage: Stage, context: str, activity: str) -> None:
-    prefix = f"[{stage.value}]"
-    if context:
-        safe_context = sanitize_terminal_text(context, preserve_newlines=False)
-        prefix = f"{prefix} {safe_context}:"
-    safe_activity = sanitize_terminal_text(activity, preserve_newlines=False)
-    print(f"{prefix} {safe_activity}")
-
-
-def _terminal_returncode(
-    outcome: CodexTurnOutcome,
-    process_returncode: int | None,
-) -> int:
-    if outcome is CodexTurnOutcome.COMPLETED:
-        return 0
-    if isinstance(process_returncode, int) and process_returncode != 0:
-        return process_returncode
-    return 1
 
 
 def _role_activity_context(*, progress: str, pass_number: int) -> str:
@@ -433,9 +132,7 @@ class CodexRunner:
         prd_path: Path,
         issues_index: Path,
         preset: Preset,
-        codex: str,
-        sandbox: str,
-        approval_policy: str,
+        execution_backend: ExecutionBackend,
         dry_run: bool,
         use_self_improvement_wiki: bool,
     ) -> None:
@@ -444,9 +141,7 @@ class CodexRunner:
         self.prd_path = prd_path
         self.issues_index = issues_index
         self.preset = preset
-        self.codex = resolve_codex_executable(codex)
-        self.sandbox = sandbox
-        self.approval_policy = approval_policy
+        self.execution_backend = execution_backend
         self.dry_run = dry_run
         self.use_self_improvement_wiki = use_self_improvement_wiki
         self.log_root = issues_index.parent / ".loop.logs"
@@ -509,203 +204,60 @@ class CodexRunner:
             execution_budget=execution_budget,
         )
 
-        prefix_parts = [slugify_log_token(issue.number) or "issue"]
-        attempt_identity = step_attempt_id or prompt_session_id or str(uuid.uuid4())
-        attempt_slug = compact_log_identity_token(attempt_identity)
-        prefix_parts.append(f"attempt-{attempt_slug or uuid.uuid4()}")
-        attempt_label_slug = slugify_log_token(attempt_label)
-        if attempt_label_slug:
-            prefix_parts.append(attempt_label_slug)
-        if step_instance_id:
-            prefix_parts.extend(
-                [
-                    PORTABLE_LOG_MARKER,
-                    slugify_log_token(step_display_name) or "step",
-                    slugify_log_token(step_instance_id) or "instance",
-                ]
-            )
-        prefix_parts.extend(
-            [slugify_log_token(role) or "role", f"pass{pass_number}"]
-        )
-        prefix = _fit_role_log_prefix(
-            log_root=self.log_root,
-            readable_prefix="-".join(prefix_parts),
-            issue_slug=prefix_parts[0],
-            attempt_identity=attempt_identity,
-            step_instance_id=step_instance_id,
-            role=role,
-            pass_number=pass_number,
-        )
-        prompt_path = _confined_log_path(
-            self.log_root / f"{prefix}.prompt.md",
+        logs = _attempt_log_paths(
             self.log_root,
-        )
-        stdout_path = _confined_log_path(
-            self.log_root / f"{prefix}.stdout.jsonl",
-            self.log_root,
-        )
-        stderr_path = _confined_log_path(
-            self.log_root / f"{prefix}.stderr.txt",
-            self.log_root,
-        )
-        message_path = _confined_log_path(
-            self.log_root / f"{prefix}.last-message.json",
-            self.log_root,
-        )
-        self.write_log_text(prompt_path, prompt)
-
-        schema_path = self.bundle.schemas / "role-result.schema.json"
-        command = build_codex_exec_command(
-            codex=self.codex,
-            repo_root=self.repo_root,
-            sandbox=self.sandbox,
-            approval_policy=self.approval_policy,
-            schema_path=schema_path,
-            message_path=message_path,
-            codex_settings=codex_settings,
-        )
-
-        result = self.run_codex_exec_with_connection_retries(
-            command=command,
-            prompt=prompt,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            stage=stage_for_role(role_adapter or role),
-            activity_context=_role_activity_context(
-                progress=progress,
+            _role_attempt_log_prefix(
+                log_root=self.log_root,
+                issue=issue,
+                role=role,
                 pass_number=pass_number,
+                attempt_label=attempt_label,
+                step_instance_id=step_instance_id,
+                step_display_name=step_display_name,
+                step_attempt_id=step_attempt_id,
+                prompt_session_id=prompt_session_id,
             ),
-            activity_callback=activity_callback,
-            execution_budget=execution_budget,
         )
-        self.write_log_text(stdout_path, result.stdout)
-        self.write_log_text(stderr_path, result.stderr)
+        self.write_log_text(logs.prompt, prompt)
 
-        run_wide_blocker = classify_run_wide_blocker(
-            output_text(result.stdout),
-            output_text(result.stderr),
+        result = self.execution_backend.invoke(
+            StepAttemptRequest(
+                prompt=prompt,
+                repo_root=self.repo_root,
+                schema_path=self.bundle.schemas / ROLE_RESULT_SCHEMA_FILENAME,
+                message_path=logs.message,
+                stdout_path=logs.stdout,
+                stderr_path=logs.stderr,
+                write_log=self.write_log_text,
+                execution_settings=codex_settings,
+                execution_budget=execution_budget,
+                activity_stage=stage_for_role(role_adapter or role),
+                activity_context=_role_activity_context(
+                    progress=progress,
+                    pass_number=pass_number,
+                ),
+                activity_callback=activity_callback,
+            )
         )
-        if run_wide_blocker is not None:
-            raise RunWideBlockerError(run_wide_blocker)
+        process = result.process
+        self.write_log_text(logs.stdout, process.stdout)
+        self.write_log_text(logs.stderr, process.stderr)
 
-        if result.returncode != 0:
+        if result.run_wide_blocker is not None:
+            raise RunWideBlockerError(result.run_wide_blocker)
+
+        if process.returncode != 0:
             return RoleResult(
                 status="BLOCKED",
                 summary=role_execution_failure_summary(
-                    returncode=result.returncode,
-                    stderr=result.stderr,
-                    stderr_path=stderr_path,
+                    returncode=process.returncode,
+                    stderr=process.stderr,
+                    stderr_path=logs.stderr,
                 ),
-                raw_message=result.stderr,
+                raw_message=process.stderr,
             )
 
-        message = self.load_or_recover_role_message(
-            message_path=message_path,
-            stdout=result.stdout,
-        )
-        return RoleResult.from_message(message)
-
-    def load_or_recover_role_message(
-        self,
-        *,
-        message_path: Path,
-        stdout: str,
-        log_root: Path | None = None,
-    ) -> str:
-        if message_path.is_file():
-            return message_path.read_text(encoding="utf-8")
-
-        message = extract_last_structured_agent_message(stdout)
-        if message is None and extract_json_object(stdout) is not None:
-            message = stdout
-        if message is None:
-            return stdout
-
-        self.write_log_text(message_path, message, log_root=log_root)
-        return message
-
-    def run_codex_exec_with_connection_retries(
-        self,
-        command: list[str],
-        prompt: str,
-        stdout_path: Path,
-        stderr_path: Path,
-        stage: Stage = Stage.DEVELOPMENT,
-        activity_context: str = "",
-        activity_callback: ActivityCallback | None = None,
-        log_root: Path | None = None,
-        execution_budget: ExecutionBudget | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        attempt = 1
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        attempt_budget = (
-            AttemptExecutionBudget(
-                timeout_seconds=execution_budget.timeout_seconds,
-                checkpoint_seconds=execution_budget.checkpoint_seconds,
-            )
-            if execution_budget is not None
-            else None
-        )
-
-        while True:
-            result = run_streaming_codex_command(
-                command,
-                input_text=prompt,
-                cwd=self.repo_root,
-                stage=stage,
-                activity_context=activity_context,
-                activity_callback=activity_callback,
-                execution_budget=execution_budget,
-                attempt_budget=attempt_budget,
-            )
-            current_stdout = output_text(result.stdout)
-            current_stderr = output_text(result.stderr)
-            if attempt_budget is not None and (current_stdout or current_stderr):
-                attempt_budget.notify_activity()
-            stdout_parts.append(current_stdout)
-            stderr_parts.append(current_stderr)
-            result.stdout = "".join(stdout_parts)
-            result.stderr = "".join(stderr_parts)
-
-            if attempt_budget is not None:
-                expiration = attempt_budget.expiration()
-                if expiration is not None:
-                    result.returncode = 124
-                    if expiration not in result.stderr:
-                        result.stderr += f"{expiration}\n"
-                    return result
-
-            if classify_run_wide_blocker(current_stdout, current_stderr) is not None:
-                return result
-
-            if result.returncode == 0 or not is_retryable_codex_connection_failure(current_stderr):
-                return result
-
-            retry_message = (
-                f"codex exec connection failed on attempt {attempt}; "
-                f"retrying in {CODEX_CONNECTION_RETRY_DELAY_SECONDS} seconds.\n"
-            )
-            if activity_callback is None:
-                print(retry_message.strip())
-            else:
-                activity_callback(retry_message.strip())
-            stderr_parts.append(retry_message)
-            result.stderr = "".join(stderr_parts)
-            self.write_log_text(stdout_path, result.stdout, log_root=log_root)
-            self.write_log_text(stderr_path, result.stderr, log_root=log_root)
-            if attempt_budget is None:
-                time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
-            else:
-                expiration = attempt_budget.wait_for_retry(
-                    CODEX_CONNECTION_RETRY_DELAY_SECONDS
-                )
-                if expiration is not None:
-                    result.returncode = 124
-                    if expiration not in result.stderr:
-                        result.stderr += f"{expiration}\n"
-                    return result
-            attempt += 1
+        return RoleResult.from_message(result.message)
 
     def render_dry_run_prompts(
         self,
@@ -775,60 +327,50 @@ class CodexRunner:
             compiler_repo_root=compiler_repo_root,
         )
 
-        prefix = "self-improvement-compiler"
-        prompt_path = _confined_log_path(
-            log_root / f"{prefix}.prompt.md",
-            log_root,
-        )
-        stdout_path = _confined_log_path(
-            log_root / f"{prefix}.stdout.jsonl",
-            log_root,
-        )
-        stderr_path = _confined_log_path(
-            log_root / f"{prefix}.stderr.txt",
-            log_root,
-        )
-        message_path = _confined_log_path(
-            log_root / f"{prefix}.last-message.json",
-            log_root,
-        )
-        self.write_log_text(prompt_path, prompt, log_root=log_root)
+        logs = _attempt_log_paths(log_root, SELF_IMPROVEMENT_LOG_PREFIX)
+        write_log = self._log_writer(log_root)
+        write_log(logs.prompt, prompt)
 
-        schema_path = self.bundle.schemas / "role-result.schema.json"
-        command = build_codex_exec_command(
-            codex=self.codex,
-            repo_root=compiler_repo_root,
-            sandbox=self.sandbox,
-            approval_policy=self.approval_policy,
-            schema_path=schema_path,
-            message_path=message_path,
+        result = self.execution_backend.invoke(
+            StepAttemptRequest(
+                prompt=prompt,
+                repo_root=compiler_repo_root,
+                schema_path=self.bundle.schemas / ROLE_RESULT_SCHEMA_FILENAME,
+                message_path=logs.message,
+                stdout_path=logs.stdout,
+                stderr_path=logs.stderr,
+                write_log=write_log,
+                activity_stage=Stage.QA,
+                activity_context="self-improvement",
+                # The compiler runs after every Issue has finished, so a
+                # Run-Wide Blocker has nothing left to pause. It reports its own
+                # outcome from its exit code and structured message instead.
+                run_wide_blocker_policy=RunWideBlockerPolicy.IGNORE,
+            )
         )
+        process = result.process
+        write_log(logs.stdout, process.stdout)
+        write_log(logs.stderr, process.stderr)
 
-        result = self.run_codex_exec_with_connection_retries(
-            command=command,
-            prompt=prompt,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            stage=Stage.QA,
-            activity_context="self-improvement",
-            log_root=log_root,
-        )
-        self.write_log_text(stdout_path, result.stdout, log_root=log_root)
-        self.write_log_text(stderr_path, result.stderr, log_root=log_root)
-
-        if result.returncode != 0:
+        if process.returncode != 0:
             return RoleResult(
                 status="BLOCKED",
-                summary=f"self-improvement compiler failed with exit code {result.returncode}. See {stderr_path}.",
-                raw_message=result.stderr,
+                summary=(
+                    "self-improvement compiler failed with exit code "
+                    f"{process.returncode}. See {logs.stderr}."
+                ),
+                raw_message=process.stderr,
             )
 
-        message = self.load_or_recover_role_message(
-            message_path=message_path,
-            stdout=result.stdout,
-            log_root=log_root,
-        )
-        return RoleResult.from_message(message)
+        return RoleResult.from_message(result.message)
+
+    def _log_writer(self, log_root: Path) -> LogWriter:
+        """Bind durable log writing, and its confinement, to one log root."""
+
+        def write_log(path: Path, text: str) -> None:
+            self.write_log_text(path, text, log_root=log_root)
+
+        return write_log
 
     def build_prompt(
         self,
@@ -1031,6 +573,48 @@ def compact_log_identity_token(
     return f"{prefix}-{digest}" if prefix else digest
 
 
+def _role_attempt_log_prefix(
+    *,
+    log_root: Path,
+    issue: Issue,
+    role: str,
+    pass_number: int,
+    attempt_label: str | None,
+    step_instance_id: str | None,
+    step_display_name: str | None,
+    step_attempt_id: str | None,
+    prompt_session_id: str | None,
+) -> str:
+    """Compose the readable durable-log filename prefix for one role attempt."""
+    prefix_parts = [slugify_log_token(issue.number) or "issue"]
+    attempt_identity = step_attempt_id or prompt_session_id or str(uuid.uuid4())
+    attempt_slug = compact_log_identity_token(attempt_identity)
+    prefix_parts.append(f"attempt-{attempt_slug or uuid.uuid4()}")
+    attempt_label_slug = slugify_log_token(attempt_label)
+    if attempt_label_slug:
+        prefix_parts.append(attempt_label_slug)
+    if step_instance_id:
+        prefix_parts.extend(
+            [
+                PORTABLE_LOG_MARKER,
+                slugify_log_token(step_display_name) or "step",
+                slugify_log_token(step_instance_id) or "instance",
+            ]
+        )
+    prefix_parts.extend(
+        [slugify_log_token(role) or "role", f"pass{pass_number}"]
+    )
+    return _fit_role_log_prefix(
+        log_root=log_root,
+        readable_prefix="-".join(prefix_parts),
+        issue_slug=prefix_parts[0],
+        attempt_identity=attempt_identity,
+        step_instance_id=step_instance_id,
+        role=role,
+        pass_number=pass_number,
+    )
+
+
 def _fit_role_log_prefix(
     *,
     log_root: Path,
@@ -1096,62 +680,23 @@ def _confined_log_path(path: Path, log_root: Path) -> Path:
     return resolved_path
 
 
-def extract_json_object(text: str) -> dict[str, Any] | None:
-    stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
-            pass
+@dataclass(frozen=True)
+class AttemptLogPaths:
+    """The four durable log locations one agent attempt writes."""
 
-    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if code_block:
-        try:
-            return json.loads(code_block.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-
-    return None
+    prompt: Path
+    stdout: Path
+    stderr: Path
+    message: Path
 
 
-def extract_last_structured_agent_message(text: str) -> str | None:
-    last_message: str | None = None
-    for line in text.splitlines():
-        payload = parse_codex_event(line)
-        if payload is None or payload.get("type") != "item.completed":
-            continue
-
-        item = payload.get("item")
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "message" and item.get("role") != "assistant":
-            continue
-        if item_type not in {"agent_message", "assistant_message", "message"}:
-            continue
-
-        message = (
-            extract_text(item.get("text"))
-            or extract_text(item.get("message"))
-            or extract_text(item.get("content"))
-        )
-        if message and extract_json_object(message) is not None:
-            last_message = message
-
-    return last_message
-
-
-def is_retryable_codex_connection_failure(stderr: str) -> bool:
-    lower = stderr.lower()
-    return (
-        "failed to connect to websocket" in lower
-        or "responses_websocket" in lower
+def _attempt_log_paths(log_root: Path, prefix: str) -> AttemptLogPaths:
+    return AttemptLogPaths(
+        prompt=_confined_log_path(log_root / f"{prefix}{PROMPT_LOG_SUFFIX}", log_root),
+        stdout=_confined_log_path(log_root / f"{prefix}{STDOUT_LOG_SUFFIX}", log_root),
+        stderr=_confined_log_path(log_root / f"{prefix}{STDERR_LOG_SUFFIX}", log_root),
+        message=_confined_log_path(
+            log_root / f"{prefix}{MESSAGE_LOG_SUFFIX}",
+            log_root,
+        ),
     )

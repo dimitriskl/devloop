@@ -7,9 +7,10 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from devloop import codex_runner
-from devloop.codex_events import RunWideBlockerKind, classify_run_wide_blocker
 from devloop.issue_pack import Issue
 from devloop.issue_scheduler import SchedulingPhase
+from devloop.portable_execution_backend import RunWideBlockerKind, codex_cli
+from devloop.portable_execution_backend.codex_cli import classify_run_wide_blocker
 from devloop.state import LoopStateWriter
 from devloop.templates import BundleContext
 
@@ -62,11 +63,9 @@ class RunWideBlockerExecutionTests(unittest.TestCase):
             runner.prd_path = root / "prd.md"
             runner.issues_index = root / "README.md"
             runner.log_root = root / ".loop.logs"
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.ensure_log_root()
-            runner.run_codex_exec_with_connection_retries = mock.Mock(
+            blocked_attempt = mock.Mock(
                 return_value=CompletedProcess(
                     ["codex"],
                     1,
@@ -79,7 +78,12 @@ class RunWideBlockerExecutionTests(unittest.TestCase):
             issue = Issue("0001", "First", root / "0001.md", False)
 
             with mock.patch.object(runner, "build_prompt", return_value="prompt"), \
-                 mock.patch.object(codex_runner, "build_codex_exec_command", return_value=["codex"]), \
+                 mock.patch.object(codex_cli, "build_codex_exec_command", return_value=["codex"]), \
+                 mock.patch.object(
+                     codex_cli,
+                     "run_codex_exec_with_connection_retries",
+                     blocked_attempt,
+                 ), \
                  self.assertRaises(codex_runner.RunWideBlockerError) as raised:
                 runner.run_role("coder", issue, pass_number=1)
 

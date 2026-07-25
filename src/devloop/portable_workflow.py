@@ -14,6 +14,10 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 from .codex_runner import RoleResult, result_to_dict
 from .issue_pack import Issue
 from .model_catalog import CodexModelCatalog
+from .portable_execution_backend import (
+    StepSettingsAuthorization,
+    sole_registered_execution_backend,
+)
 from .portable_text import normalize_single_line_display_name
 from .step_configuration import (
     CapabilityKind,
@@ -131,6 +135,10 @@ class CodexExecutionSettings:
                     f"Codex Execution Settings {field_name} must be a non-empty "
                     "single-line value."
                 )
+
+    @property
+    def fast_enabled(self) -> bool:
+        return self.fast is FastPreference.ON
 
     def as_tuple(self) -> tuple[str, str, FastPreference]:
         return self.model, self.reasoning_effort, self.fast
@@ -1408,41 +1416,23 @@ def preflight_codex_execution_settings(
     component_catalog: PortableStepComponentCatalog,
     model_catalog: CodexModelCatalog,
 ) -> None:
-    """Authorize exact snapshotted settings against a fresh live catalog."""
-    if not model_catalog.is_fresh:
-        raise ValueError(
-            "Run preflight requires a fresh live Codex Model Catalog; cached data "
-            "is display-only. Use Retry Catalog in /options and start again."
+    """Ask the Execution Backend to authorize exact snapshotted settings.
+
+    The workflow decides which Workflow Steps are agent-backed; the backend
+    decides whether their settings are runnable and reports every refusal.
+    """
+    authorizations = tuple(
+        StepSettingsAuthorization(
+            step_display_name=step.display_name,
+            settings=step.codex_settings,
         )
-    for step in workflow.steps:
-        component = component_catalog.resolve(step.component_id)
-        if not component.is_codex_backed:
-            continue
-        settings = step.codex_settings
-        if settings is None:
-            raise ValueError(
-                f"Step {step.display_name!r} has no Codex Execution Settings. "
-                "Repair it in /options."
-            )
-        try:
-            model = model_catalog.model(settings.model)
-        except ValueError as error:
-            raise ValueError(
-                f"Step {step.display_name!r} selects unavailable model "
-                f"{settings.model!r}. Use Retry Catalog in /options."
-            ) from error
-        if settings.reasoning_effort not in model.reasoning_efforts:
-            raise ValueError(
-                f"Step {step.display_name!r} selects unsupported reasoning effort "
-                f"{settings.reasoning_effort!r} for model {settings.model!r}. "
-                "Use Retry Catalog in /options."
-            )
-        if settings.fast is FastPreference.ON and not model.supports_fast:
-            raise ValueError(
-                f"Step {step.display_name!r} selects Fast ON, but model "
-                f"{settings.model!r} does not advertise Fast. Use Retry Catalog "
-                "in /options."
-            )
+        for step in workflow.steps
+        if component_catalog.resolve(step.component_id).is_codex_backed
+    )
+    sole_registered_execution_backend().authorize_execution_settings(
+        authorizations,
+        model_catalog=model_catalog,
+    )
 
 
 def _reachable_step_ids(workflow: WorkflowDefinition) -> frozenset[StepInstanceId]:

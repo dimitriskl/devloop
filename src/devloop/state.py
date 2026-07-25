@@ -16,9 +16,9 @@ from .codex_runner import (
     PORTABLE_STEP_INSTANCE_ID_PATTERN,
     RoleResult,
 )
-from .codex_events import RunWideBlocker, RunWideBlockerKind
 from .issue_pack import Issue
 from .issue_scheduler import SchedulingPhase
+from .portable_execution_backend import RunWideBlocker, RunWideBlockerKind
 from .portable_workflow import (
     DataContractId,
     InterruptedStepAttemptRecord,

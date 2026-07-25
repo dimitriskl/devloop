@@ -1,0 +1,63 @@
+"""The portable Execution Backend boundary for `devloop-plan` + `devloop`.
+
+An Execution Backend is the boundary Dev Loop uses to start or resume an agent
+run, independent of the model provider behind it. This package owns the
+interface, its frozen request and result types, the neutral step-activity event
+both the Portable Activity Feed and Execution Budget checkpointing consume, the
+Run-Wide Blocker domain type, and one module per backend.
+
+This package belongs to the portable product and must not import anything from
+the separate CodexCLI application packages; `tests/test_product_boundary.py`
+enforces that.
+"""
+
+from __future__ import annotations
+
+from .activity import (
+    TOOL_ACTIVITY_KINDS,
+    ActivityCallback,
+    StepActivityEvent,
+    StepActivityKind,
+)
+from .backend import (
+    ExecutionBackend,
+    ExecutionBackendId,
+    LogWriter,
+    RefusalRecord,
+    StepAttemptRequest,
+    StepAttemptResult,
+    StepSettingsAuthorization,
+)
+from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
+from .checkpoint import CheckpointBudget, update_checkpoint_for_step_activity
+from .codex_cli import CodexCliExecutionBackend
+from .registry import (
+    REGISTERED_EXECUTION_BACKENDS,
+    registered_execution_backend_ids,
+    sole_registered_execution_backend,
+)
+from .structured_result import extract_json_object
+
+__all__ = [
+    "REGISTERED_EXECUTION_BACKENDS",
+    "TOOL_ACTIVITY_KINDS",
+    "ActivityCallback",
+    "CheckpointBudget",
+    "CodexCliExecutionBackend",
+    "ExecutionBackend",
+    "ExecutionBackendId",
+    "LogWriter",
+    "RefusalRecord",
+    "RunWideBlocker",
+    "RunWideBlockerKind",
+    "RunWideBlockerPolicy",
+    "StepActivityEvent",
+    "StepActivityKind",
+    "StepAttemptRequest",
+    "StepAttemptResult",
+    "StepSettingsAuthorization",
+    "extract_json_object",
+    "registered_execution_backend_ids",
+    "sole_registered_execution_backend",
+    "update_checkpoint_for_step_activity",
+]

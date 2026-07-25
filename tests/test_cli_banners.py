@@ -12,6 +12,7 @@ from unittest import mock
 from devloop import cli, statusui
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue, parse_issue_index
+from devloop.portable_execution_backend import StepActivityEvent, StepActivityKind
 from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FastPreference,
@@ -1068,7 +1069,12 @@ class RunIssueSignatureTests(unittest.TestCase):
             def run_role(self, **arguments: object) -> RoleResult:
                 activity_callback = arguments.get("activity_callback")
                 if callable(activity_callback):
-                    activity_callback("\x1b[31mChecking\x1b[0m safe\nevent.")
+                    activity_callback(
+                        StepActivityEvent(
+                            kind=StepActivityKind.MESSAGE,
+                            activity="\x1b[31mChecking\x1b[0m safe\nevent.",
+                        )
+                    )
                 return RoleResult(status="PASS", summary="Gate passed.")
 
         with tempfile.TemporaryDirectory() as raw:

@@ -14,6 +14,9 @@ from .terminal_editor import display_width
 from .terminal_text import compact_terminal_text
 
 if TYPE_CHECKING:
+    # Imported for typing only: the Execution Backend package imports this module
+    # for Stage, so a runtime import here would close the cycle.
+    from .portable_execution_backend import StepActivityEvent
     from .portable_workflow import (
         PortableStepComponentCatalog,
         StepAttemptRecord,
@@ -1364,9 +1367,15 @@ class IssueDashboard:
         with self._lock:
             self._statuses[stage] = DashboardStatus(status.upper())
 
-    def notify_activity(self, activity: str | None = None) -> None:
+    def notify_activity(self, event: StepActivityEvent | None = None) -> None:
+        """Consume one neutral step activity into the Portable Activity Feed.
+
+        A ``None`` event, or an event without display text, still counts as
+        backend progress; only text refreshes the rendered feed line.
+        """
         with self._lock:
             self._last_activity_at = self._clock()
+            activity = event.activity if event is not None else None
             if activity:
                 normalized = _safe_progress_text(activity)
                 self._activity = normalized.removeprefix("Codex update: ")

@@ -21,8 +21,8 @@ from .lineeditor import LineEditor
 from .model_catalog import (
     CatalogDiscoveryError,
     CodexModelCatalog,
-    CodexModelCatalogAdapter,
 )
+from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
 from .product_scope import require_portable_target
 from .portable_component_catalog import build_portable_component_catalog
 from .portable_workflow import (
@@ -522,15 +522,18 @@ def _run_devloop_attempt(
     preset = load_preset(resolve_bundle_path(bundle.root, args.preset))
     component_catalog = build_portable_component_catalog(bundle.root, preset.roles)
     state_writer = LoopStateWriter(issues_index_in_repo)
+    execution_backend = CodexCliExecutionBackend.resolved(
+        args.codex,
+        sandbox=args.sandbox,
+        approval_policy=args.approval_policy,
+    )
     runner = CodexRunner(
         bundle=bundle,
         repo_root=repo_root,
         prd_path=prd_in_repo,
         issues_index=issues_index_in_repo,
         preset=preset,
-        codex=args.codex,
-        sandbox=args.sandbox,
-        approval_policy=args.approval_policy,
+        execution_backend=execution_backend,
         dry_run=args.dry_run,
         use_self_improvement_wiki=args.self_improvement_wiki,
     )
@@ -548,10 +551,9 @@ def _run_devloop_attempt(
                 state_writer,
                 component_catalog,
                 user_workflow_path=portable_planner_configuration_path(),
-                model_catalog_loader=CodexModelCatalogAdapter(
-                    runner.codex,
-                    cwd=repo_root,
-                ).discover,
+                model_catalog_loader=lambda: execution_backend.discover_model_catalog(
+                    cwd=repo_root
+                ),
                 read_line=read_prompt,
                 write=print,
                 workflow_snapshot=workflow_snapshot,

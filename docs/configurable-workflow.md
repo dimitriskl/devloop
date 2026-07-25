@@ -24,6 +24,16 @@ atomically replaces the user default. `state.py` stores the Current Run
 definition, canonical hash, generic Step Runtime States, interrupted-attempt
 identity, and ordered Step Attempt Records.
 
+`portable_execution_backend/` owns the Execution Backend boundary: the
+interface with its frozen Step Attempt request and result types, the neutral
+step-activity event that the Portable Activity Feed and Execution Budget
+checkpointing both consume, the Run-Wide Blocker domain type, and one module per
+backend. `codex_cli.py` is the only registered backend today; it owns Codex
+command construction, the streaming loop, event translation, structured-message
+recovery, and Codex Run-Wide Blocker classification. `codex_events.py` remains
+the Codex wire-format parser. This package must not import any CodexCLI
+package, which `tests/test_product_boundary.py` enforces.
+
 The deep execution seam is `PortableWorkflowExecutor.run`: callers provide a
 resolved Workflow Definition, component catalog, and role-runner adapter. The
 executor owns navigation, exact changes-requested record routing, typed input
@@ -54,13 +64,15 @@ replaying completed steps.
 ## Catalog And Backend Preflight
 
 `model_catalog.py` loads every page of the installed account-aware Codex model
-catalog. Cached data exists only to render the editor. Before a new run,
-`cli.py` requires a fresh catalog and validates the exact model, reasoning
-effort, and Fast preference for every Codex-backed instance. Validation names
-the affected Step Display Name and setting and never falls back. Command
-construction in `codex_runner.py` passes model, reasoning effort, and explicit
-Fast On or Off from the currently authorized run definition. Timeouts and
-checkpoint deadlines remain separate Execution Budget values.
+catalog, reached through the Execution Backend's model-discovery operation.
+Cached data exists only to render the editor. Before a new run, `cli.py` requires
+a fresh catalog, and `preflight_codex_execution_settings` asks the registered
+Execution Backend to authorize the exact model, reasoning effort, and Fast
+preference for every Codex-backed instance. Authorization names the affected Step
+Display Name and setting and never falls back. Command construction in
+`portable_execution_backend/codex_cli.py` passes model, reasoning effort, and
+explicit Fast On or Off from the currently authorized run definition. Timeouts
+and checkpoint deadlines remain separate Execution Budget values.
 
 ## Terminal Projection
 

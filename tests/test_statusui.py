@@ -8,6 +8,7 @@ from dataclasses import replace
 from unittest import mock
 
 from devloop import statusui
+from devloop.portable_execution_backend import StepActivityEvent, StepActivityKind
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
     DEVELOPMENT_STEP_ID,
@@ -23,6 +24,11 @@ from tests.terminal_safety import (
     HOSTILE_TERMINAL_TEXT,
     assert_terminal_text_is_safe,
 )
+
+
+def message_activity(text: str) -> StepActivityEvent:
+    """One neutral backend message activity carrying `text` for the feed."""
+    return StepActivityEvent(kind=StepActivityKind.MESSAGE, activity=text)
 
 
 class FakeStream(io.StringIO):
@@ -195,7 +201,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
                     frame_seconds=60,
                 )
                 dashboard.show_workflow_progress(progress)
-                dashboard.notify_activity(HOSTILE_TERMINAL_TEXT)
+                dashboard.notify_activity(message_activity(HOSTILE_TERMINAL_TEXT))
                 dashboard.finish_role(
                     Stage.DEVELOPMENT,
                     "PASS",
@@ -279,7 +285,7 @@ class IssueDashboardRenderingTests(unittest.TestCase):
                     terminal_size=lambda **_: os.terminal_size((1200, 40)),
                 )
                 dashboard.show_workflow_progress(progress)
-                dashboard.notify_activity(HOSTILE_TERMINAL_TEXT)
+                dashboard.notify_activity(message_activity(HOSTILE_TERMINAL_TEXT))
                 dashboard.close()
 
                 rendered = output.getvalue()
@@ -431,12 +437,12 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         dashboard.finish_role(Stage.REVIEW, "PASS")
         dashboard.begin_role(Stage.QA, 1)
         clock.value = 23
-        dashboard.notify_activity("Running acceptance checks.")
+        dashboard.notify_activity(message_activity("Running acceptance checks."))
         clock.value = 25
         dashboard.finish_role(Stage.QA, "FAIL")
         dashboard.begin_role(Stage.DEVELOPMENT, 2)
         clock.value = 30
-        dashboard.notify_activity("Applying review and QA fixes.")
+        dashboard.notify_activity(message_activity("Applying review and QA fixes."))
         dashboard.close()
 
         rendered = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.getvalue())
