@@ -34,7 +34,7 @@ from .step_configuration import STEP_GUIDANCE_PRECEDENCE, StepGuidance
 from .templates import BundleContext, Preset, render_template
 
 if TYPE_CHECKING:
-    from .portable_workflow import CodexExecutionSettings, ExecutionBudget
+    from .portable_workflow import ExecutionBudget, StepExecutionSettings
 
 PORTABLE_LOG_MARKER = "portable-step"
 PORTABLE_LOG_TOKEN_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
@@ -179,7 +179,7 @@ class CodexRunner:
         prompt_session_id: str | None = None,
         rework_attempt_record: Mapping[str, Any] | None = None,
         role_adapter: str | None = None,
-        codex_settings: CodexExecutionSettings | None = None,
+        execution_settings: StepExecutionSettings | None = None,
         execution_budget: ExecutionBudget | None = None,
         skill_paths: Iterable[str] | None = None,
         agent_paths: Iterable[str] | None = None,
@@ -229,7 +229,7 @@ class CodexRunner:
                 stdout_path=logs.stdout,
                 stderr_path=logs.stderr,
                 write_log=self.write_log_text,
-                execution_settings=codex_settings,
+                execution_settings=execution_settings,
                 execution_budget=execution_budget,
                 activity_stage=stage_for_role(role_adapter or role),
                 activity_context=_role_activity_context(

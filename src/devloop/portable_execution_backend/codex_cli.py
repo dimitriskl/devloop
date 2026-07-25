@@ -57,7 +57,7 @@ from .checkpoint import update_checkpoint_for_step_activity
 from .structured_result import extract_json_object
 
 if TYPE_CHECKING:
-    from ..portable_workflow import CodexExecutionSettings, ExecutionBudget
+    from ..portable_workflow import ExecutionBudget, StepExecutionSettings
 
 
 CODEX_CLI_COMMAND = "codex"
@@ -162,7 +162,7 @@ def build_codex_exec_command(
     approval_policy: str,
     schema_path: Path,
     message_path: Path,
-    codex_settings: CodexExecutionSettings | None = None,
+    execution_settings: StepExecutionSettings | None = None,
 ) -> list[str]:
     command = [
         codex,
@@ -172,8 +172,8 @@ def build_codex_exec_command(
         "-s",
         sandbox,
     ]
-    if codex_settings is not None:
-        command.extend(codex_execution_settings_args(codex_settings))
+    if execution_settings is not None:
+        command.extend(codex_execution_settings_args(execution_settings))
     if uses_legacy_approval_flag(codex):
         command.extend(["-a", approval_policy])
     else:
@@ -192,8 +192,19 @@ def build_codex_exec_command(
 
 
 def codex_execution_settings_args(
-    settings: CodexExecutionSettings,
+    settings: StepExecutionSettings,
 ) -> list[str]:
+    """Render one Workflow Step's settings as Codex CLI arguments.
+
+    Backend identity is checked here, at the command-line boundary, so settings
+    naming another Execution Backend can never be turned into a Codex
+    invocation.
+    """
+    if settings.backend is not ExecutionBackendId.CODEX_CLI:
+        raise ValueError(
+            "The Codex CLI Backend cannot run Step Execution Settings naming the "
+            f"{settings.backend.display_name} Backend."
+        )
     fast_enabled = settings.fast_enabled
     service_tier = (
         FAST_CLI_SERVICE_TIER if fast_enabled else STANDARD_CLI_SERVICE_TIER
@@ -669,7 +680,7 @@ class CodexCliExecutionBackend(ExecutionBackend):
             approval_policy=self.approval_policy,
             schema_path=request.schema_path,
             message_path=request.message_path,
-            codex_settings=request.execution_settings,
+            execution_settings=request.execution_settings,
         )
         process = run_codex_exec_with_connection_retries(
             command=command,
@@ -731,7 +742,7 @@ class CodexCliExecutionBackend(ExecutionBackend):
         settings = authorization.settings
         if settings is None:
             raise ValueError(
-                f"Step {display_name!r} has no Codex Execution Settings. "
+                f"Step {display_name!r} has no Step Execution Settings. "
                 "Repair it in /options."
             )
         try:

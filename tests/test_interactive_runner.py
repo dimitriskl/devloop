@@ -25,12 +25,14 @@ from devloop.portable_runtime import (
     PortableRuntimeEventKind,
     portable_runtime_session,
 )
+from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
     DEVELOPMENT_COMPONENT_ID,
     DEVELOPMENT_STEP_ID,
-    FastPreference,
+    PORTABLE_WORKFLOW_SCHEMA,
     SECURITY_REVIEW_STEP_ID,
+    FastPreference,
     StepComponentId,
     canonical_workflow_hash,
     default_portable_component_catalog,
@@ -60,7 +62,8 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 for step in document["steps"]
                 if step["instance_id"] == ANALYSIS_STEP_ID
             )
-            analysis["codex_settings"] = {
+            analysis["execution_settings"] = {
+                "backend": "CODEX_CLI",
                 "model": "gpt-5.6-terra",
                 "reasoning_effort": "high",
                 "fast": "ON",
@@ -136,8 +139,8 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 return_value=adapter,
             ) as adapter_type, mock.patch.object(
                 interactive_runner,
-                "preflight_codex_execution_settings",
-                wraps=interactive_runner.preflight_codex_execution_settings,
+                "preflight_step_execution_settings",
+                wraps=interactive_runner.preflight_step_execution_settings,
             ) as preflight, mock.patch.object(
                 interactive_runner,
                 "run_planning_chat",
@@ -155,8 +158,13 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
         )
         config = run_chat.call_args.kwargs["config"]
         self.assertEqual(
-            config.codex_settings.as_tuple(),
-            ("gpt-5.6-terra", "high", FastPreference.ON),
+            config.execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-terra",
+                "high",
+                FastPreference.ON,
+            ),
         )
         self.assertEqual(config.execution_budget.timeout_seconds, 1200)
         self.assertEqual(config.execution_budget.checkpoint_seconds, 150)
@@ -207,7 +215,8 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                     for step in document["steps"]
                     if step["instance_id"] == DEVELOPMENT_STEP_ID
                 )
-                development["codex_settings"] = {
+                development["execution_settings"] = {
+                    "backend": "CODEX_CLI",
                     "model": "gpt-5.6-terra",
                     "reasoning_effort": "high",
                     "fast": "OFF",
@@ -278,11 +287,11 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(result, 0)
         handed_off_workflow = run_handoff.call_args.kwargs["workflow_snapshot"]
         self.assertEqual(
-            handed_off_workflow.step(DEVELOPMENT_STEP_ID).codex_settings.model,
+            handed_off_workflow.step(DEVELOPMENT_STEP_ID).execution_settings.model,
             "gpt-5.6-luna",
         )
         self.assertEqual(
-            future_workflow.step(DEVELOPMENT_STEP_ID).codex_settings.model,
+            future_workflow.step(DEVELOPMENT_STEP_ID).execution_settings.model,
             "gpt-5.6-terra",
         )
 
@@ -493,7 +502,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             state_path = root / "devloop-plan.json"
             component_catalog = default_portable_component_catalog()
             invalid_document = default_portable_workflow().to_dict()
-            invalid_document["steps"][0]["codex_settings"]["model"] = "missing-model"
+            invalid_document["steps"][0]["execution_settings"]["model"] = "missing-model"
             WorkflowDefaultStore(state_path, component_catalog).replace(
                 load_portable_workflow(invalid_document, component_catalog)
             )
@@ -643,7 +652,9 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(persisted["target_repo"], "/repo")
         self.assertEqual(stored_workflow, default_portable_workflow())
 
-    def test_analysis_repair_cancel_preserves_a_malformed_v2_default(self) -> None:
+    def test_analysis_repair_cancel_preserves_a_malformed_current_schema_default(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             state_path = root / "devloop-plan.json"
@@ -651,7 +662,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 {
                     "target_repo": "/repo",
                     "user_workflow_default": {
-                        "schema": "devloop.portable-workflow/v2",
+                        "schema": PORTABLE_WORKFLOW_SCHEMA,
                         "steps": [],
                     },
                     "user_workflow_default_hash": "invalid",

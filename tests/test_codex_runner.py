@@ -15,6 +15,7 @@ from devloop import codex_runner
 from devloop.codex_events import render_safe_codex_activity
 from devloop.issue_pack import Issue
 from devloop.portable_execution_backend import (
+    ExecutionBackendId,
     StepActivityEvent,
     StepActivityKind,
     codex_cli,
@@ -22,9 +23,9 @@ from devloop.portable_execution_backend import (
 from devloop.portable_workflow import (
     FINAL_REVIEW_STEP_ID,
     SECURITY_REVIEW_STEP_ID,
-    CodexExecutionSettings,
     ExecutionBudget,
     FastPreference,
+    StepExecutionSettings,
 )
 from devloop.state import recover_role_passes
 from devloop.statusui import Stage
@@ -85,7 +86,8 @@ class CodexCommandSettingsTests(unittest.TestCase):
                 with self.subTest(fast=fast):
                     command = codex_cli.build_codex_exec_command(
                         **common,
-                        codex_settings=CodexExecutionSettings(
+                        execution_settings=StepExecutionSettings(
+                            ExecutionBackendId.CODEX_CLI,
                             "gpt-5.6-sol",
                             "xhigh",
                             fast,

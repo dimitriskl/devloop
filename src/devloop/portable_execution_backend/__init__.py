@@ -27,6 +27,7 @@ from .backend import (
     StepAttemptRequest,
     StepAttemptResult,
     StepSettingsAuthorization,
+    parse_execution_backend_id,
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import CheckpointBudget, update_checkpoint_for_step_activity
@@ -57,6 +58,7 @@ __all__ = [
     "StepAttemptResult",
     "StepSettingsAuthorization",
     "extract_json_object",
+    "parse_execution_backend_id",
     "registered_execution_backend_ids",
     "sole_registered_execution_backend",
     "update_checkpoint_for_step_activity",

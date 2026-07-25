@@ -11,6 +11,7 @@ from unittest import mock
 
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue
+from devloop.model_catalog import CodexModel, CodexModelCatalog
 from devloop.portable_component_catalog import build_portable_component_catalog
 from devloop.portable_workflow import (
     ANALYSIS_COMPONENT_ID,
@@ -24,6 +25,7 @@ from devloop.portable_workflow import (
     REVIEW_RESULT_CONTRACT,
     REVIEWER_COMPONENT_ID,
     SECURITY_REVIEW_STEP_ID,
+    FastPreference,
     IssueStatus,
     PortableRoleAdapter,
     PortableStepComponent,
@@ -40,7 +42,10 @@ from devloop.portable_workflow import (
 )
 from devloop.workflow_defaults import WorkflowDefaultStore
 from devloop.workflow_editor import (
+    EDITOR_COMMAND_GROUPS,
+    WORKFLOW_ACTIONS,
     EditorResult,
+    EditorScope,
     WorkflowDraft,
     render_workflow_editor,
     run_workflow_editor,
@@ -123,7 +128,7 @@ class WorkflowDefaultStoreTests(unittest.TestCase):
             document = workflow.to_dict()
             for step in document["steps"]:
                 step.pop("capability_profile")
-                step.pop("codex_settings")
+                step.pop("execution_settings")
                 step.pop("execution_budget")
             canonical_document = json.dumps(
                 document,
@@ -227,8 +232,8 @@ class WorkflowDraftCapabilityTests(unittest.TestCase):
                 component.default_capability_profile(),
             )
             self.assertEqual(
-                reset_step.codex_settings,
-                component.codex_execution_defaults,
+                reset_step.execution_settings,
+                component.default_execution_settings,
             )
             self.assertEqual(
                 reset_step.execution_budget,
@@ -289,7 +294,7 @@ class WorkflowDraftTransformationTests(unittest.TestCase):
         self.assertNotEqual(duplicated.instance_id, source.instance_id)
         self.assertEqual(duplicated.display_name, "Security Review 2")
         self.assertEqual(duplicated.component_id, source.component_id)
-        self.assertEqual(duplicated.codex_settings, source.codex_settings)
+        self.assertEqual(duplicated.execution_settings, source.execution_settings)
         self.assertEqual(duplicated.execution_budget, source.execution_budget)
         self.assertEqual(duplicated.capability_profile, source.capability_profile)
         self.assertEqual(duplicated.input_bindings, source.input_bindings)
@@ -504,8 +509,8 @@ class WorkflowDraftTransformationTests(unittest.TestCase):
         self.assertEqual(changed_position, source_position)
         self.assertEqual(changed.component_id, QA_COMPONENT_ID)
         self.assertEqual(
-            changed.codex_settings,
-            replacement_component.codex_execution_defaults,
+            changed.execution_settings,
+            replacement_component.default_execution_settings,
         )
         self.assertEqual(
             changed.execution_budget,
@@ -817,7 +822,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         )
         self.assertIn("Type Change Preview — QA", "\n".join(output))
         self.assertIn(
-            "Reset: Codex settings, Execution Budget, capabilities, ports, bindings, and outcomes",
+            "Reset: Step Execution Settings, Execution Budget, capabilities, "
+            "ports, bindings, and outcomes",
             "\n".join(output),
         )
 
@@ -2303,7 +2309,11 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         rendered = "\n".join(output)
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Workflow Default (editable)", rendered)
-        self.assertIn("matching model, effort, Fast, and capabilities", rendered)
+        self.assertIn(
+            "Resume: capabilities refresh; model, effort, Fast only if the "
+            "Execution Backend matches",
+            rendered,
+        )
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Current Run cannot be edited", rendered)
         self.assertIn("Snapshot Review", rendered)
@@ -2312,6 +2322,146 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             "Snapshot Review",
         )
         self.assertEqual(stored.step(SECURITY_REVIEW_STEP_ID).display_name, "Future Review")
+
+    def test_selection_preview_shows_the_backend_ahead_of_the_model_in_both_scopes(
+        self,
+    ) -> None:
+        catalog = default_portable_component_catalog()
+        current_document = default_portable_workflow().to_dict()
+        current_security_review = next(
+            step
+            for step in current_document["steps"]
+            if step["instance_id"] == SECURITY_REVIEW_STEP_ID
+        )
+        current_security_review["execution_settings"] = {
+            "backend": "CLAUDE_CODE",
+            "model": "claude-sonnet-5",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+        }
+        current_workflow = load_portable_workflow(current_document, catalog)
+
+        for scope, workflow, expected_backend, expected_model in (
+            (
+                EditorScope.CURRENT_RUN,
+                current_workflow,
+                "Claude Code",
+                "claude-sonnet-5",
+            ),
+            (
+                EditorScope.FUTURE_RUNS,
+                default_portable_workflow(),
+                "Codex CLI",
+                "gpt-5.6-sol",
+            ),
+        ):
+            with self.subTest(scope=scope.value):
+                rendered = render_workflow_editor(
+                    workflow,
+                    SECURITY_REVIEW_STEP_ID,
+                    catalog,
+                    terminal_width=140,
+                    terminal_height=40,
+                    scope=scope,
+                )
+
+                self.assertIn(f"Backend: {expected_backend}", rendered)
+                self.assertIn(f"Model: {expected_model}", rendered)
+                self.assertLess(
+                    rendered.index(f"Backend: {expected_backend}"),
+                    rendered.index(f"Model: {expected_model}"),
+                    rendered,
+                )
+
+    def test_no_execution_backend_selection_menu_is_offered(self) -> None:
+        step_action_keys = tuple(
+            action.command for action in WORKFLOW_ACTIONS if action.group == "Step"
+        )
+        self.assertEqual(
+            step_action_keys,
+            (
+                "select",
+                "rename",
+                "type",
+                "model",
+                "reasoning",
+                "fast",
+                "budget",
+                "guidance",
+                "capabilities",
+            ),
+        )
+        edit_step_commands = next(
+            commands for group, commands in EDITOR_COMMAND_GROUPS if group == "Edit step"
+        )
+        self.assertNotIn("backend", edit_step_commands)
+
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            result = run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["backend", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=120,
+            )
+
+        rendered = "\n".join(output)
+        self.assertIs(result, EditorResult.CANCELLED)
+        self.assertIn(
+            "Edit step: rename | type | model | reasoning | fast | budget | "
+            "guidance | capabilities",
+            rendered,
+        )
+        for offered in ("Backend ·", "Choose execution backend", "Claude Code"):
+            self.assertNotIn(offered, rendered)
+
+    def test_fast_is_refused_for_a_backend_that_advertises_no_fast_support(self) -> None:
+        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            document = default_portable_workflow().to_dict()
+            document["steps"][0]["execution_settings"] = {
+                "backend": "CLAUDE_CODE",
+                "model": "claude-sonnet-5",
+                "reasoning_effort": "high",
+                "fast": "OFF",
+            }
+            WorkflowDefaultStore(configuration_path, catalog).replace(
+                load_portable_workflow(document, catalog)
+            )
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "fast", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=120,
+                catalog=catalog,
+                model_catalog_loader=lambda: CodexModelCatalog(
+                    models=(
+                        CodexModel(
+                            "gpt-5.6-sol",
+                            "Sol",
+                            "",
+                            ("xhigh",),
+                            advertises_fast=True,
+                        ),
+                    ),
+                    fetched_at="2026-07-16T12:00:00",
+                ),
+            )
+            stored = WorkflowDefaultStore(configuration_path, catalog).load()
+
+        self.assertIn(
+            "Claude Code Backend advertises no Fast support",
+            "\n".join(output),
+        )
+        self.assertIs(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.fast,
+            FastPreference.OFF,
+        )
 
     def test_rendered_editor_never_exceeds_terminal_height(self) -> None:
         height = 20

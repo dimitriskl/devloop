@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..statusui import Stage
 from .activity import ActivityCallback
@@ -24,7 +24,7 @@ from .blockers import RunWideBlocker, RunWideBlockerPolicy
 
 if TYPE_CHECKING:
     from ..model_catalog import CodexModelCatalog
-    from ..portable_workflow import CodexExecutionSettings, ExecutionBudget
+    from ..portable_workflow import ExecutionBudget, StepExecutionSettings
 
 
 # Durable log writing stays with the role runner, which owns log-root
@@ -36,6 +36,49 @@ class ExecutionBackendId(str, Enum):
     """The closed set of Execution Backends Dev Loop can dispatch a step to."""
 
     CODEX_CLI = "CODEX_CLI"
+    CLAUDE_CODE = "CLAUDE_CODE"
+
+    @property
+    def display_name(self) -> str:
+        """The operator-facing name of this Execution Backend."""
+        return _EXECUTION_BACKEND_DISPLAY_NAMES[self]
+
+    @property
+    def advertises_fast(self) -> bool:
+        """Whether this Execution Backend offers Fast for any of its models.
+
+        Fast is a Codex service-tier preference. A backend that advertises none
+        rejects Fast outright; within a backend that does advertise it, the
+        selected model still decides, through its Model Catalog entry.
+        """
+        return self is ExecutionBackendId.CODEX_CLI
+
+
+_EXECUTION_BACKEND_DISPLAY_NAMES = {
+    ExecutionBackendId.CODEX_CLI: "Codex CLI",
+    ExecutionBackendId.CLAUDE_CODE: "Claude Code",
+}
+
+
+def parse_execution_backend_id(value: Any) -> ExecutionBackendId:
+    """Parse an external backend name into the closed Execution Backend set.
+
+    This is the single boundary at which persisted documents and command-line
+    input become backend identity; nothing downstream compares a bare string.
+    """
+    if isinstance(value, ExecutionBackendId):
+        return value
+    supported = ", ".join(member.value for member in ExecutionBackendId)
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Execution Backend must be one of {supported}; got {value!r}."
+        )
+    try:
+        return ExecutionBackendId(value.strip())
+    except ValueError as error:
+        raise ValueError(
+            f"Unsupported Execution Backend {value!r}; expected one of {supported}."
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -62,7 +105,7 @@ class StepAttemptRequest:
     stdout_path: Path
     stderr_path: Path
     write_log: LogWriter
-    execution_settings: CodexExecutionSettings | None = None
+    execution_settings: StepExecutionSettings | None = None
     execution_budget: ExecutionBudget | None = None
     activity_stage: Stage = Stage.DEVELOPMENT
     activity_context: str = ""
@@ -95,7 +138,7 @@ class StepSettingsAuthorization:
     """
 
     step_display_name: str
-    settings: CodexExecutionSettings | None
+    settings: StepExecutionSettings | None
 
 
 class ExecutionBackend(ABC):

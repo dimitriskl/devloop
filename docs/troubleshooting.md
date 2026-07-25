@@ -54,18 +54,35 @@ outputs only when that is deliberate. After `type`, review reset ports,
 settings, capabilities, outcomes, and any preserved guidance. Guidance marked
 `NEEDS_REVIEW` must be kept, edited, or cleared before `apply`.
 
-## A portable workflow default reports schema v1 or malformed schema v2
+## A portable workflow default reports a superseded or malformed schema
 
-Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v2`.
-There is no v1 reader, migration, or dual-write path. From planning or
-implementation preflight, open `/options`; the editor enters a fail-closed
-recovery mode and does not load rejected content as an editable draft. Choose
-`reset-workflow` and then `apply` to atomically replace the invalid default with
-the built-in v2 workflow. Choose `cancel` to leave the stored configuration
+Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v3`.
+Both v1 and v2 are rejected explicitly; there is no reader, migration, or
+dual-write path for either. From planning or implementation preflight, open
+`/options`; the editor enters a fail-closed recovery mode and does not load
+rejected content as an editable draft. Choose `reset-workflow` and then `apply`
+to atomically replace the invalid default with the built-in v3 workflow, then
+reapply your per-step choices. Choose `cancel` to leave the stored configuration
 byte-for-byte unchanged. You may instead repair the local JSON outside a
 running Current Run. Malformed UUIDs, duplicate names, unknown Step Types,
 invalid routes, scopes, bindings, and unknown fields fail closed rather than
 being ignored.
+
+## An unfinished run reports that it cannot be resumed
+
+A Workflow Run started before schema v3 holds a v2 resolved workflow in its
+PRD-local `*.loop.state.json`, which cannot be read. Preflight says so and names
+the state file instead of failing with a stack trace. Either finish that run
+with the previous Dev Loop version, or delete its `*.loop.state.json` to start
+the PRD again from its first Workflow Step. Repository changes already written by
+earlier attempts stay in the workspace.
+
+## Fast reports that the backend advertises no Fast support
+
+Fast is a Codex service-tier preference. Enabling it is valid only when the
+selected model advertises Fast, so a Workflow Step on a backend that advertises
+none is rejected rather than silently accepted and ignored. Leave Fast Off for
+that Workflow Step.
 
 ## Model discovery or execution preflight fails
 

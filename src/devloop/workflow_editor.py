@@ -28,7 +28,8 @@ from .model_catalog import (
     model_catalog_cache_path,
 )
 from .portable_workflow import (
-    CodexExecutionSettings,
+    PORTABLE_WORKFLOW_SCHEMA,
+    StepExecutionSettings,
     ExecutionBudget,
     FastPreference,
     PortableStepComponent,
@@ -264,18 +265,19 @@ class WorkflowDraft:
         self._history.append(self._workflow)
         self._workflow = edited
 
-    def set_codex_settings(
+    def set_execution_settings(
         self,
         step_id: StepInstanceId,
-        settings: CodexExecutionSettings,
+        settings: StepExecutionSettings,
     ) -> None:
         step = self._workflow.step(step_id)
         component = self._catalog.resolve(step.component_id)
-        if not component.is_codex_backed:
+        if not component.is_agent_backed:
             raise ValueError(
-                f"Local deterministic step {step.display_name!r} has no Codex settings."
+                f"Local deterministic step {step.display_name!r} has no Step "
+                "Execution Settings."
             )
-        replacement = replace(step, codex_settings=settings)
+        replacement = replace(step, execution_settings=settings)
         self._history.append(self._workflow)
         self._workflow = replace(
             self._workflow,
@@ -332,7 +334,7 @@ class WorkflowDraft:
     def set_guidance(self, step_id: StepInstanceId, text: str) -> None:
         step = self._workflow.step(step_id)
         component = self._catalog.resolve(step.component_id)
-        if not component.is_codex_backed:
+        if not component.is_agent_backed:
             raise ValueError("Local deterministic steps do not accept Step Guidance.")
         self._replace_step(replace(step, guidance=StepGuidance(text)))
 
@@ -549,7 +551,7 @@ class WorkflowDraft:
                 component_id=component_id,
                 transitions=transitions,
                 input_bindings={},
-                codex_settings=component.codex_execution_defaults,
+                execution_settings=component.default_execution_settings,
                 execution_budget=component.execution_budget_defaults,
                 capability_profile=component.default_capability_profile(),
                 guidance=(
@@ -583,7 +585,7 @@ class WorkflowDraft:
             display_name=self._unique_display_name(component.default_display_name),
             component_id=component.component_id,
             transitions={outcome: None for outcome in component.supported_outcomes},
-            codex_settings=component.codex_execution_defaults,
+            execution_settings=component.default_execution_settings,
             execution_budget=component.execution_budget_defaults,
             capability_profile=component.default_capability_profile(),
         )
@@ -717,7 +719,7 @@ class WorkflowDraft:
             display_name=self._unique_display_name(component.default_display_name),
             component_id=component.component_id,
             transitions={outcome: None for outcome in component.supported_outcomes},
-            codex_settings=component.codex_execution_defaults,
+            execution_settings=component.default_execution_settings,
             execution_budget=component.execution_budget_defaults,
             capability_profile=component.default_capability_profile(),
         )
@@ -889,7 +891,7 @@ class WorkflowDraft:
                     component.default_display_name,
                     excluding_step_id=step_id,
                 ),
-                codex_settings=component.codex_execution_defaults,
+                execution_settings=component.default_execution_settings,
                 execution_budget=component.execution_budget_defaults,
                 capability_profile=component.default_capability_profile(),
                 guidance=None,
@@ -1133,8 +1135,8 @@ class _WorkflowEditorSession:
             lines.extend(
                 (
                     "",
-                    "Resume: matching model, effort, Fast, and capabilities refresh "
-                    "before the next attempt.",
+                    "Resume: capabilities refresh; model, effort, Fast only if the "
+                    "Execution Backend matches.",
                 )
             )
         if self._notice:
@@ -1296,8 +1298,9 @@ class _WorkflowEditorSession:
             self._draft.reset_workflow(default_portable_workflow())
             self._default_recovery_state = WorkflowDefaultRecoveryState.APPLY_READY
             self._message(
-                "Built-in schema-v2 workflow prepared. Choose Apply to atomically "
-                "replace the invalid default, or Cancel to leave it unchanged."
+                f"Built-in {PORTABLE_WORKFLOW_SCHEMA} workflow prepared. Choose Apply "
+                "to atomically replace the invalid default, or Cancel to leave it "
+                "unchanged."
             )
             return None
         if command == "apply":
@@ -1626,7 +1629,7 @@ class _WorkflowEditorSession:
             self._message(f"Cannot move step: {error}")
 
     def _set_model(self) -> None:
-        selection = self._selected_codex_context()
+        selection = self._selected_step_context()
         if selection is None:
             return
         step, settings, model_catalog = selection
@@ -1680,13 +1683,18 @@ class _WorkflowEditorSession:
             self._message(
                 f"{model.display_name} does not advertise Fast; Fast was set to Off."
             )
-        self._draft.set_codex_settings(
+        self._draft.set_execution_settings(
             step.instance_id,
-            CodexExecutionSettings(model.model_id, reasoning_effort, fast),
+            StepExecutionSettings(
+                settings.backend,
+                model.model_id,
+                reasoning_effort,
+                fast,
+            ),
         )
 
     def _set_reasoning(self) -> None:
-        selection = self._selected_codex_context()
+        selection = self._selected_step_context()
         if selection is None:
             return
         step, settings, model_catalog = selection
@@ -1701,7 +1709,7 @@ class _WorkflowEditorSession:
         reasoning_effort = self._choose_reasoning_effort(model)
         if reasoning_effort is None:
             return
-        self._draft.set_codex_settings(
+        self._draft.set_execution_settings(
             step.instance_id,
             replace(settings, reasoning_effort=reasoning_effort),
         )
@@ -1744,10 +1752,16 @@ class _WorkflowEditorSession:
         return model.reasoning_efforts[position - 1]
 
     def _set_fast(self) -> None:
-        selection = self._selected_codex_context()
+        selection = self._selected_step_context()
         if selection is None:
             return
         step, settings, model_catalog = selection
+        if not settings.backend.advertises_fast:
+            self._message(
+                f"The {settings.backend.display_name} Backend advertises no Fast "
+                f"support for model {settings.model!r}; only Off is available."
+            )
+            return
         try:
             model = model_catalog.model(settings.model)
         except ValueError:
@@ -1780,7 +1794,7 @@ class _WorkflowEditorSession:
         if choice not in {"on", "off"}:
             self._message("Choose on, off, or cancel for Fast.")
             return
-        self._draft.set_codex_settings(
+        self._draft.set_execution_settings(
             step.instance_id,
             replace(
                 settings,
@@ -1814,7 +1828,7 @@ class _WorkflowEditorSession:
     def _edit_guidance(self) -> None:
         step = self._draft.workflow.step(self._future_selected_step_id)
         component = self._catalog.resolve(step.component_id)
-        if not component.is_codex_backed:
+        if not component.is_agent_backed:
             if step.guidance is None:
                 self._message("Local deterministic steps do not accept Step Guidance.")
                 return
@@ -1883,18 +1897,19 @@ class _WorkflowEditorSession:
         except ValueError as error:
             self._message(f"Cannot set Step Guidance: {error}")
 
-    def _selected_codex_context(
+    def _selected_step_context(
         self,
-    ) -> tuple[WorkflowStep, CodexExecutionSettings, CodexModelCatalog] | None:
+    ) -> tuple[WorkflowStep, StepExecutionSettings, CodexModelCatalog] | None:
         step = self._draft.workflow.step(self._future_selected_step_id)
         component = self._catalog.resolve(step.component_id)
-        if not component.is_codex_backed:
+        if not component.is_agent_backed:
             self._message(
-                f"{step.display_name!r} is local deterministic; Codex settings do not apply."
+                f"{step.display_name!r} is local deterministic; Step Execution "
+                "Settings do not apply."
             )
             return None
-        if step.codex_settings is None:
-            self._message(f"{step.display_name!r} has no Codex Execution Settings.")
+        if step.execution_settings is None:
+            self._message(f"{step.display_name!r} has no Step Execution Settings.")
             return None
         if self._model_catalog is None:
             self._message(
@@ -1909,7 +1924,7 @@ class _WorkflowEditorSession:
                 "Catalog."
             )
             return None
-        return step, step.codex_settings, self._model_catalog
+        return step, step.execution_settings, self._model_catalog
 
     def _load_initial_model_catalog(self) -> None:
         if self._model_catalog_loader is not None:
@@ -2304,8 +2319,8 @@ class _WorkflowEditorSession:
             self._message(f"Cannot apply workflow: {error}")
             return None
         self._message(
-            "Workflow default applied. Matching model, reasoning effort, Fast, and "
-            "capabilities will be used when unfinished work is resumed; structural "
+            "Workflow default applied. Resume: capabilities refresh; model, "
+            "effort, Fast only if the Execution Backend matches. Structural "
             "changes apply to new runs."
         )
         return EditorResult.APPLIED
@@ -2393,15 +2408,18 @@ def _compact_detail_lines(
         f"Component: {selected.component_id}",
         f"Scope: {component.scope.value.title()}",
     ]
-    if component.is_codex_backed:
-        if selected.codex_settings is None:
-            lines.append("Codex settings: missing")
+    if component.is_agent_backed:
+        if selected.execution_settings is None:
+            lines.append("Step Execution Settings: missing")
         else:
             lines.append(
+                f"Backend: {selected.execution_settings.backend.display_name}"
+            )
+            lines.append(
                 "Model: "
-                f"{selected.codex_settings.model} | "
-                f"Effort: {selected.codex_settings.reasoning_effort} | "
-                f"Fast: {selected.codex_settings.fast.value.title()} | "
+                f"{selected.execution_settings.model} | "
+                f"Effort: {selected.execution_settings.reasoning_effort} | "
+                f"Fast: {selected.execution_settings.fast.value.title()} | "
                 f"Timeout: {selected.execution_budget.timeout_seconds:g}s"
             )
         if model_catalog is None:
@@ -2504,8 +2522,8 @@ def render_workflow_editor(
         )
         if scope is EditorScope.FUTURE_RUNS:
             header.append(
-                "Resume: matching model, effort, Fast, and capabilities refresh "
-                "before the next attempt"
+                "Resume: capabilities refresh; model, effort, Fast only if the "
+                "Execution Backend matches"
             )
     if notice:
         header.append(f"Status: {notice}")
@@ -2674,8 +2692,8 @@ def render_type_change_preview(
         f"Type: {source.component_id} -> {component.component_id}",
         f"Preserved: Step Instance ID, display name, and {location}",
         (
-            "Reset: Codex settings, Execution Budget, capabilities, ports, "
-            "bindings, and outcomes"
+            "Reset: Step Execution Settings, Execution Budget, capabilities, "
+            "ports, bindings, and outcomes"
         ),
     ]
     if source.guidance is not None:

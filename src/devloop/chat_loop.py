@@ -21,7 +21,7 @@ from .portable_execution_backend.codex_cli import (
     resolve_codex_executable,
 )
 from .portable_workflow import (
-    CodexExecutionSettings,
+    StepExecutionSettings,
     ExecutionBudget,
     default_execution_budget,
 )
@@ -95,7 +95,7 @@ class ChatConfig:
     codex: str
     repo_root: Path
     bundle_root: Path
-    codex_settings: CodexExecutionSettings
+    execution_settings: StepExecutionSettings
     execution_budget: ExecutionBudget = field(
         default_factory=lambda: default_execution_budget("analysis")
     )
@@ -159,7 +159,7 @@ class ChatSession:
                     "--skip-git-repo-check",
                 ]
             )
-        command.extend(codex_execution_settings_args(self.config.codex_settings))
+        command.extend(codex_execution_settings_args(self.config.execution_settings))
         for image in self.pending_images:
             command.extend(["-i", str(image)])
         command.append(first_prompt if first_prompt is not None else message)

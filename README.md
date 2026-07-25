@@ -351,11 +351,11 @@ sensible defaults (all pending issues, a dedicated worktree, the
 self-improvement wiki always on). Type `/run-options` to change the start issue,
 worktree parent path, worktree folder name, or branch first. Type `/options` to
 edit the User Workflow Default and, when resuming an existing implementation
-worktree, inspect its read-only Current Run. Matching model, effort, Fast, and
-capability changes are adopted before the next resumed attempt; the active
-workflow structure remains fixed. When a
-run finishes successfully, the runner asks whether to merge the implementation
-branch or worktree into another branch.
+worktree, inspect its read-only Current Run. Capability changes are adopted
+before the next resumed attempt; model, effort, and Fast changes are adopted
+only when they keep that step's Execution Backend. The active workflow structure
+remains fixed. When a run finishes successfully, the runner asks whether to
+merge the implementation branch or worktree into another branch.
 
 The final handoff command is equivalent to:
 

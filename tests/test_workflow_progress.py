@@ -73,7 +73,7 @@ class WorkflowProgressProjectionTests(unittest.TestCase):
             display_name="Incident Review",
             component_id=REVIEWER_COMPONENT_ID,
             transitions={StepOutcome.SUCCEEDED: FINAL_REVIEW_STEP_ID},
-            codex_settings=workflow.step(FINAL_REVIEW_STEP_ID).codex_settings,
+            execution_settings=workflow.step(FINAL_REVIEW_STEP_ID).execution_settings,
         )
         development = workflow.step(DEVELOPMENT_STEP_ID)
         workflow = replace(

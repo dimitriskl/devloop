@@ -12,7 +12,11 @@ from unittest import mock
 from devloop import cli, statusui
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue, parse_issue_index
-from devloop.portable_execution_backend import StepActivityEvent, StepActivityKind
+from devloop.portable_execution_backend import (
+    ExecutionBackendId,
+    StepActivityEvent,
+    StepActivityKind,
+)
 from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FastPreference,
@@ -112,7 +116,8 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 for step in second_document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            second_development["codex_settings"] = {
+            second_development["execution_settings"] = {
+                "backend": "CODEX_CLI",
                 "model": "gpt-5.6-sol",
                 "reasoning_effort": "xhigh",
                 "fast": "ON",
@@ -156,8 +161,13 @@ class ResolveRunWorkflowTests(unittest.TestCase):
             "First Default Review",
         )
         self.assertEqual(
-            refreshed_active.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.ON),
+            refreshed_active.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.ON,
+            ),
         )
         self.assertEqual(
             refreshed_active.step(DEVELOPMENT_STEP_ID).capability_profile.skills,
@@ -201,7 +211,8 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 for step in changed_document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            development["codex_settings"] = {
+            development["execution_settings"] = {
+                "backend": "CODEX_CLI",
                 "model": "gpt-5.6-sol",
                 "reasoning_effort": "xhigh",
                 "fast": "OFF",
@@ -225,8 +236,13 @@ class ResolveRunWorkflowTests(unittest.TestCase):
             analysis_snapshot.step(SECURITY_REVIEW_STEP_ID).display_name,
         )
         self.assertEqual(
-            resolved.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+            resolved.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.OFF,
+            ),
         )
         self.assertEqual(
             writer.state["resolved_workflow_hash"],
@@ -245,7 +261,7 @@ class ResolveRunWorkflowTests(unittest.TestCase):
                 for step in current_document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            development["codex_settings"]["model"] = "run-specific-model"
+            development["execution_settings"]["model"] = "run-specific-model"
             current_workflow = load_portable_workflow(current_document, catalog)
             writer = LoopStateWriter(issue_index)
             writer.record_resolved_workflow(current_workflow, catalog)

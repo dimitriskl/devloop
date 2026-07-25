@@ -34,7 +34,7 @@ from .portable_workflow import (
     default_portable_component_catalog,
     parse_issue_status,
     planning_workflow_step,
-    preflight_codex_execution_settings,
+    preflight_step_execution_settings,
 )
 from .portable_component_catalog import build_portable_component_catalog
 from .product_scope import TargetProduct, detect_target_product
@@ -287,7 +287,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         ),
         wiki_index=wiki_index,
     )
-    planning_settings = planning_step.codex_settings
+    planning_settings = planning_step.execution_settings
     assert planning_settings is not None
 
     config = ChatConfig(
@@ -296,7 +296,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         bundle_root=bundle.root,
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
-        codex_settings=planning_settings,
+        execution_settings=planning_settings,
         execution_budget=planning_step.execution_budget,
         workflow_progress=statusui.project_workflow_progress(
             workflow_snapshot,
@@ -371,21 +371,21 @@ def preflight_analysis_workflow(
             workflow = WorkflowDefaultStore(state_path, component_catalog).load()
             planning_step = planning_workflow_step(workflow, component_catalog)
             live_model_catalog = model_catalog_loader()
-            preflight_codex_execution_settings(
+            preflight_step_execution_settings(
                 workflow,
                 component_catalog,
                 live_model_catalog,
             )
-            if planning_step.codex_settings is None:
+            if planning_step.execution_settings is None:
                 raise ValueError(
-                    f"Planning step {planning_step.display_name!r} has no Codex "
+                    f"Planning step {planning_step.display_name!r} has no Step "
                     "Execution Settings."
                 )
             return workflow
         except (CatalogDiscoveryError, KeyError, ValueError) as error:
             safe_error = sanitize_terminal_text(error, preserve_newlines=False)
             print(
-                "Codex Execution Settings preflight failed before Analysis: "
+                "Step Execution Settings preflight failed before Analysis: "
                 f"{safe_error}"
             )
             print(
@@ -1274,12 +1274,21 @@ def run_handoff(
         if raw == "/quit":
             return 0
         if raw == "/options":
-            current_workflow = load_handoff_current_workflow(
-                repo_root,
-                artifacts,
-                params,
-                component_catalog=component_catalog,
-            )
+            try:
+                current_workflow = load_handoff_current_workflow(
+                    repo_root,
+                    artifacts,
+                    params,
+                    component_catalog=component_catalog,
+                )
+            except ValueError as error:
+                # A rejected Current Run must not block editing the Workflow
+                # Default: state the reason and open /options without it.
+                print(
+                    "Current Run workflow unavailable: "
+                    f"{sanitize_terminal_text(error, preserve_newlines=False)}"
+                )
+                current_workflow = None
             if current_workflow is None:
                 current_workflow = workflow_snapshot
             run_options_menu(

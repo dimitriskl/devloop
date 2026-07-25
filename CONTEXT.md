@@ -101,6 +101,18 @@ _Avoid_: AI provider, model API
 The execution backend that delegates agent runs to the user's installed and configured Codex CLI.
 _Avoid_: Codex API
 
+**Claude Code Backend**:
+The execution backend that delegates agent runs to the user's installed and configured Claude Code CLI.
+_Avoid_: Anthropic API, Claude subscription
+
+**Backend Availability**:
+Whether one Execution Backend is installed and usable on this machine, reported per backend so a Workflow Step is never configured against a backend the user cannot run.
+_Avoid_: Registered backend, model availability
+
+**Permission Denial**:
+A record that an Execution Backend prevented an agent from using a tool it requested during a Workflow Step attempt. Any denial makes the attempt's Step Outcome `BLOCKED`, because an agent may otherwise report denied work as done.
+_Avoid_: Approval Request, sandbox violation, retryable error
+
 **Execution Thread**:
 A Codex App Server conversation scoped to agent work for a Workflow Step attempt.
 _Avoid_: Workflow Run, shared cross-step transcript
@@ -126,7 +138,7 @@ A declarative description of a workflow's steps and its outcome-driven transitio
 _Avoid_: Pipeline file, step list
 
 **Workflow Step**:
-A distinct named instance of a Workflow Step Component within a Workflow Definition. It has its own identity, inputs, outputs, transitions, display name, and Codex Execution Settings.
+A distinct named instance of a Workflow Step Component within a Workflow Definition. It has its own identity, inputs, outputs, transitions, display name, and Step Execution Settings.
 _Avoid_: Phase, stage, component class
 
 **Workflow Step Type**:
@@ -297,21 +309,21 @@ _Avoid_: Component instructions, Skill, permission override
 The component-declared execution permissions and mutation constraints enforced for a Workflow Step attempt.
 _Avoid_: Prompt-only instruction, user capability preference
 
-**Codex Execution Settings**:
-The authoritative Codex model, reasoning effort, and Fast service-tier preference selected independently for one agent-backed Workflow Step and used by every one of its attempts in a Workflow Run.
-_Avoid_: Strength, role model, global Codex default
+**Step Execution Settings**:
+The authoritative Execution Backend, model, reasoning effort, and Fast service-tier preference selected independently for one agent-backed Workflow Step and used by every one of its attempts in a Workflow Run. Fast may be enabled only when the selected model advertises it.
+_Avoid_: Codex Execution Settings, strength, role model, global Codex default
 
 **Component Execution Defaults**:
-The Codex Execution Settings initially supplied by a Workflow Step Component when a new Workflow Step of that component is added.
+The Step Execution Settings a Workflow Step Component supplies for each Execution Backend, used when a new Workflow Step of that component is added and when its backend changes.
 _Avoid_: Locked component settings, shared settings for every instance
 
 **Execution Budget**:
-The timeout and checkpoint limits governing a Workflow Step attempt independently of its Codex Execution Settings.
+The timeout and checkpoint limits governing a Workflow Step attempt independently of its Step Execution Settings.
 _Avoid_: Model profile, reasoning-effort preset
 
-**Codex Model Catalog**:
-The live account-aware catalog exposed by the installed Codex backend that defines selectable models, supported reasoning efforts, and Fast availability.
-_Avoid_: Hard-coded model list, cached authorization
+**Model Catalog**:
+The account-aware catalog belonging to one Execution Backend that defines its selectable models, their supported reasoning efforts, and their Fast availability. A cached catalog is display-only and can never authorize a run.
+_Avoid_: Codex Model Catalog as the only catalog, hard-coded model list, cached authorization
 
 **Required Capability**:
 A Skill or Agent Reference that a Workflow Step Component depends on and that cannot be removed from its Step Capability Profile.
@@ -362,7 +374,7 @@ The non-full-screen presentation of the shared Workflow Progress Dashboard, comb
 _Avoid_: Vertical or corner borders, appended event spam, dashboard-only interface
 
 **Step Progress**:
-The GUID-keyed projection of one Workflow Step instance's display name, status, pass, accumulated duration, and active Codex settings for dashboard rendering.
+The GUID-keyed projection of one Workflow Step instance's display name, status, pass, accumulated duration, and active Step Execution Settings for dashboard rendering.
 _Avoid_: Component-type status, hard-coded phase row
 
 **Workflow Progress Dashboard**:

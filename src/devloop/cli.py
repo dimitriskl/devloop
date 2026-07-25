@@ -36,7 +36,7 @@ from .portable_workflow import (
     default_portable_workflow,
     load_portable_workflow,
     parse_issue_status,
-    preflight_codex_execution_settings,
+    preflight_step_execution_settings,
     refresh_resumable_execution_preferences,
 )
 from .run_review import (
@@ -560,10 +560,10 @@ def _run_devloop_attempt(
                 allow_interactive_repair=not args.non_interactive,
             )
             if resolved_workflow is None:
-                print("Run cancelled before Codex Execution Settings were authorized.")
+                print("Run cancelled before Step Execution Settings were authorized.")
                 return 0
     except ValueError as exc:
-        parser.error(f"Codex Execution Settings preflight failed: {exc}")
+        parser.error(f"Step Execution Settings preflight failed: {exc}")
     if renew_exhausted_scheduler_for_explicit_start(
         state_writer,
         issues,
@@ -1408,7 +1408,7 @@ def resolve_run_workflow(
         if require_codex_preflight:
             if live_model_catalog is None:
                 raise ValueError("A fresh live Codex Model Catalog is required.")
-            preflight_codex_execution_settings(
+            preflight_step_execution_settings(
                 workflow,
                 catalog,
                 live_model_catalog,
@@ -1434,7 +1434,7 @@ def resolve_run_workflow(
     if require_codex_preflight:
         if live_model_catalog is None:
             raise ValueError("A fresh live Codex Model Catalog is required.")
-        preflight_codex_execution_settings(
+        preflight_step_execution_settings(
             workflow,
             catalog,
             live_model_catalog,
@@ -1478,12 +1478,13 @@ def resolve_run_workflow_with_repair(
                     f"{safe_error} Retry after restoring live catalog availability or "
                     "repair the User Workflow Default before starting the command."
                 ) from error
-            writer(f"Codex Execution Settings preflight failed: {safe_error}")
+            writer(f"Step Execution Settings preflight failed: {safe_error}")
             if has_current_snapshot:
                 writer(
-                    "The Current Run structure is fixed. /options can update model, "
-                    "reasoning effort, Fast, and capabilities for the resumed attempt; "
-                    "retry-catalog retries live discovery; /quit stops the run."
+                    "The Current Run structure is fixed. /options can update "
+                    "capabilities for the resumed attempt, and model, effort, Fast "
+                    "only if the Execution Backend matches; retry-catalog retries "
+                    "live discovery; /quit stops the run."
                 )
             else:
                 writer(

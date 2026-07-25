@@ -186,7 +186,7 @@ def project_workflow_progress(
         latest_attempt = step_attempts[-1] if step_attempts else None
         if runtime is not None and runtime.status.value == "RUNNING":
             active_step_instance_id = str(step.instance_id)
-        settings = step.codex_settings
+        settings = step.execution_settings
         projected_status = _projected_step_status(runtime, latest_attempt)
         if (
             scope is WorkflowProgressScope.WORKFLOW

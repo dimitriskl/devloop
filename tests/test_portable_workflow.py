@@ -605,7 +605,7 @@ class PortableWorkflowDefinitionTests(unittest.TestCase):
         valid = default_portable_workflow().to_dict()
 
         invalid_cases = {
-            "devloop.portable-workflow/v2": (
+            "superseded by 'devloop.portable-workflow/v3'": (
                 "schema",
                 "devloop.portable-workflow/v1",
             ),
@@ -2037,7 +2037,7 @@ class PortableWorkflowExecutionTests(unittest.TestCase):
             document = workflow.to_dict()
             for step in document["steps"]:
                 step.pop("capability_profile")
-                step.pop("codex_settings")
+                step.pop("execution_settings")
                 step.pop("execution_budget")
             canonical_document = json.dumps(
                 document,

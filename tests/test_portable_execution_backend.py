@@ -29,9 +29,9 @@ from devloop.portable_execution_backend import (
     update_checkpoint_for_step_activity,
 )
 from devloop.portable_workflow import (
-    CodexExecutionSettings,
     ExecutionBudget,
     FastPreference,
+    StepExecutionSettings,
 )
 from devloop.statusui import Stage
 from devloop.templates import BundleContext, Preset
@@ -163,7 +163,8 @@ class CodexInvocationTests(unittest.TestCase):
                 approval_policy="never",
                 schema_path=root / "role-result.schema.json",
                 message_path=root / "attempt.last-message.json",
-                codex_settings=CodexExecutionSettings(
+                execution_settings=StepExecutionSettings(
+                    ExecutionBackendId.CODEX_CLI,
                     "gpt-5.6-sol",
                     "xhigh",
                     FastPreference.OFF,
@@ -214,7 +215,8 @@ class CodexInvocationTests(unittest.TestCase):
                 approval_policy="on-request",
                 schema_path=root / "schema.json",
                 message_path=root / "message.json",
-                codex_settings=CodexExecutionSettings(
+                execution_settings=StepExecutionSettings(
+                    ExecutionBackendId.CODEX_CLI,
                     "gpt-5.6-luna",
                     "high",
                     FastPreference.ON,
@@ -596,13 +598,18 @@ class RoleRunnerBackendDispatchTests(unittest.TestCase):
             issue_path.write_text("# Backend dispatch\n", encoding="utf-8")
             runner = self._runner(root, backend)
             budget = ExecutionBudget(timeout_seconds=120, checkpoint_seconds=60)
-            settings = CodexExecutionSettings("gpt-5.6-luna", "high", FastPreference.OFF)
+            settings = StepExecutionSettings(
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-luna",
+                "high",
+                FastPreference.OFF,
+            )
 
             result = runner.run_role(
                 role="coder",
                 issue=Issue("0001", "Backend dispatch", issue_path, False),
                 pass_number=1,
-                codex_settings=settings,
+                execution_settings=settings,
                 execution_budget=budget,
                 progress="1/2",
             )

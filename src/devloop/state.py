@@ -31,6 +31,7 @@ from .portable_workflow import (
     StepOutcome,
     StepRuntimeState,
     StepRuntimeStatus,
+    SupersededWorkflowSchemaError,
     TypedStepOutput,
     WorkflowDefinition,
     canonical_workflow_document_hash,
@@ -129,7 +130,16 @@ class LoopStateWriter:
         document = self.state.get("resolved_workflow")
         if not isinstance(document, dict):
             raise ValueError("Loop state has no resolved portable workflow.")
-        workflow = load_portable_workflow(document, catalog)
+        try:
+            workflow = load_portable_workflow(document, catalog)
+        except SupersededWorkflowSchemaError as error:
+            raise ValueError(
+                f"{error} This unfinished Workflow Run cannot be resumed: its "
+                f"resolved workflow in {self.state_path.name} predates the "
+                "Execution Backend. Finish it with the previous Dev Loop "
+                f"version, or delete {self.state_path.name} to start this PRD "
+                "again from its first Workflow Step."
+            ) from error
         expected_hash = self.state.get("resolved_workflow_hash")
         actual_hash = canonical_workflow_document_hash(document)
         if expected_hash != actual_hash:

@@ -15,7 +15,9 @@ from .codex_runner import RoleResult, result_to_dict
 from .issue_pack import Issue
 from .model_catalog import CodexModelCatalog
 from .portable_execution_backend import (
+    ExecutionBackendId,
     StepSettingsAuthorization,
+    parse_execution_backend_id,
     sole_registered_execution_backend,
 )
 from .portable_text import normalize_single_line_display_name
@@ -32,16 +34,41 @@ from .step_configuration import (
 from .terminal_text import has_unsafe_terminal_controls
 
 
-PORTABLE_WORKFLOW_SCHEMA = "devloop.portable-workflow/v2"
+PORTABLE_WORKFLOW_SCHEMA = "devloop.portable-workflow/v3"
+# Every earlier schema is rejected outright: there is no migration, no
+# compatibility reader, and no dual-write path.
+SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS = (
+    "devloop.portable-workflow/v1",
+    "devloop.portable-workflow/v2",
+)
 PORTABLE_WORKFLOW_FIELDS = frozenset({"schema", "start_step_id", "steps"})
 REWORK_INPUT_KEY = "__rework__"
-CODEX_EXECUTION_SETTINGS_FIELDS = frozenset(
-    {"model", "reasoning_effort", "fast"}
+STEP_EXECUTION_SETTINGS_KEY = "execution_settings"
+STEP_EXECUTION_SETTINGS_FIELDS = frozenset(
+    {"backend", "model", "reasoning_effort", "fast"}
 )
 EXECUTION_BUDGET_FIELDS = frozenset(
     {"timeout_seconds", "checkpoint_seconds"}
 )
 MAX_EXECUTION_BUDGET_SECONDS = 3600.0
+DEFAULT_EXECUTION_BACKEND = ExecutionBackendId.CODEX_CLI
+
+
+class SupersededWorkflowSchemaError(ValueError):
+    """A portable workflow document declares a schema Dev Loop no longer reads.
+
+    Callers add the remedy that fits their document: a saved Workflow Default is
+    recreated in `/options`, while an unfinished Workflow Run cannot be resumed.
+    """
+
+    def __init__(self, found_schema: Any) -> None:
+        self.found_schema = found_schema
+        super().__init__(
+            f"Portable workflow schema {found_schema!r} is superseded by "
+            f"{PORTABLE_WORKFLOW_SCHEMA!r}, which records an Execution Backend "
+            "for every agent-backed Workflow Step. Dev Loop does not migrate "
+            "earlier schema versions."
+        )
 
 
 class StepScope(str, Enum):
@@ -115,12 +142,23 @@ class FastPreference(str, Enum):
 
 
 @dataclass(frozen=True)
-class CodexExecutionSettings:
+class StepExecutionSettings:
+    """The Execution Backend, model, reasoning effort, and Fast preference.
+
+    Selected independently for one agent-backed Workflow Step and used by every
+    one of its attempts in a Workflow Run.
+    """
+
+    backend: ExecutionBackendId
     model: str
     reasoning_effort: str
     fast: FastPreference = FastPreference.OFF
 
     def __post_init__(self) -> None:
+        if not isinstance(self.backend, ExecutionBackendId):
+            raise ValueError(
+                "Step Execution Settings require a known Execution Backend."
+            )
         for field_name, value in (
             ("model", self.model),
             ("reasoning effort", self.reasoning_effort),
@@ -132,19 +170,26 @@ class CodexExecutionSettings:
                 or has_unsafe_terminal_controls(value)
             ):
                 raise ValueError(
-                    f"Codex Execution Settings {field_name} must be a non-empty "
+                    f"Step Execution Settings {field_name} must be a non-empty "
                     "single-line value."
                 )
+        if self.fast is FastPreference.ON and not self.backend.advertises_fast:
+            raise ValueError(
+                f"Fast cannot be enabled for the {self.backend.display_name} "
+                f"Backend: model {self.model!r} advertises no Fast support. "
+                "Set Fast to Off in /options."
+            )
 
     @property
     def fast_enabled(self) -> bool:
         return self.fast is FastPreference.ON
 
-    def as_tuple(self) -> tuple[str, str, FastPreference]:
-        return self.model, self.reasoning_effort, self.fast
+    def as_tuple(self) -> tuple[ExecutionBackendId, str, str, FastPreference]:
+        return self.backend, self.model, self.reasoning_effort, self.fast
 
     def to_dict(self) -> dict[str, str]:
         return {
+            "backend": self.backend.value,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
             "fast": self.fast.value,
@@ -186,20 +231,58 @@ class ExecutionBudget:
         }
 
 
-def default_codex_execution_settings(role: str) -> CodexExecutionSettings:
-    defaults = {
+# Component Execution Defaults, per Execution Backend and per built-in role.
+# The Codex CLI Backend column is the historical per-role default and must not
+# change. The Claude Code Backend column names pinned concrete identifiers and
+# an effort the provider CLI accepts, and is superseded by the bundled Claude
+# Model Catalog once that reference data exists.
+DEFAULT_STEP_EXECUTION_SETTINGS: Mapping[
+    ExecutionBackendId,
+    Mapping[str, tuple[str, str]],
+] = {
+    ExecutionBackendId.CODEX_CLI: {
         "analysis": ("gpt-5.6-sol", "xhigh"),
         "coder": ("gpt-5.6-luna", "high"),
         "reviewer": ("gpt-5.6-sol", "xhigh"),
         "qa": ("gpt-5.6-terra", "high"),
-    }
+    },
+    ExecutionBackendId.CLAUDE_CODE: {
+        "analysis": ("claude-sonnet-5", "high"),
+        "coder": ("claude-sonnet-5", "high"),
+        "reviewer": ("claude-sonnet-5", "high"),
+        "qa": ("claude-haiku-4-5-20251001", "high"),
+    },
+}
+
+
+def default_step_execution_settings(
+    role: str,
+    backend: ExecutionBackendId = DEFAULT_EXECUTION_BACKEND,
+) -> StepExecutionSettings:
+    """The Component Execution Defaults for one built-in role on one backend."""
     try:
-        model, reasoning_effort = defaults[role]
+        model, reasoning_effort = DEFAULT_STEP_EXECUTION_SETTINGS[backend][role]
     except KeyError as error:
         raise ValueError(
-            f"No built-in Codex Execution Settings exist for role {role!r}."
+            f"No built-in Step Execution Settings exist for role {role!r} on the "
+            f"{backend.display_name} Backend."
         ) from error
-    return CodexExecutionSettings(model, reasoning_effort, FastPreference.OFF)
+    return StepExecutionSettings(
+        backend,
+        model,
+        reasoning_effort,
+        FastPreference.OFF,
+    )
+
+
+def default_component_execution_defaults(
+    role: str,
+) -> dict[ExecutionBackendId, StepExecutionSettings]:
+    """One built-in role's Component Execution Defaults for every backend."""
+    return {
+        backend: default_step_execution_settings(role, backend)
+        for backend in ExecutionBackendId
+    }
 
 
 def default_execution_budget(role: str) -> ExecutionBudget:
@@ -358,7 +441,7 @@ class PortableRoleAdapter:
             arguments["rework_attempt_record"] = step_attempt_record_to_dict(
                 rework_attempt
             )
-        arguments["codex_settings"] = step.codex_settings
+        arguments["execution_settings"] = step.execution_settings
         arguments["execution_budget"] = step.execution_budget
         arguments["skill_paths"] = step.capability_profile.skills
         arguments["agent_paths"] = step.capability_profile.agent_references
@@ -378,7 +461,7 @@ class PortableStepComponent:
     input_ports: Mapping[str, DataContractId] = field(default_factory=dict)
     optional_input_ports: Mapping[str, DataContractId] = field(default_factory=dict)
     output_ports: Mapping[str, DataContractId] = field(default_factory=dict)
-    codex_execution_defaults: CodexExecutionSettings | None = None
+    execution_defaults: Mapping[ExecutionBackendId, StepExecutionSettings] | None = None
     execution_budget_defaults: ExecutionBudget = field(
         default_factory=ExecutionBudget
     )
@@ -405,15 +488,16 @@ class PortableStepComponent:
                 "Step Components require an Execution Budget default."
             )
         if self.adapter is None:
-            if self.codex_execution_defaults is not None:
+            if self.execution_defaults is not None:
                 raise ValueError(
-                    "Local deterministic Step Components cannot declare Codex defaults."
+                    "Local deterministic Step Components cannot declare "
+                    "Component Execution Defaults."
                 )
-        elif self.codex_execution_defaults is None:
+        elif self.execution_defaults is None:
             object.__setattr__(
                 self,
-                "codex_execution_defaults",
-                default_codex_execution_settings(self.adapter.execution_role),
+                "execution_defaults",
+                default_component_execution_defaults(self.adapter.execution_role),
             )
         required_references = tuple(
             item.reference for item in self.required_capabilities
@@ -429,8 +513,33 @@ class PortableStepComponent:
         return {**self.input_ports, **self.optional_input_ports}
 
     @property
-    def is_codex_backed(self) -> bool:
+    def is_agent_backed(self) -> bool:
         return self.adapter is not None
+
+    @property
+    def default_execution_settings(self) -> StepExecutionSettings | None:
+        """The Component Execution Defaults a new Workflow Step starts from."""
+        if self.execution_defaults is None:
+            return None
+        return self.execution_defaults[DEFAULT_EXECUTION_BACKEND]
+
+    def execution_defaults_for(
+        self,
+        backend: ExecutionBackendId,
+    ) -> StepExecutionSettings:
+        """The Component Execution Defaults for one Execution Backend."""
+        if self.execution_defaults is None:
+            raise ValueError(
+                f"Step Component {self.component_id!r} declares no Component "
+                "Execution Defaults."
+            )
+        try:
+            return self.execution_defaults[backend]
+        except KeyError as error:
+            raise ValueError(
+                f"Step Component {self.component_id!r} declares no Component "
+                f"Execution Defaults for the {backend.display_name} Backend."
+            ) from error
 
     def default_capability_profile(self) -> StepCapabilityProfile:
         return capability_profile_from_defaults(
@@ -557,7 +666,7 @@ class WorkflowStep:
     component_id: StepComponentId
     transitions: Mapping[StepOutcome, StepInstanceId | None] = field(default_factory=dict)
     input_bindings: Mapping[str, PortBinding] = field(default_factory=dict)
-    codex_settings: CodexExecutionSettings | None = None
+    execution_settings: StepExecutionSettings | None = None
     execution_budget: ExecutionBudget = field(default_factory=ExecutionBudget)
     capability_profile: StepCapabilityProfile = field(
         default_factory=StepCapabilityProfile
@@ -641,8 +750,12 @@ class WorkflowDefinition:
                         for input_port, binding in sorted(step.input_bindings.items())
                     },
                     **(
-                        {"codex_settings": step.codex_settings.to_dict()}
-                        if step.codex_settings is not None
+                        {
+                            STEP_EXECUTION_SETTINGS_KEY: (
+                                step.execution_settings.to_dict()
+                            )
+                        }
+                        if step.execution_settings is not None
                         else {}
                     ),
                     "execution_budget": step.execution_budget.to_dict(),
@@ -680,11 +793,24 @@ def _refresh_step_execution_preferences(
 ) -> WorkflowStep:
     if preferred_step is None or preferred_step.component_id != step.component_id:
         return step
-    return replace(
-        step,
-        codex_settings=preferred_step.codex_settings,
-        capability_profile=preferred_step.capability_profile,
-    )
+    refreshed = replace(step, capability_profile=preferred_step.capability_profile)
+    if _selects_another_execution_backend(step, preferred_step):
+        # A resumed Workflow Run keeps the Execution Backend its Run Snapshot
+        # recorded, so results stay comparable across passes. Adopting another
+        # backend's model and reasoning effort would also be incoherent.
+        return refreshed
+    return replace(refreshed, execution_settings=preferred_step.execution_settings)
+
+
+def _selects_another_execution_backend(
+    step: WorkflowStep,
+    preferred_step: WorkflowStep,
+) -> bool:
+    snapshotted = step.execution_settings
+    preferred = preferred_step.execution_settings
+    if snapshotted is None or preferred is None:
+        return False
+    return preferred.backend is not snapshotted.backend
 
 
 @dataclass(frozen=True)
@@ -1234,7 +1360,10 @@ def load_portable_workflow(
         raise ValueError(
             f"Unsupported portable workflow fields: {sorted(unknown_fields)}"
         )
-    if document.get("schema") != PORTABLE_WORKFLOW_SCHEMA:
+    declared_schema = document.get("schema")
+    if declared_schema != PORTABLE_WORKFLOW_SCHEMA:
+        if declared_schema in SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS:
+            raise SupersededWorkflowSchemaError(declared_schema)
         raise ValueError(f"Expected workflow schema {PORTABLE_WORKFLOW_SCHEMA!r}.")
 
     raw_steps = document.get("steps")
@@ -1254,7 +1383,7 @@ def load_portable_workflow(
             "component_id",
             "transitions",
             "input_bindings",
-            "codex_settings",
+            STEP_EXECUTION_SETTINGS_KEY,
             "execution_budget",
             "capability_profile",
             "guidance",
@@ -1276,8 +1405,8 @@ def load_portable_workflow(
 
         component_id = StepComponentId(raw_step.get("component_id"))
         component = catalog.resolve(component_id)
-        codex_settings = _load_codex_execution_settings(
-            raw_step.get("codex_settings"),
+        execution_settings = _load_step_execution_settings(
+            raw_step.get(STEP_EXECUTION_SETTINGS_KEY),
             component,
         )
         execution_budget = _load_execution_budget(
@@ -1314,7 +1443,7 @@ def load_portable_workflow(
                 component_id=component_id,
                 transitions=transitions,
                 input_bindings=input_bindings,
-                codex_settings=codex_settings,
+                execution_settings=execution_settings,
                 execution_budget=execution_budget,
                 capability_profile=capability_profile,
                 guidance=guidance,
@@ -1411,7 +1540,7 @@ def planning_workflow_step(
     return workflow_steps[0]
 
 
-def preflight_codex_execution_settings(
+def preflight_step_execution_settings(
     workflow: WorkflowDefinition,
     component_catalog: PortableStepComponentCatalog,
     model_catalog: CodexModelCatalog,
@@ -1424,10 +1553,10 @@ def preflight_codex_execution_settings(
     authorizations = tuple(
         StepSettingsAuthorization(
             step_display_name=step.display_name,
-            settings=step.codex_settings,
+            settings=step.execution_settings,
         )
         for step in workflow.steps
-        if component_catalog.resolve(step.component_id).is_codex_backed
+        if component_catalog.resolve(step.component_id).is_agent_backed
     )
     sole_registered_execution_backend().authorize_execution_settings(
         authorizations,
@@ -1472,33 +1601,37 @@ def _load_transitions(
     return transitions
 
 
-def _load_codex_execution_settings(
+def _load_step_execution_settings(
     raw_settings: Any,
     component: PortableStepComponent,
-) -> CodexExecutionSettings | None:
+) -> StepExecutionSettings | None:
     if raw_settings is None:
-        return component.codex_execution_defaults
-    if component.codex_execution_defaults is None:
+        return component.default_execution_settings
+    if component.execution_defaults is None:
         raise ValueError(
-            f"Local component {component.component_id!r} does not accept Codex settings."
+            f"Local component {component.component_id!r} does not accept Step "
+            "Execution Settings."
         )
     if not isinstance(raw_settings, Mapping):
-        raise ValueError("Codex Execution Settings must be an object.")
-    unknown_fields = set(raw_settings) - CODEX_EXECUTION_SETTINGS_FIELDS
+        raise ValueError("Step Execution Settings must be an object.")
+    unknown_fields = set(raw_settings) - STEP_EXECUTION_SETTINGS_FIELDS
     if unknown_fields:
         raise ValueError(
-            f"Unsupported Codex Execution Settings fields: {sorted(unknown_fields)}"
+            f"Unsupported Step Execution Settings fields: {sorted(unknown_fields)}"
         )
+    backend = parse_execution_backend_id(raw_settings.get("backend"))
     model = raw_settings.get("model")
     reasoning_effort = raw_settings.get("reasoning_effort")
     raw_fast = raw_settings.get("fast")
     if not isinstance(model, str) or not isinstance(reasoning_effort, str):
-        raise ValueError("Codex model and reasoning effort must be strings.")
+        raise ValueError(
+            "Step Execution Settings model and reasoning effort must be strings."
+        )
     try:
         fast = FastPreference(raw_fast)
     except (TypeError, ValueError) as error:
-        raise ValueError("Codex Fast preference must be ON or OFF.") from error
-    return CodexExecutionSettings(model, reasoning_effort, fast)
+        raise ValueError("Step Execution Settings Fast must be ON or OFF.") from error
+    return StepExecutionSettings(backend, model, reasoning_effort, fast)
 
 
 def _load_capability_profile(
@@ -1530,7 +1663,7 @@ def _load_guidance(
 ) -> StepGuidance | None:
     if raw_guidance is None:
         return None
-    if not component.is_codex_backed:
+    if not component.is_agent_backed:
         raise ValueError(
             f"Local component {component.component_id!r} does not accept Step Guidance."
         )
@@ -1801,7 +1934,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 instance_id=ANALYSIS_STEP_ID,
                 display_name="Analysis",
                 component_id=ANALYSIS_COMPONENT_ID,
-                codex_settings=default_codex_execution_settings("analysis"),
+                execution_settings=default_step_execution_settings("analysis"),
                 execution_budget=default_execution_budget("analysis"),
                 capability_profile=component_catalog.resolve(
                     ANALYSIS_COMPONENT_ID
@@ -1817,7 +1950,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 instance_id=DEVELOPMENT_STEP_ID,
                 display_name="Development",
                 component_id=DEVELOPMENT_COMPONENT_ID,
-                codex_settings=default_codex_execution_settings("coder"),
+                execution_settings=default_step_execution_settings("coder"),
                 execution_budget=default_execution_budget("coder"),
                 capability_profile=component_catalog.resolve(
                     DEVELOPMENT_COMPONENT_ID
@@ -1833,7 +1966,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 instance_id=SECURITY_REVIEW_STEP_ID,
                 display_name="Security Review",
                 component_id=REVIEWER_COMPONENT_ID,
-                codex_settings=default_codex_execution_settings("reviewer"),
+                execution_settings=default_step_execution_settings("reviewer"),
                 execution_budget=default_execution_budget("reviewer"),
                 capability_profile=component_catalog.resolve(
                     REVIEWER_COMPONENT_ID
@@ -1856,7 +1989,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 instance_id=FINAL_REVIEW_STEP_ID,
                 display_name="Final Review",
                 component_id=REVIEWER_COMPONENT_ID,
-                codex_settings=default_codex_execution_settings("reviewer"),
+                execution_settings=default_step_execution_settings("reviewer"),
                 execution_budget=default_execution_budget("reviewer"),
                 capability_profile=component_catalog.resolve(
                     REVIEWER_COMPONENT_ID
@@ -1879,7 +2012,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 instance_id=QA_STEP_ID,
                 display_name="QA",
                 component_id=QA_COMPONENT_ID,
-                codex_settings=default_codex_execution_settings("qa"),
+                execution_settings=default_step_execution_settings("qa"),
                 execution_budget=default_execution_budget("qa"),
                 capability_profile=component_catalog.resolve(
                     QA_COMPONENT_ID
