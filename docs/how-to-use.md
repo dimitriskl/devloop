@@ -143,13 +143,23 @@ execution settings, capabilities, guidance, runtime state, and attempt history.
 
 Press Enter on the development summary to start with the shown defaults. Use
 `/run-options` to adjust this launch before starting, or `/options` to edit the
-User Workflow Default. Model, reasoning-effort, Fast, and capability changes
-are adopted by matching steps before the next resumed attempt. They do not
-change a Codex turn already running.
+User Workflow Default. Capability changes are adopted by matching steps before
+the next resumed attempt; model, reasoning-effort, and Fast changes are adopted
+only when the step keeps the Execution Backend the run snapshotted. None of them
+change an agent turn already running.
 
-Inside the Workflow Editor, select a Codex-backed step and use `model`,
-`reasoning`, or `fast` to choose its execution settings. Choices are filtered
-by the live Codex Model Catalog. `retry-catalog` retries temporary discovery
+Inside the Workflow Editor, select an agent-backed step and use `backend` to
+choose its Execution Backend, then `model`, `reasoning`, or `fast` to choose its
+execution settings for that backend. The `backend` menu annotates each backend
+with whether it is installed on this machine, and changing the backend moves the
+step's model and reasoning effort to that backend's component defaults so the
+step stays valid. Codex choices are filtered by the live Codex CLI Model
+Catalog. Claude choices come from the bundled Claude catalog, which offers
+pinned identifiers, short aliases, and an entry for typing an identifier the
+bundle does not list; the model you pick is verified against your own account
+once before it is saved, an alias is stored as the concrete identifier it
+resolved to, and a refusal is shown in the provider's own words.
+`retry-catalog` retries temporary discovery
 failures; any stale cache is labeled display-only and cannot authorize a run.
 Run startup refreshes the catalog and stops with the exact step and unsupported
 setting instead of silently falling back. Fast Off is passed explicitly, so a
@@ -358,7 +368,8 @@ migration. Two consequences apply the first time you run this version:
 Both cases report an actionable message naming the remedy rather than failing
 with a stack trace. Existing Codex-backed Workflow Steps behave exactly as
 before once the default is recreated: the Execution Backend is displayed in the
-`/options` Selection Preview but cannot yet be changed.
+`/options` Selection Preview, and the `backend` action changes it for any
+agent-backed Workflow Step in the editable Workflow Default scope.
 
 Dependency scheduler state is stored in the same JSON file. It includes ready
 and waiting projections, normal attempts, per-issue additional-pass counters,

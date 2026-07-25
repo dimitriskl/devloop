@@ -176,11 +176,20 @@ unambiguous Primary Path success link. `type` preserves the selected identity,
 name, and position while resetting type-owned settings and showing the repair
 work. All three operations remain draft-only and can be reverted with `undo`.
 For agent-backed steps, `model`, `reasoning`, and `fast` edit that Step
-Instance's independent Step Execution Settings, whose read-only Execution
-Backend is shown ahead of the model. Model names come from every
-page of the live installed Codex catalog; reasoning choices and Fast are
-limited to capabilities advertised for the selected model, and Fast is refused
-for a backend that advertises none. If discovery
+Instance's independent Step Execution Settings, whose Execution Backend is shown
+ahead of the model, and `backend` opens an Execution Backend
+menu annotated with each backend's availability on this machine; choosing a
+different backend moves the step's model and reasoning effort to that backend's
+component defaults. Model, reasoning, and Fast then operate on the Model Catalog
+belonging to that step's backend. Codex model names come from every page of the
+live installed Codex catalog. Claude model names come from the bundled Claude
+catalog, which offers pinned identifiers, short aliases, and an entry for typing
+an identifier the bundle does not list; browsing costs nothing, one selection
+costs one verification call against the operator's own account, an alias is saved
+as the concrete identifier it resolved to, and a refusal is shown in the
+provider's own words with nothing saved. Reasoning choices and Fast are limited
+to capabilities advertised for the selected model, and Fast is refused for a
+backend that advertises none. If discovery
 fails, the editor marks its last cache as stale display-only data and offers
 `retry-catalog`. A fresh catalog preflight is still required before execution,
 and an unavailable model, effort, or Fast choice blocks the run without

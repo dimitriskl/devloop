@@ -86,13 +86,20 @@ that Workflow Step.
 
 ## Model discovery or execution preflight fails
 
-Confirm the installed Codex CLI is authenticated, then use `retry-catalog` in
-the Workflow Editor. A stale cache is display-only and cannot authorize a run.
-If preflight names a Step Display Name and model, reasoning effort, or Fast
-setting, edit that exact Workflow Default step in `/options` and retry. Dev Loop
-does not substitute another model, lower effort, or disable Fast silently.
-Matching execution preferences are adopted before the next resumed attempt.
-They cannot change a Codex turn that is already running; stop and rerun first.
+Confirm the Execution Backend the step names is installed and authenticated —
+the `backend` menu in `/options` annotates each backend's availability — then use
+`retry-catalog` in the Workflow Editor. A stale cache is display-only and cannot
+authorize a run, for either backend. If preflight names a Step Display Name and
+model, reasoning effort, or Fast setting, edit that exact Workflow Default step
+in `/options` and retry. Dev Loop does not substitute another model, lower
+effort, or disable Fast silently. Capability preferences are adopted before the
+next resumed attempt; model, reasoning-effort, and Fast preferences are adopted
+only when the step keeps its snapshotted Execution Backend. None of them can
+change an agent turn that is already running; stop and rerun first.
+
+If selecting a Claude model is refused, the message is the provider's own: check
+the identifier and whether your account can use that model. The selection is not
+saved, so the step keeps the model it had.
 
 ## Dashboard rows wrap, lack color, or repeat in redirected output
 

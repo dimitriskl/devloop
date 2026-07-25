@@ -22,9 +22,9 @@ from .lineeditor import display_width
 from .terminal_menu import MenuAction, clear_terminal_screen
 from .model_catalog import (
     CatalogDiscoveryError,
-    CodexModel,
-    CodexModelCatalog,
-    CodexModelCatalogCache,
+    CatalogModel,
+    ModelCatalog,
+    ModelCatalogCache,
     model_catalog_cache_path,
 )
 from .portable_workflow import (
@@ -48,6 +48,12 @@ from .portable_workflow import (
     load_portable_workflow,
     validate_port_binding,
 )
+from .portable_execution_backend import (
+    BackendAvailability,
+    ExecutionBackendId,
+    execution_backend_availability,
+    parse_execution_backend_id,
+)
 from .workflow_defaults import WorkflowDefaultStore
 from .step_configuration import (
     CapabilityReference,
@@ -62,7 +68,38 @@ ReadCommand = Callable[[str], str]
 WriteLine = Callable[[str], None]
 OpenCapabilities = Callable[["WorkflowDraft", StepInstanceId], None]
 ConfigurationUpdates = Callable[[], Mapping[str, object]]
-ModelCatalogLoader = Callable[[], CodexModelCatalog]
+# One Model Catalog per Execution Backend, loaded only for the backends a
+# Workflow Step actually names.
+ModelCatalogLoader = Callable[[ExecutionBackendId], ModelCatalog]
+# One verification call for one selected model, returning the concrete
+# identifier to persist. Absent from a context that cannot reach a provider.
+ModelVerifier = Callable[[ExecutionBackendId, str], str]
+BackendAvailabilityProbe = Callable[[], "tuple[BackendAvailability, ...]"]
+# The menu key for entering an identifier the catalog does not list. It is a
+# word rather than a sentinel so the non-TTY fallback stays typeable.
+FREE_TEXT_MODEL_KEY = "other"
+
+
+def single_backend_model_catalog_loader(
+    backend: ExecutionBackendId,
+    load: Callable[[], ModelCatalog],
+) -> ModelCatalogLoader:
+    """Adapt one backend's catalog loader to the per-backend editor seam.
+
+    Used by callers that can reach exactly one provider. Asking for any other
+    backend's catalog fails as unavailable rather than silently returning this
+    one's, so a Workflow Step is never offered another provider's models.
+    """
+
+    def load_for(requested: ExecutionBackendId) -> ModelCatalog:
+        if requested is not backend:
+            raise CatalogDiscoveryError(
+                f"Only the {backend.display_name} Model Catalog can be loaded "
+                "from this command."
+            )
+        return load()
+
+    return load_for
 
 
 @dataclass(frozen=True)
@@ -88,6 +125,7 @@ EDITOR_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "rename",
             "type",
+            "backend",
             "model",
             "reasoning",
             "fast",
@@ -137,6 +175,7 @@ WORKFLOW_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("Step", "Select any workflow step", "select"),
     MenuAction("Step", "Rename selected step", "rename"),
     MenuAction("Step", "Change component type", "type"),
+    MenuAction("Step", "Choose execution backend", "backend"),
     MenuAction("Step", "Choose model", "model"),
     MenuAction("Step", "Choose reasoning effort", "reasoning"),
     MenuAction("Step", "Toggle Fast mode", "fast"),
@@ -917,6 +956,8 @@ def run_workflow_editor(
     open_capabilities: OpenCapabilities | None = None,
     configuration_updates: ConfigurationUpdates | None = None,
     model_catalog_loader: ModelCatalogLoader | None = None,
+    verify_model: ModelVerifier | None = None,
+    backend_availability: BackendAvailabilityProbe | None = None,
     select_option: SelectOption | None = None,
 ) -> EditorResult:
     component_catalog = catalog or default_portable_component_catalog()
@@ -933,9 +974,12 @@ def run_workflow_editor(
         open_capabilities=open_capabilities,
         configuration_updates=configuration_updates,
         model_catalog_loader=model_catalog_loader,
+        verify_model=verify_model,
+        backend_availability=backend_availability or execution_backend_availability,
         select_option=select_option,
-        model_catalog_cache=CodexModelCatalogCache(
-            model_catalog_cache_path(configuration_path)
+        model_catalog_cache=lambda backend: ModelCatalogCache(
+            model_catalog_cache_path(configuration_path, backend),
+            backend,
         ),
     ).run()
 
@@ -955,8 +999,10 @@ class _WorkflowEditorSession:
         open_capabilities: OpenCapabilities | None,
         configuration_updates: ConfigurationUpdates | None,
         model_catalog_loader: ModelCatalogLoader | None,
+        verify_model: ModelVerifier | None,
+        backend_availability: BackendAvailabilityProbe,
         select_option: SelectOption | None,
-        model_catalog_cache: CodexModelCatalogCache,
+        model_catalog_cache: Callable[[ExecutionBackendId], ModelCatalogCache],
     ) -> None:
         self._store = store
         self._catalog = catalog
@@ -969,10 +1015,15 @@ class _WorkflowEditorSession:
         self._open_capabilities = open_capabilities
         self._configuration_updates = configuration_updates
         self._model_catalog_loader = model_catalog_loader
+        self._verify_model = verify_model
+        self._backend_availability = backend_availability
         self._select_option = select_option
         self._model_catalog_cache = model_catalog_cache
-        self._model_catalog: CodexModelCatalog | None = None
-        self._model_catalog_error: str | None = None
+        # One catalog per Execution Backend, and one recorded failure per
+        # backend, so a Workflow Step is only ever offered its own backend's
+        # models and a backend no Workflow Step names is never loaded at all.
+        self._model_catalogs: dict[ExecutionBackendId, ModelCatalog] = {}
+        self._model_catalog_errors: dict[ExecutionBackendId, str] = {}
         self._default_recovery_state = WorkflowDefaultRecoveryState.NORMAL
         self._default_recovery_error: str | None = None
         try:
@@ -986,9 +1037,10 @@ class _WorkflowEditorSession:
                 error,
                 preserve_newlines=False,
             )
-        if self._default_recovery_state is WorkflowDefaultRecoveryState.NORMAL:
-            self._load_initial_model_catalog()
         self._draft = WorkflowDraft(stored_workflow, catalog)
+        if self._default_recovery_state is WorkflowDefaultRecoveryState.NORMAL:
+            for backend in self._referenced_backends(stored_workflow):
+                self._load_initial_model_catalog(backend)
         self._future_selected_step_id = next(
             (
                 step.instance_id
@@ -1115,8 +1167,8 @@ class _WorkflowEditorSession:
                 self._catalog,
                 selected_position=selected_position,
                 primary_path_length=len(primary_path),
-                model_catalog=self._model_catalog,
-                model_catalog_error=self._model_catalog_error,
+                model_catalog=self._selected_model_catalog(),
+                model_catalog_error=self._selected_model_catalog_error(),
             )
         scope_label = (
             "Current Run (read-only)"
@@ -1172,8 +1224,8 @@ class _WorkflowEditorSession:
                 show_advanced=self._show_advanced,
                 show_graph=self._show_graph,
                 scope=self._scope,
-                model_catalog=self._model_catalog,
-                model_catalog_error=self._model_catalog_error,
+                model_catalog=self._selected_model_catalog(),
+                model_catalog_error=self._selected_model_catalog_error(),
                 notice=self._notice,
             )
         )
@@ -1206,6 +1258,7 @@ class _WorkflowEditorSession:
             "move-up": self._move_up,
             "move-down": self._move_down,
             "position": self._set_position,
+            "backend": self._set_backend,
             "model": self._set_model,
             "reasoning": self._set_reasoning,
             "fast": self._set_fast,
@@ -1397,6 +1450,7 @@ class _WorkflowEditorSession:
             "move-up",
             "move-down",
             "position",
+            "backend",
             "model",
             "reasoning",
             "fast",
@@ -1628,11 +1682,97 @@ class _WorkflowEditorSession:
         except ValueError as error:
             self._message(f"Cannot move step: {error}")
 
+    def _set_backend(self) -> None:
+        """Choose the Execution Backend one agent-backed Workflow Step runs on.
+
+        Each backend is annotated with its Backend Availability so a Workflow
+        Step is never configured against a backend this machine cannot run.
+        Changing the backend moves the Workflow Step's model and reasoning effort
+        to that backend's Component Execution Defaults, so the step stays valid
+        without further edits.
+        """
+        step = self._draft.workflow.step(self._future_selected_step_id)
+        component = self._catalog.resolve(step.component_id)
+        if not component.is_agent_backed or step.execution_settings is None:
+            self._message(
+                f"{step.display_name!r} is local deterministic; it runs no "
+                "Execution Backend."
+            )
+            return
+        current = step.execution_settings.backend
+        availability = {
+            report.backend: report for report in self._backend_availability()
+        }
+        options = tuple(
+            (
+                backend.value,
+                _backend_option_label(availability.get(backend), backend, current),
+            )
+            for backend in ExecutionBackendId
+        )
+        choice = self._choose_menu(
+            SelectionMenu(
+                title=f"Execution Backend · {step.display_name}",
+                options=(
+                    *options,
+                    ("cancel", "Back without changing the Execution Backend"),
+                ),
+                default_key=current.value,
+                cancel_key="cancel",
+                description=(
+                    "Changing the backend resets Model and Reasoning to that "
+                    "backend's component defaults.",
+                ),
+            ),
+            fallback_prompt="Execution Backend (or cancel): ",
+            fallback_content=render_backend_picker(
+                tuple(availability.values()),
+                current,
+                terminal_width=self._terminal_width,
+            ),
+        )
+        if choice.casefold() == "cancel":
+            return
+        try:
+            selected = parse_execution_backend_id(choice)
+        except ValueError:
+            self._message("Choose an installed Execution Backend, or cancel.")
+            return
+        if selected is current:
+            self._message(
+                f"{step.display_name} already runs on the {current.display_name} "
+                "Backend."
+            )
+            return
+        try:
+            defaults = component.execution_defaults_for(selected)
+        except ValueError as error:
+            self._message(f"Cannot change Execution Backend: {error}")
+            return
+        try:
+            self._draft.set_execution_settings(step.instance_id, defaults)
+        except ValueError as error:
+            self._message(f"Cannot change Execution Backend: {error}")
+            return
+        self._ensure_model_catalog(selected)
+        report = availability.get(selected)
+        warning = (
+            ""
+            if report is None or report.installed
+            else f" The {selected.display_name} CLI is not installed on this machine."
+        )
+        self._message(
+            f"{step.display_name} now runs on the {selected.display_name} Backend "
+            f"with model {defaults.model} and effort {defaults.reasoning_effort}."
+            f"{warning}"
+        )
+
     def _set_model(self) -> None:
         selection = self._selected_step_context()
         if selection is None:
             return
         step, settings, model_catalog = selection
+        backend = model_catalog.backend
         current_position = next(
             (
                 index
@@ -1641,20 +1781,26 @@ class _WorkflowEditorSession:
             ),
             1,
         )
-        raw_position = self._choose_menu(
+        free_text_option: tuple[tuple[str, str], ...] = (
+            ((FREE_TEXT_MODEL_KEY, "Enter another model identifier…"),)
+            if model_catalog.accepts_free_text_model
+            else ()
+        )
+        raw_choice = self._choose_menu(
             SelectionMenu(
-                title=f"Model · {step.display_name}",
+                title=f"Model · {backend.display_name} · {step.display_name}",
                 options=(
                     *(
-                        (str(index), f"{model.display_name} — {model.model_id}")
+                        (str(index), _model_option_label(model))
                         for index, model in enumerate(model_catalog.models, start=1)
                     ),
+                    *free_text_option,
                     ("cancel", "Back without changing the model"),
                 ),
                 default_key=str(current_position),
                 cancel_key="cancel",
                 description=(
-                    "Choose the Codex model for this workflow step.",
+                    f"Choose the {backend.display_name} model for this workflow step.",
                     "Catalog source: live",
                 ),
             ),
@@ -1664,13 +1810,57 @@ class _WorkflowEditorSession:
                 terminal_width=self._terminal_width,
             ),
         )
-        if raw_position.casefold() == "cancel":
+        if raw_choice.casefold() == "cancel":
             return
-        position = _parse_one_based_integer(raw_position)
-        if position is None or position > len(model_catalog.models):
-            self._message("Choose a Codex model by number, or cancel.")
-            return
-        model = model_catalog.models[position - 1]
+        if raw_choice.casefold() == FREE_TEXT_MODEL_KEY:
+            requested = self._read_free_text_model(backend)
+            if requested is None:
+                return
+        else:
+            position = _parse_one_based_integer(raw_choice)
+            if position is None or position > len(model_catalog.models):
+                self._message(
+                    f"Choose a {backend.display_name} model by number, or cancel."
+                )
+                return
+            requested = model_catalog.models[position - 1].model_id
+        self._save_verified_model(step, settings, model_catalog, requested)
+
+    def _read_free_text_model(self, backend: ExecutionBackendId) -> str | None:
+        requested = self._read_line(
+            f"{backend.display_name} model identifier: "
+        ).strip()
+        if not requested:
+            self._message("No model identifier was entered; the model is unchanged.")
+            return None
+        return requested
+
+    def _save_verified_model(
+        self,
+        step: WorkflowStep,
+        settings: StepExecutionSettings,
+        model_catalog: ModelCatalog,
+        requested_model: str,
+    ) -> None:
+        """Verify one selection, then persist the identifier it resolved to.
+
+        Exactly one verification call per selection, made before anything is
+        saved. What gets persisted is the concrete identifier the backend
+        reports, never a short alias, so rerunning a Workflow Run cannot
+        silently change which model does the work. A refusal is reported in the
+        provider's own words and the selection is discarded.
+        """
+        backend = model_catalog.backend
+        resolved = requested_model
+        if model_catalog.verifies_selection:
+            # Only a catalog that is not itself account-aware needs a call here.
+            # A live account-aware catalog has already answered the question, so
+            # its selections stay free and behave exactly as they did before.
+            verified = self._verified_model_id(backend, requested_model)
+            if verified is None:
+                return
+            resolved = verified
+        model = model_catalog.selectable_model(resolved)
         reasoning_effort = settings.reasoning_effort
         if reasoning_effort not in model.reasoning_efforts:
             selected_effort = self._choose_reasoning_effort(model)
@@ -1683,15 +1873,46 @@ class _WorkflowEditorSession:
             self._message(
                 f"{model.display_name} does not advertise Fast; Fast was set to Off."
             )
-        self._draft.set_execution_settings(
-            step.instance_id,
-            StepExecutionSettings(
-                settings.backend,
-                model.model_id,
-                reasoning_effort,
-                fast,
-            ),
-        )
+        try:
+            self._draft.set_execution_settings(
+                step.instance_id,
+                StepExecutionSettings(
+                    settings.backend,
+                    resolved,
+                    reasoning_effort,
+                    fast,
+                ),
+            )
+        except ValueError as error:
+            self._message(f"Cannot set the model: {error}")
+            return
+        if resolved != requested_model:
+            self._message(
+                f"{requested_model} resolved to {resolved}; the pinned identifier "
+                "was saved so reruns keep using the same model."
+            )
+
+    def _verified_model_id(
+        self,
+        backend: ExecutionBackendId,
+        requested_model: str,
+    ) -> str | None:
+        if self._verify_model is None:
+            self._message(
+                f"{backend.display_name} model verification is unavailable in this "
+                "editor context, so the selection was not saved."
+            )
+            return None
+        try:
+            return self._verify_model(backend, requested_model)
+        except (OSError, RuntimeError, ValueError) as error:
+            # The provider's own refusal, reported as it arrived: Dev Loop does
+            # not paraphrase why an account cannot use a model.
+            self._message(
+                f"{backend.display_name} refused model {requested_model!r}: "
+                f"{sanitize_terminal_text(error, preserve_newlines=False)}"
+            )
+            return None
 
     def _set_reasoning(self) -> None:
         selection = self._selected_step_context()
@@ -1699,7 +1920,7 @@ class _WorkflowEditorSession:
             return
         step, settings, model_catalog = selection
         try:
-            model = model_catalog.model(settings.model)
+            model = model_catalog.selectable_model(settings.model)
         except ValueError:
             self._message(
                 f"Selected model {settings.model!r} is not in the displayed catalog; "
@@ -1714,7 +1935,7 @@ class _WorkflowEditorSession:
             replace(settings, reasoning_effort=reasoning_effort),
         )
 
-    def _choose_reasoning_effort(self, model: CodexModel) -> str | None:
+    def _choose_reasoning_effort(self, model: CatalogModel) -> str | None:
         lines = [f"Reasoning Efforts — {model.display_name}"]
         lines.extend(
             f"{index}. {effort}"
@@ -1751,19 +1972,33 @@ class _WorkflowEditorSession:
             return None
         return model.reasoning_efforts[position - 1]
 
+    def _reject_fast_for_backend(self) -> bool:
+        """Report a backend that advertises no Fast, before a catalog is needed.
+
+        A backend that advertises none has nothing to offer whether or not its
+        Model Catalog loaded, and this is the same message path a Codex model
+        that advertises no Fast already takes.
+        """
+        settings = self._draft.workflow.step(
+            self._future_selected_step_id
+        ).execution_settings
+        if settings is None or settings.backend.advertises_fast:
+            return False
+        self._message(
+            f"The {settings.backend.display_name} Backend advertises no Fast "
+            f"support for model {settings.model!r}; only Off is available."
+        )
+        return True
+
     def _set_fast(self) -> None:
+        if self._reject_fast_for_backend():
+            return
         selection = self._selected_step_context()
         if selection is None:
             return
         step, settings, model_catalog = selection
-        if not settings.backend.advertises_fast:
-            self._message(
-                f"The {settings.backend.display_name} Backend advertises no Fast "
-                f"support for model {settings.model!r}; only Off is available."
-            )
-            return
         try:
-            model = model_catalog.model(settings.model)
+            model = model_catalog.selectable_model(settings.model)
         except ValueError:
             self._message(
                 f"Selected model {settings.model!r} is not in the displayed catalog; "
@@ -1899,7 +2134,13 @@ class _WorkflowEditorSession:
 
     def _selected_step_context(
         self,
-    ) -> tuple[WorkflowStep, StepExecutionSettings, CodexModelCatalog] | None:
+    ) -> tuple[WorkflowStep, StepExecutionSettings, ModelCatalog] | None:
+        """The selected Workflow Step, its settings, and its backend's catalog.
+
+        The catalog returned is the one belonging to the Workflow Step's own
+        Execution Backend, so Model, Reasoning, and Fast can only ever offer
+        choices that backend can run.
+        """
         step = self._draft.workflow.step(self._future_selected_step_id)
         component = self._catalog.resolve(step.component_id)
         if not component.is_agent_backed:
@@ -1911,80 +2152,148 @@ class _WorkflowEditorSession:
         if step.execution_settings is None:
             self._message(f"{step.display_name!r} has no Step Execution Settings.")
             return None
-        if self._model_catalog is None:
+        backend = step.execution_settings.backend
+        catalog = self._model_catalogs.get(backend)
+        if catalog is None:
             self._message(
-                "No Codex Model Catalog is available. Use Retry Catalog after "
-                "checking the Codex installation and authentication."
+                f"No {backend.display_name} Model Catalog is available. Use Retry "
+                f"Catalog after checking the {backend.display_name} installation "
+                "and authentication."
             )
             return None
-        if not self._model_catalog.is_fresh:
+        if not catalog.is_fresh:
             self._message(
-                "A fresh live Codex Model Catalog is required to change Model, "
-                "Reasoning, or Fast. The stale cache is display-only; use Retry "
-                "Catalog."
+                f"A fresh live {backend.display_name} Model Catalog is required to "
+                "change Model, Reasoning, or Fast. The stale cache is "
+                "display-only; use Retry Catalog."
             )
             return None
-        return step, step.execution_settings, self._model_catalog
+        return step, step.execution_settings, catalog
 
-    def _load_initial_model_catalog(self) -> None:
+    def _referenced_backends(
+        self,
+        workflow: WorkflowDefinition,
+    ) -> tuple[ExecutionBackendId, ...]:
+        """The Execution Backends this workflow's agent-backed steps name."""
+        referenced: list[ExecutionBackendId] = []
+        for step in workflow.steps:
+            settings = step.execution_settings
+            if settings is None:
+                continue
+            if not self._catalog.resolve(step.component_id).is_agent_backed:
+                continue
+            if settings.backend not in referenced:
+                referenced.append(settings.backend)
+        return tuple(referenced)
+
+    def _selected_model_catalog(self) -> ModelCatalog | None:
+        """The catalog of the selected Workflow Step's backend, for display."""
+        step = self._viewed_workflow().step(self._selected_step_id())
+        settings = step.execution_settings
+        if settings is None:
+            return None
+        return self._model_catalogs.get(settings.backend)
+
+    def _selected_model_catalog_error(self) -> str | None:
+        step = self._viewed_workflow().step(self._selected_step_id())
+        settings = step.execution_settings
+        if settings is None:
+            return None
+        return self._model_catalog_errors.get(settings.backend)
+
+    def _load_initial_model_catalog(self, backend: ExecutionBackendId) -> None:
         if self._model_catalog_loader is not None:
-            self._refresh_model_catalog()
+            self._refresh_model_catalog(backend)
             return
         try:
-            self._model_catalog = self._model_catalog_cache.load()
+            cached = self._model_catalog_cache(backend).load()
         except ValueError as error:
-            self._model_catalog_error = sanitize_terminal_text(
+            self._model_catalog_errors[backend] = sanitize_terminal_text(
                 error,
                 preserve_newlines=False,
             )
+            return
+        if cached is not None:
+            self._model_catalogs[backend] = cached
+
+    def _ensure_model_catalog(self, backend: ExecutionBackendId) -> None:
+        """Load one backend's catalog the first time a Workflow Step needs it."""
+        if backend in self._model_catalogs or backend in self._model_catalog_errors:
+            return
+        self._load_initial_model_catalog(backend)
 
     def _retry_catalog(self) -> None:
         if self._model_catalog_loader is None:
-            self._message("Live Codex Model Catalog discovery is unavailable here.")
+            self._message("Live Model Catalog discovery is unavailable here.")
             return
-        self._refresh_model_catalog()
-        if self._model_catalog is not None and self._model_catalog.is_fresh:
-            self._message("Codex Model Catalog refreshed from the live backend.")
-        else:
+        backends = self._referenced_backends(self._draft.workflow)
+        refreshed: list[str] = []
+        failures: list[str] = []
+        for backend in backends:
+            self._refresh_model_catalog(backend)
+            catalog = self._model_catalogs.get(backend)
+            if catalog is not None and catalog.is_fresh:
+                refreshed.append(backend.display_name)
+            else:
+                failures.append(
+                    self._model_catalog_errors.get(backend)
+                    or f"{backend.display_name} Model Catalog refresh failed; no "
+                    "cache is available."
+                )
+        if refreshed and not failures:
             self._message(
-                self._model_catalog_error
-                or "Codex Model Catalog refresh failed; no cache is available."
+                f"{', '.join(refreshed)} Model Catalog refreshed from the live "
+                "backend."
             )
+            return
+        self._message(" ".join(failures) or "No Execution Backend to refresh.")
 
-    def _refresh_model_catalog(self) -> None:
+    def _refresh_model_catalog(self, backend: ExecutionBackendId) -> None:
         assert self._model_catalog_loader is not None
+        cache = self._model_catalog_cache(backend)
         try:
-            live_catalog = self._model_catalog_loader()
+            live_catalog = self._model_catalog_loader(backend)
             if not live_catalog.is_fresh:
                 raise ValueError("Catalog discovery did not return fresh live data.")
-            self._model_catalog = live_catalog
-            self._model_catalog_error = None
+            if live_catalog.backend is not backend:
+                raise ValueError(
+                    f"Catalog discovery returned a {live_catalog.backend.display_name} "
+                    f"catalog for the {backend.display_name} Backend."
+                )
+            self._model_catalogs[backend] = live_catalog
+            self._model_catalog_errors.pop(backend, None)
             try:
-                self._model_catalog_cache.replace(live_catalog)
+                cache.replace(live_catalog)
             except OSError as error:
-                self._model_catalog_error = (
+                self._model_catalog_errors[backend] = (
                     "Live catalog loaded, but its display cache could not be updated: "
                     f"{sanitize_terminal_text(error, preserve_newlines=False)}"
                 )
             return
         except (CatalogDiscoveryError, OSError, ValueError) as error:
             safe_error = sanitize_terminal_text(error, preserve_newlines=False)
-            self._model_catalog_error = (
-                f"Live Codex Model Catalog unavailable: {safe_error}. "
-                "Check Codex installation/authentication and use Retry Catalog."
+            self._model_catalog_errors[backend] = (
+                f"Live {backend.display_name} Model Catalog unavailable: "
+                f"{safe_error}. Check the {backend.display_name} installation and "
+                "authentication, then use Retry Catalog."
             )
         try:
-            self._model_catalog = self._model_catalog_cache.load()
+            cached = cache.load()
         except ValueError as cache_error:
             safe_cache_error = sanitize_terminal_text(
                 cache_error,
                 preserve_newlines=False,
             )
-            self._model_catalog = None
-            self._model_catalog_error = (
-                f"{self._model_catalog_error} Cached display data is invalid: "
-                f"{safe_cache_error}"
+            self._model_catalogs.pop(backend, None)
+            self._model_catalog_errors[backend] = (
+                f"{self._model_catalog_errors[backend]} Cached display data is "
+                f"invalid: {safe_cache_error}"
             )
+            return
+        if cached is None:
+            self._model_catalogs.pop(backend, None)
+        else:
+            self._model_catalogs[backend] = cached
 
     def _route_outcome(self) -> None:
         step = self._draft.workflow.step(self._future_selected_step_id)
@@ -2401,7 +2710,7 @@ def _compact_detail_lines(
     *,
     selected_position: int | None,
     primary_path_length: int,
-    model_catalog: CodexModelCatalog | None,
+    model_catalog: ModelCatalog | None,
     model_catalog_error: str | None,
 ) -> list[str]:
     lines = [
@@ -2422,10 +2731,26 @@ def _compact_detail_lines(
                 f"Fast: {selected.execution_settings.fast.value.title()} | "
                 f"Timeout: {selected.execution_budget.timeout_seconds:g}s"
             )
+        # The catalog line names the Workflow Step's own backend, so a
+        # mixed-backend workflow reads correctly step by step.
+        catalog_backend = (
+            model_catalog.backend
+            if model_catalog is not None
+            else (
+                selected.execution_settings.backend
+                if selected.execution_settings is not None
+                else None
+            )
+        )
+        catalog_label = (
+            f"{catalog_backend.display_name} Model Catalog"
+            if catalog_backend is not None
+            else "Model Catalog"
+        )
         if model_catalog is None:
-            lines.append("Codex Model Catalog: unavailable")
+            lines.append(f"{catalog_label}: unavailable")
         elif not model_catalog.is_fresh:
-            lines.append("Codex Model Catalog: STALE — retry-catalog before apply")
+            lines.append(f"{catalog_label}: STALE — retry-catalog before apply")
         if model_catalog_error:
             lines.append(
                 "Catalog action: "
@@ -2470,7 +2795,7 @@ def render_workflow_editor(
     show_advanced: bool = False,
     show_graph: bool = False,
     scope: EditorScope = EditorScope.FUTURE_RUNS,
-    model_catalog: CodexModelCatalog | None = None,
+    model_catalog: ModelCatalog | None = None,
     model_catalog_error: str | None = None,
     notice: str | None = None,
 ) -> str:
@@ -2727,18 +3052,64 @@ def _outcome_destination_label(
     return _step_destination_label(workflow, step.transitions[outcome])
 
 
+def _backend_availability_annotation(report: BackendAvailability | None) -> str:
+    """What one backend's availability says, or that it could not be probed."""
+    return report.annotation if report is not None else "availability unknown"
+
+
+def _backend_option_label(
+    report: BackendAvailability | None,
+    backend: ExecutionBackendId,
+    current: ExecutionBackendId,
+) -> str:
+    """One Execution Backend menu label, annotated with its availability."""
+    marker = " · current" if backend is current else ""
+    annotation = _backend_availability_annotation(report)
+    return f"{backend.display_name} · {annotation}{marker}"
+
+
+def _model_option_label(model: CatalogModel) -> str:
+    """One model's menu label, marking an alias as the convenience it is."""
+    suffix = " (alias)" if model.is_alias else ""
+    return f"{model.display_name} — {model.model_id}{suffix}"
+
+
 def render_model_picker(
-    catalog: CodexModelCatalog,
+    catalog: ModelCatalog,
     *,
     terminal_width: int,
 ) -> str:
+    """The non-interactive model list, titled from the catalog's backend."""
     width = max(1, terminal_width)
     source = "live" if catalog.is_fresh else "STALE DISPLAY CACHE"
-    lines = [f"Codex Models — {source}"]
+    lines = [f"{catalog.backend.display_name} Models — {source}"]
     lines.extend(
-        f"{index}. {model.display_name} — {model.model_id}"
+        f"{index}. {_model_option_label(model)}"
         for index, model in enumerate(catalog.models, start=1)
     )
+    if catalog.accepts_free_text_model:
+        lines.append(
+            f"Enter {FREE_TEXT_MODEL_KEY} to type a model identifier this bundle "
+            "does not list, or cancel to keep the current model."
+        )
+    return "\n".join(_fit_to_width(line, width) for line in lines)
+
+
+def render_backend_picker(
+    availability: tuple[BackendAvailability, ...],
+    current: ExecutionBackendId,
+    *,
+    terminal_width: int,
+) -> str:
+    """The non-interactive Execution Backend list, annotated with availability."""
+    width = max(1, terminal_width)
+    reports = {report.backend: report for report in availability}
+    lines = ["Execution Backends"]
+    for backend in ExecutionBackendId:
+        annotation = _backend_availability_annotation(reports.get(backend))
+        marker = " (current)" if backend is current else ""
+        lines.append(f"{backend.value}. {backend.display_name} — {annotation}{marker}")
+    lines.append("Enter cancel to keep the current Execution Backend.")
     return "\n".join(_fit_to_width(line, width) for line in lines)
 
 

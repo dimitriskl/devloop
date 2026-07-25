@@ -29,7 +29,7 @@ from ..codex_events import (
     parse_codex_event,
     render_safe_codex_activity,
 )
-from ..model_catalog import CodexModelCatalog, CodexModelCatalogAdapter
+from ..model_catalog import CodexModelCatalogAdapter, ModelCatalog
 from ..statusui import Stage, WaitingIndicator
 from ..subprocess_utils import (
     EXECUTION_BUDGET_EXPIRY_RETURNCODE,
@@ -677,14 +677,18 @@ class CodexCliExecutionBackend(ExecutionBackend):
             ),
         )
 
-    def discover_model_catalog(self, *, cwd: Path) -> CodexModelCatalog:
+    @property
+    def provider_command(self) -> str:
+        return self.codex
+
+    def discover_model_catalog(self, *, cwd: Path) -> ModelCatalog:
         return CodexModelCatalogAdapter(self.codex, cwd=cwd).discover()
 
     def authorize_execution_settings(
         self,
         authorizations: Sequence[StepSettingsAuthorization],
         *,
-        model_catalog: CodexModelCatalog,
+        model_catalog: ModelCatalog,
     ) -> None:
         if not model_catalog.is_fresh:
             raise ValueError(
@@ -697,7 +701,7 @@ class CodexCliExecutionBackend(ExecutionBackend):
     def _authorize_step_settings(
         self,
         authorization: StepSettingsAuthorization,
-        model_catalog: CodexModelCatalog,
+        model_catalog: ModelCatalog,
     ) -> None:
         display_name = authorization.step_display_name
         settings = authorization.settings

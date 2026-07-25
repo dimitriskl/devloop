@@ -20,7 +20,11 @@ from .issue_scheduler import (
 from .lineeditor import LineEditor
 from .model_catalog import (
     CatalogDiscoveryError,
-    CodexModelCatalog,
+    ModelCatalog,
+)
+from .portable_execution_backend import (
+    BackendModelCatalogAccess,
+    ExecutionBackendId,
 )
 from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
 from .product_scope import require_portable_target
@@ -68,7 +72,10 @@ from .workflow_defaults import (
     WorkflowDefaultStore,
     portable_planner_configuration_path,
 )
-from .workflow_editor import run_workflow_editor
+from .workflow_editor import (
+    run_workflow_editor,
+    single_backend_model_catalog_loader,
+)
 from . import statusui
 from .statusui import Stage
 
@@ -553,6 +560,10 @@ def _run_devloop_attempt(
                 user_workflow_path=portable_planner_configuration_path(),
                 model_catalog_loader=lambda: execution_backend.discover_model_catalog(
                     cwd=repo_root
+                ),
+                catalog_access=BackendModelCatalogAccess(
+                    cwd=repo_root,
+                    codex=args.codex,
                 ),
                 read_line=read_prompt,
                 write=print,
@@ -1381,7 +1392,7 @@ def resolve_run_workflow(
     catalog: PortableStepComponentCatalog,
     *,
     user_workflow_path: Path | None = None,
-    live_model_catalog: CodexModelCatalog | None = None,
+    live_model_catalog: ModelCatalog | None = None,
     require_codex_preflight: bool = False,
     workflow_snapshot: WorkflowDefinition | None = None,
 ) -> WorkflowDefinition:
@@ -1447,13 +1458,19 @@ def resolve_run_workflow_with_repair(
     catalog: PortableStepComponentCatalog,
     *,
     user_workflow_path: Path,
-    model_catalog_loader: Callable[[], CodexModelCatalog],
+    model_catalog_loader: Callable[[], ModelCatalog],
     read_line: Callable[[str], str] | None = None,
     write: Callable[[str], None] | None = None,
     workflow_snapshot: WorkflowDefinition | None = None,
     allow_interactive_repair: bool = True,
+    catalog_access: BackendModelCatalogAccess | None = None,
 ) -> WorkflowDefinition | None:
-    """Authorize and snapshot a run, with a reachable terminal repair loop."""
+    """Authorize and snapshot a run, with a reachable terminal repair loop.
+
+    ``catalog_access`` is what `/options` opened from this loop uses for
+    per-backend Model Catalogs and model verification; without it the editor
+    offers the Codex catalog this loop already loads and nothing else.
+    """
     reader = read_line or input
     writer = write or print
     has_current_snapshot = workflow_snapshot is not None or (
@@ -1515,7 +1532,20 @@ def resolve_run_workflow_with_repair(
                 ),
                 catalog=catalog,
                 current_workflow=current_workflow,
-                model_catalog_loader=model_catalog_loader,
+                model_catalog_loader=(
+                    catalog_access.load_catalog
+                    if catalog_access is not None
+                    else single_backend_model_catalog_loader(
+                        ExecutionBackendId.CODEX_CLI,
+                        model_catalog_loader,
+                    )
+                ),
+                verify_model=(
+                    catalog_access.verify_model if catalog_access is not None else None
+                ),
+                backend_availability=(
+                    catalog_access.availability if catalog_access is not None else None
+                ),
             )
         elif action in {"retry-catalog", "/retry-catalog"}:
             continue

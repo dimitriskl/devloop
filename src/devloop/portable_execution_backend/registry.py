@@ -10,10 +10,13 @@ of the other provider's installation.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 
-from .backend import ExecutionBackend, ExecutionBackendId
-from .claude_code import ClaudeCodeExecutionBackend
-from .codex_cli import CodexCliExecutionBackend
+from ..model_catalog import ModelCatalog
+from .backend import BackendAvailability, ExecutionBackend, ExecutionBackendId
+from .claude_code import CLAUDE_CLI_COMMAND, ClaudeCodeExecutionBackend
+from .codex_cli import CODEX_CLI_COMMAND, CodexCliExecutionBackend
 
 ExecutionBackendFactory = Callable[[], ExecutionBackend]
 
@@ -40,3 +43,50 @@ def resolve_execution_backend(backend_id: ExecutionBackendId) -> ExecutionBacken
             "Execution Backend."
         ) from error
     return factory()
+
+
+def execution_backend_availability() -> tuple[BackendAvailability, ...]:
+    """Report Backend Availability for every registered Execution Backend.
+
+    Resolution only — no provider is started — so the Execution Backend menu can
+    annotate each choice with whether the user can actually run it.
+    """
+    return tuple(
+        resolve_execution_backend(backend_id).availability()
+        for backend_id in registered_execution_backend_ids()
+    )
+
+
+@dataclass(frozen=True)
+class BackendModelCatalogAccess:
+    """Per-backend Model Catalog access for one repository checkout.
+
+    The Workflow Editor is handed these as plain callables, so a test drives it
+    from fakes and a real session builds one of these from the commands the user
+    configured. Each backend is resolved only when a Workflow Step actually
+    needs it, which is what keeps a single-backend Workflow independent of the
+    other provider's installation.
+    """
+
+    cwd: Path
+    codex: str = CODEX_CLI_COMMAND
+    claude: str = CLAUDE_CLI_COMMAND
+
+    def backend(self, backend_id: ExecutionBackendId) -> ExecutionBackend:
+        if backend_id is ExecutionBackendId.CODEX_CLI:
+            return CodexCliExecutionBackend.resolved(self.codex)
+        if backend_id is ExecutionBackendId.CLAUDE_CODE:
+            return ClaudeCodeExecutionBackend.resolved(self.claude)
+        return resolve_execution_backend(backend_id)
+
+    def load_catalog(self, backend_id: ExecutionBackendId) -> ModelCatalog:
+        return self.backend(backend_id).discover_model_catalog(cwd=self.cwd)
+
+    def verify_model(self, backend_id: ExecutionBackendId, model_id: str) -> str:
+        return self.backend(backend_id).verify_selected_model(model_id, cwd=self.cwd)
+
+    def availability(self) -> tuple[BackendAvailability, ...]:
+        return tuple(
+            self.backend(backend_id).availability()
+            for backend_id in registered_execution_backend_ids()
+        )

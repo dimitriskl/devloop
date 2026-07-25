@@ -31,8 +31,17 @@ Also in this change:
 - Component Execution Defaults supply per-role defaults for each Execution
   Backend. The existing Codex per-role model and reasoning-effort defaults are
   unchanged, and produced Codex agent invocations are unchanged.
-- No Execution Backend selection is offered yet: the Claude Code Backend is
-  declared and displayed but cannot execute an attempt in this change.
+- The `/options` `backend` action selects each agent-backed Workflow Step's
+  Execution Backend from an arrow-key menu annotated with each backend's
+  availability on this machine. Changing it moves that step's model and reasoning
+  effort to the new backend's Component Execution Defaults, and `model`,
+  `reasoning`, and `fast` then operate on that backend's Model Catalog.
+- The Claude Code Backend executes a Workflow Step attempt through the installed
+  Claude CLI, and its models come from `catalogs/claude-code-models.json` as
+  Bundled Catalog Reference Data: browsing costs nothing, one selection costs one
+  verification call, a short alias is saved as the concrete identifier that call
+  reports, and a refusal is shown in the provider's own words. Authorizing a
+  Claude-backed run at preflight is still separate work.
 
 ## v0.1.0 - 2026-07-17
 

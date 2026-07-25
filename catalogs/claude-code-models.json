@@ -1,0 +1,40 @@
+{
+  "backend": "CLAUDE_CODE",
+  "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+  "accepts_free_text_model": true,
+  "models": [
+    {
+      "model_id": "claude-opus-5",
+      "display_name": "Claude Opus 5",
+      "description": "Deepest reasoning; long-horizon agentic and coding work."
+    },
+    {
+      "model_id": "claude-sonnet-5",
+      "display_name": "Claude Sonnet 5",
+      "description": "Near-Opus quality on coding and agentic work, at lower cost."
+    },
+    {
+      "model_id": "claude-haiku-4-5-20251001",
+      "display_name": "Claude Haiku 4.5",
+      "description": "Fastest and cheapest; suits short, well-scoped steps."
+    },
+    {
+      "model_id": "opus",
+      "display_name": "Opus (latest)",
+      "description": "Short alias; saved as the pinned identifier it resolves to.",
+      "alias": true
+    },
+    {
+      "model_id": "sonnet",
+      "display_name": "Sonnet (latest)",
+      "description": "Short alias; saved as the pinned identifier it resolves to.",
+      "alias": true
+    },
+    {
+      "model_id": "haiku",
+      "display_name": "Haiku (latest)",
+      "description": "Short alias; saved as the pinned identifier it resolves to.",
+      "alias": true
+    }
+  ]
+}

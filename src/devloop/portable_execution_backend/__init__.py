@@ -20,6 +20,7 @@ from .activity import (
     StepActivityKind,
 )
 from .backend import (
+    BackendAvailability,
     ExecutionBackend,
     ExecutionBackendId,
     LogWriter,
@@ -32,10 +33,17 @@ from .backend import (
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import CheckpointBudget, update_checkpoint_for_step_activity
+from .claude_catalog import (
+    ClaudeModelCatalogAdapter,
+    ModelVerificationError,
+    load_bundled_model_catalog,
+)
 from .claude_code import ClaudeCodeExecutionBackend
 from .codex_cli import CodexCliExecutionBackend
 from .registry import (
     REGISTERED_EXECUTION_BACKENDS,
+    BackendModelCatalogAccess,
+    execution_backend_availability,
     registered_execution_backend_ids,
     resolve_execution_backend,
 )
@@ -45,12 +53,16 @@ __all__ = [
     "REGISTERED_EXECUTION_BACKENDS",
     "TOOL_ACTIVITY_KINDS",
     "ActivityCallback",
+    "BackendAvailability",
+    "BackendModelCatalogAccess",
     "CheckpointBudget",
     "ClaudeCodeExecutionBackend",
+    "ClaudeModelCatalogAdapter",
     "CodexCliExecutionBackend",
     "ExecutionBackend",
     "ExecutionBackendId",
     "LogWriter",
+    "ModelVerificationError",
     "RefusalRecord",
     "RunWideBlocker",
     "RunWideBlockerKind",
@@ -61,7 +73,9 @@ __all__ = [
     "StepAttemptResult",
     "StepSettingsAuthorization",
     "describe_refusals",
+    "execution_backend_availability",
     "extract_json_object",
+    "load_bundled_model_catalog",
     "parse_execution_backend_id",
     "registered_execution_backend_ids",
     "resolve_execution_backend",

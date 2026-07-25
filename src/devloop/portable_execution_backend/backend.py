@@ -10,21 +10,35 @@ recovered structured message, any Run-Wide Blocker, and any refusal records.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from ..execution_backend_id import ExecutionBackendId, parse_execution_backend_id
 from ..statusui import Stage
 from .activity import ActivityCallback
 from .blockers import RunWideBlocker, RunWideBlockerPolicy
 
 if TYPE_CHECKING:
-    from ..model_catalog import CodexModelCatalog
+    from ..model_catalog import ModelCatalog
     from ..portable_workflow import ExecutionBudget, StepExecutionSettings
+
+__all__ = [
+    "BackendAvailability",
+    "ExecutionBackend",
+    "ExecutionBackendId",
+    "LogWriter",
+    "RefusalRecord",
+    "StepAttemptRequest",
+    "StepAttemptResult",
+    "StepSettingsAuthorization",
+    "describe_refusals",
+    "parse_execution_backend_id",
+]
 
 
 # Durable log writing stays with the role runner, which owns log-root
@@ -32,53 +46,23 @@ if TYPE_CHECKING:
 LogWriter = Callable[[Path, str], None]
 
 
-class ExecutionBackendId(str, Enum):
-    """The closed set of Execution Backends Dev Loop can dispatch a step to."""
+@dataclass(frozen=True)
+class BackendAvailability:
+    """Whether one Execution Backend is installed and usable on this machine.
 
-    CODEX_CLI = "CODEX_CLI"
-    CLAUDE_CODE = "CLAUDE_CODE"
-
-    @property
-    def display_name(self) -> str:
-        """The operator-facing name of this Execution Backend."""
-        return _EXECUTION_BACKEND_DISPLAY_NAMES[self]
-
-    @property
-    def advertises_fast(self) -> bool:
-        """Whether this Execution Backend offers Fast for any of its models.
-
-        Fast is a Codex service-tier preference. A backend that advertises none
-        rejects Fast outright; within a backend that does advertise it, the
-        selected model still decides, through its Model Catalog entry.
-        """
-        return self is ExecutionBackendId.CODEX_CLI
-
-
-_EXECUTION_BACKEND_DISPLAY_NAMES = {
-    ExecutionBackendId.CODEX_CLI: "Codex CLI",
-    ExecutionBackendId.CLAUDE_CODE: "Claude Code",
-}
-
-
-def parse_execution_backend_id(value: Any) -> ExecutionBackendId:
-    """Parse an external backend name into the closed Execution Backend set.
-
-    This is the single boundary at which persisted documents and command-line
-    input become backend identity; nothing downstream compares a bare string.
+    Reported per backend so a Workflow Step is never configured against a
+    backend the user cannot run. ``detail`` is the operator-facing reason, shown
+    beside the backend in the `/options` Execution Backend menu.
     """
-    if isinstance(value, ExecutionBackendId):
-        return value
-    supported = ", ".join(member.value for member in ExecutionBackendId)
-    if not isinstance(value, str):
-        raise ValueError(
-            f"Execution Backend must be one of {supported}; got {value!r}."
-        )
-    try:
-        return ExecutionBackendId(value.strip())
-    except ValueError as error:
-        raise ValueError(
-            f"Unsupported Execution Backend {value!r}; expected one of {supported}."
-        ) from error
+
+    backend: ExecutionBackendId
+    installed: bool
+    detail: str
+
+    @property
+    def annotation(self) -> str:
+        """The short annotation the Execution Backend menu shows per backend."""
+        return self.detail
 
 
 @dataclass(frozen=True)
@@ -177,7 +161,7 @@ class ExecutionBackend(ABC):
         """Run one Workflow Step attempt to its terminal process result."""
 
     @abstractmethod
-    def discover_model_catalog(self, *, cwd: Path) -> CodexModelCatalog:
+    def discover_model_catalog(self, *, cwd: Path) -> ModelCatalog:
         """Discover this backend's live account-aware Model Catalog."""
 
     @abstractmethod
@@ -185,6 +169,51 @@ class ExecutionBackend(ABC):
         self,
         authorizations: Sequence[StepSettingsAuthorization],
         *,
-        model_catalog: CodexModelCatalog,
+        model_catalog: ModelCatalog,
     ) -> None:
         """Authorize snapshotted settings for run preflight, or refuse clearly."""
+
+    @property
+    def provider_command(self) -> str:
+        """The command this backend invokes, or empty when it needs none."""
+        return ""
+
+    def availability(self) -> BackendAvailability:
+        """Report Backend Availability without running the provider.
+
+        Resolution only: the command is looked up on the executable search path
+        and on disk, and nothing is started. A backend that needs no executable
+        is available by definition.
+        """
+        command = self.provider_command
+        if not command:
+            return BackendAvailability(
+                backend=self.backend_id,
+                installed=True,
+                detail="no provider executable required",
+            )
+        if shutil.which(command) or Path(command).is_file():
+            return BackendAvailability(
+                backend=self.backend_id,
+                installed=True,
+                detail="installed",
+            )
+        return BackendAvailability(
+            backend=self.backend_id,
+            installed=False,
+            detail="not installed",
+        )
+
+    def verify_selected_model(self, model_id: str, *, cwd: Path) -> str:
+        """Verify one selected model and return the identifier to persist.
+
+        The default is the identity: a backend whose Model Catalog is itself the
+        live account-aware list has already told the user what their account can
+        run, so a selection needs no further call and carries no alias to
+        resolve. A backend whose catalog is bundled reference data overrides
+        this, verifies the selection against the operator's own account, and
+        returns the concrete identifier the provider resolved it to — never a
+        short alias, because a persisted alias could silently change which model
+        serves a rerun.
+        """
+        return model_id

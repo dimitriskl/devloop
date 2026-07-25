@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from .codex_runner import RoleResult, result_to_dict
 from .issue_pack import Issue
-from .model_catalog import CodexModelCatalog
+from .model_catalog import ModelCatalog
 from .portable_execution_backend import (
     ExecutionBackendId,
     StepSettingsAuthorization,
@@ -234,8 +234,9 @@ class ExecutionBudget:
 # Component Execution Defaults, per Execution Backend and per built-in role.
 # The Codex CLI Backend column is the historical per-role default and must not
 # change. The Claude Code Backend column names pinned concrete identifiers and
-# an effort the provider CLI accepts, and is superseded by the bundled Claude
-# Model Catalog once that reference data exists.
+# an effort the provider CLI accepts. These are the values a Workflow Step starts
+# from when its Execution Backend changes; the selectable set itself comes from
+# the bundled Claude Model Catalog in `catalogs/claude-code-models.json`.
 DEFAULT_STEP_EXECUTION_SETTINGS: Mapping[
     ExecutionBackendId,
     Mapping[str, tuple[str, str]],
@@ -1543,7 +1544,7 @@ def planning_workflow_step(
 def preflight_step_execution_settings(
     workflow: WorkflowDefinition,
     component_catalog: PortableStepComponentCatalog,
-    model_catalog: CodexModelCatalog,
+    model_catalog: ModelCatalog,
 ) -> None:
     """Ask the Execution Backend to authorize exact snapshotted settings.
 

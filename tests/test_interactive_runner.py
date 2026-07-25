@@ -16,8 +16,8 @@ from devloop.issue_pack import Issue
 from devloop.model_catalog import (
     CatalogDiscoveryError,
     CatalogSource,
-    CodexModel,
-    CodexModelCatalog,
+    CatalogModel,
+    ModelCatalog,
 )
 from devloop.portable_component_catalog import build_portable_component_catalog
 from devloop.portable_runtime import (
@@ -75,16 +75,16 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             WorkflowDefaultStore(state_path, catalog).replace(
                 load_portable_workflow(document, catalog)
             )
-            live_catalog = CodexModelCatalog(
+            live_catalog = ModelCatalog(
                 models=(
-                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CodexModel(
+                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CatalogModel(
                         "gpt-5.6-sol",
                         "Sol",
                         "",
                         ("xhigh",),
                     ),
-                    CodexModel(
+                    CatalogModel(
                         "gpt-5.6-terra",
                         "Terra",
                         "",
@@ -98,7 +98,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             parser = interactive_runner.build_parser()
             args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
             adapter = mock.Mock()
-            adapter.discover.return_value = live_catalog
+            adapter.load_catalog.return_value = live_catalog
             bundle = mock.Mock(root=root)
 
             with mock.patch.object(
@@ -135,7 +135,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 return_value=catalog,
             ), mock.patch.object(
                 interactive_runner,
-                "CodexModelCatalogAdapter",
+                "BackendModelCatalogAccess",
                 return_value=adapter,
             ) as adapter_type, mock.patch.object(
                 interactive_runner,
@@ -149,8 +149,10 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 result = interactive_runner._run_planning(parser, args)
 
         self.assertEqual(result, 0)
-        adapter_type.assert_called_with("codex", cwd=root)
-        adapter.discover.assert_called_once_with()
+        adapter_type.assert_called_with(cwd=root, codex="codex")
+        adapter.load_catalog.assert_called_once_with(
+            interactive_runner.ExecutionBackendId.CODEX_CLI
+        )
         preflight.assert_called_once_with(
             mock.ANY,
             catalog,
@@ -193,17 +195,17 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 prd_path=root / "feature.md",
                 issues_index=root / "README.md",
             )
-            live_catalog = CodexModelCatalog(
+            live_catalog = ModelCatalog(
                 models=(
-                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
                 ),
                 fetched_at="2026-07-16T12:00:00",
                 source=CatalogSource.LIVE,
             )
             adapter = mock.Mock()
-            adapter.discover.return_value = live_catalog
+            adapter.load_catalog.return_value = live_catalog
             parser = interactive_runner.build_parser()
             args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
 
@@ -262,7 +264,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 return_value=component_catalog,
             ), mock.patch.object(
                 interactive_runner,
-                "CodexModelCatalogAdapter",
+                "BackendModelCatalogAccess",
                 return_value=adapter,
             ), mock.patch.object(
                 interactive_runner,
@@ -330,17 +332,17 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-                live_catalog = CodexModelCatalog(
+                live_catalog = ModelCatalog(
                     models=(
-                        CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                        CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                        CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                        CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                        CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                        CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
                     ),
                     fetched_at="2026-07-16T12:00:00",
                     source=CatalogSource.LIVE,
                 )
                 adapter = mock.Mock()
-                adapter.discover.return_value = live_catalog
+                adapter.load_catalog.return_value = live_catalog
                 parser = interactive_runner.build_parser()
                 args = parser.parse_args(
                     ["--repo", str(root), "--goal", "plan it"]
@@ -372,7 +374,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                     return_value=component_catalog,
                 ), mock.patch.object(
                     interactive_runner,
-                    "CodexModelCatalogAdapter",
+                    "BackendModelCatalogAccess",
                     return_value=adapter,
                 ), mock.patch.object(
                     interactive_runner,
@@ -387,7 +389,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
 
                 self.assertEqual(result, 0)
                 run_chat.assert_not_called()
-                adapter.discover.assert_not_called()
+                adapter.load_catalog.assert_not_called()
                 self.assertIn(
                     "exactly one WORKFLOW-scoped",
                     output.getvalue(),
@@ -432,17 +434,17 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 state_path,
                 component_catalog,
             ).replace(applied)
-            live_catalog = CodexModelCatalog(
+            live_catalog = ModelCatalog(
                 models=(
-                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
                 ),
                 fetched_at="2026-07-16T12:00:00",
                 source=CatalogSource.LIVE,
             )
             adapter = mock.Mock()
-            adapter.discover.return_value = live_catalog
+            adapter.load_catalog.return_value = live_catalog
             parser = interactive_runner.build_parser()
             args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
 
@@ -472,7 +474,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 return_value=component_catalog,
             ), mock.patch.object(
                 interactive_runner,
-                "CodexModelCatalogAdapter",
+                "BackendModelCatalogAccess",
                 return_value=adapter,
             ), mock.patch.object(
                 interactive_runner,
@@ -506,17 +508,17 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             WorkflowDefaultStore(state_path, component_catalog).replace(
                 load_portable_workflow(invalid_document, component_catalog)
             )
-            live_catalog = CodexModelCatalog(
+            live_catalog = ModelCatalog(
                 models=(
-                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
                 ),
                 fetched_at="2026-07-16T12:00:00",
                 source=CatalogSource.LIVE,
             )
             adapter = mock.Mock()
-            adapter.discover.side_effect = [
+            adapter.load_catalog.side_effect = [
                 CatalogDiscoveryError("temporary failure one"),
                 CatalogDiscoveryError("temporary failure two"),
                 live_catalog,
@@ -563,7 +565,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 return_value=component_catalog,
             ), mock.patch.object(
                 interactive_runner,
-                "CodexModelCatalogAdapter",
+                "BackendModelCatalogAccess",
                 return_value=adapter,
             ), mock.patch.object(
                 interactive_runner,
@@ -582,7 +584,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         options.assert_called_once()
-        self.assertEqual(adapter.discover.call_count, 3)
+        self.assertEqual(adapter.load_catalog.call_count, 3)
         self.assertIn("/options", output.getvalue())
         self.assertIn("retry-catalog", output.getvalue())
 
@@ -622,11 +624,11 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             catalog = default_portable_component_catalog()
-            live_catalog = CodexModelCatalog(
+            live_catalog = ModelCatalog(
                 models=(
-                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
                 ),
                 fetched_at="2026-07-16T12:00:00",
                 source=CatalogSource.LIVE,
@@ -1017,7 +1019,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
                 "run_options_menu",
             ) as options, mock.patch.object(
                 interactive_runner,
-                "CodexModelCatalogAdapter",
+                "BackendModelCatalogAccess",
             ) as adapter_type, redirect_stdout(StringIO()):
                 result = interactive_runner.run_handoff(
                     root,
@@ -1035,9 +1037,12 @@ class BuildDevloopArgsTests(unittest.TestCase):
             state_path,
             current_workflow=current_workflow,
             component_catalog=mock.ANY,
-            model_catalog_loader=mock.ANY,
+            catalog_access=mock.ANY,
         )
-        adapter_type.assert_called_once_with("/opt/custom-codex", cwd=root)
+        adapter_type.assert_called_once_with(
+            cwd=root,
+            codex="/opt/custom-codex",
+        )
 
     def test_handoff_options_loads_current_run_from_reused_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1087,9 +1092,9 @@ class BuildDevloopArgsTests(unittest.TestCase):
                 return_value=100,
             ), mock.patch.object(
                 interactive_runner,
-                "CodexModelCatalogAdapter",
+                "BackendModelCatalogAccess",
             ) as adapter_type, redirect_stdout(StringIO()) as output:
-                adapter_type.return_value.discover.side_effect = (
+                adapter_type.return_value.load_catalog.side_effect = (
                     CatalogDiscoveryError("offline test catalog")
                 )
                 result = interactive_runner.run_handoff(
@@ -1517,11 +1522,11 @@ class PlanStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             state_path = root / "devloop-plan.json"
-            live_catalog = CodexModelCatalog(
+            live_catalog = ModelCatalog(
                 models=(
-                    CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CodexModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                    CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                    CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+                    CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
                 ),
                 fetched_at="2026-07-16T12:00:00",
                 source=CatalogSource.LIVE,

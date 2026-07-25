@@ -12,9 +12,9 @@ from devloop.issue_pack import Issue
 from devloop.model_catalog import (
     CatalogDiscoveryError,
     CatalogSource,
-    CodexModel,
-    CodexModelCatalog,
-    CodexModelCatalogCache,
+    CatalogModel,
+    ModelCatalog,
+    ModelCatalogCache,
     model_catalog_cache_path,
 )
 from devloop.portable_execution_backend import (
@@ -71,18 +71,22 @@ class _FakeEditor:
 
 class StepExecutionSettingsTests(unittest.TestCase):
     @staticmethod
-    def _live_catalog(*, sol_fast: bool = True) -> CodexModelCatalog:
-        return CodexModelCatalog(
+    def _live_catalog(
+        _backend: ExecutionBackendId | None = None,
+        *,
+        sol_fast: bool = True,
+    ) -> ModelCatalog:
+        return ModelCatalog(
             models=(
-                CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                CodexModel(
+                CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                CatalogModel(
                     "gpt-5.6-sol",
                     "Sol",
                     "",
                     ("high", "xhigh"),
                     advertises_fast=sol_fast,
                 ),
-                CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
             ),
             fetched_at="2026-07-16T12:00:00",
             source=CatalogSource.LIVE,
@@ -722,7 +726,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             ),
         )
         rendered = "\n".join(output)
-        self.assertIn("Codex Models — live", rendered)
+        self.assertIn("Codex CLI Models — live", rendered)
         self.assertIn("2. Sol — gpt-5.6-sol", rendered)
 
     def test_editor_persists_execution_budget_without_changing_execution_settings(self) -> None:
@@ -763,13 +767,13 @@ class StepExecutionSettingsTests(unittest.TestCase):
     def test_retry_catalog_replaces_visible_stale_cache_after_discovery_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = Path(raw) / "devloop-plan.json"
-            cache = CodexModelCatalogCache(
+            cache = ModelCatalogCache(
                 model_catalog_cache_path(configuration_path)
             )
             cache.replace(self._live_catalog())
             attempts = 0
 
-            def discover() -> CodexModelCatalog:
+            def discover(_backend: ExecutionBackendId) -> ModelCatalog:
                 nonlocal attempts
                 attempts += 1
                 if attempts == 1:
@@ -786,8 +790,11 @@ class StepExecutionSettingsTests(unittest.TestCase):
             )
 
         rendered = "\n".join(output)
-        self.assertIn("Codex Model Catalog refreshed from the live backend.", rendered)
-        self.assertNotIn("Codex Model Catalog: STALE", output[-1])
+        self.assertIn(
+            "Codex CLI Model Catalog refreshed from the live backend.",
+            rendered,
+        )
+        self.assertNotIn("Codex CLI Model Catalog: STALE", output[-1])
 
     def test_editor_sanitizes_backend_catalog_errors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -798,7 +805,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
                 read_line=_FakeEditor(["cancel"]).read_line,
                 write=output.append,
                 terminal_width=120,
-                model_catalog_loader=lambda: (_ for _ in ()).throw(
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
                     CatalogDiscoveryError(HOSTILE_TERMINAL_TEXT)
                 ),
             )
@@ -822,7 +829,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             with self.subTest(field_name=field_name), tempfile.TemporaryDirectory() as raw:
                 output: list[str] = []
 
-                def load_catalog() -> CodexModelCatalog:
+                def load_catalog(_backend: ExecutionBackendId) -> ModelCatalog:
                     model_values = {
                         "model_id": "gpt-5.6-luna",
                         "display_name": "Luna",
@@ -834,8 +841,8 @@ class StepExecutionSettingsTests(unittest.TestCase):
                         fetched_at = str(hostile_value)
                     else:
                         model_values[field_name] = hostile_value
-                    return CodexModelCatalog(
-                        models=(CodexModel(**model_values),),
+                    return ModelCatalog(
+                        models=(CatalogModel(**model_values),),
                         fetched_at=fetched_at,
                     )
 
@@ -855,7 +862,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
                         for character in rendered
                     )
                 )
-                self.assertNotIn("Codex Models —", rendered)
+                self.assertNotIn("Codex CLI Models —", rendered)
                 self.assertNotIn("Reasoning Efforts —", rendered)
 
     def test_editor_rejects_hostile_cached_catalog_metadata_before_display(
@@ -908,15 +915,15 @@ class StepExecutionSettingsTests(unittest.TestCase):
                         for character in rendered
                     )
                 )
-                self.assertNotIn("Codex Models —", rendered)
+                self.assertNotIn("Codex CLI Models —", rendered)
                 self.assertNotIn("Reasoning Efforts —", rendered)
 
     def test_cached_only_model_choice_cannot_be_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = Path(raw) / "devloop-plan.json"
-            cached_catalog = CodexModelCatalog(
+            cached_catalog = ModelCatalog(
                 models=(
-                    CodexModel(
+                    CatalogModel(
                         "cached-only-model",
                         "Cached Only",
                         "",
@@ -926,7 +933,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
                 fetched_at="2026-07-15T12:00:00",
                 source=CatalogSource.LIVE,
             )
-            CodexModelCatalogCache(
+            ModelCatalogCache(
                 model_catalog_cache_path(configuration_path)
             ).replace(cached_catalog)
             output: list[str] = []
@@ -936,7 +943,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
                 read_line=_FakeEditor(["1", "model", "1", "apply"]).read_line,
                 write=output.append,
                 terminal_width=120,
-                model_catalog_loader=lambda: (_ for _ in ()).throw(
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
                     CatalogDiscoveryError("backend unavailable")
                 ),
             )
@@ -951,7 +958,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             "gpt-5.6-sol",
         )
         self.assertIn(
-            "fresh live Codex Model Catalog is required",
+            "fresh live Codex CLI Model Catalog is required",
             "\n".join(output),
         )
 
@@ -1061,7 +1068,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             )
             discovery_count = 0
 
-            def discover() -> CodexModelCatalog:
+            def discover() -> ModelCatalog:
                 nonlocal discovery_count
                 discovery_count += 1
                 result = next(discoveries)

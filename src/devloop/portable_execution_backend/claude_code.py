@@ -51,6 +51,7 @@ from .backend import (
     describe_refusals,
 )
 from .checkpoint import update_checkpoint_for_step_activity
+from .claude_catalog import ClaudeModelCatalogAdapter
 from .process_stream import (
     drain_process_stream,
     print_step_activity,
@@ -59,7 +60,7 @@ from .process_stream import (
 from .structured_result import extract_json_object
 
 if TYPE_CHECKING:
-    from ..model_catalog import CodexModelCatalog
+    from ..model_catalog import ModelCatalog
     from ..portable_workflow import ExecutionBudget, StepExecutionSettings
 
 
@@ -665,19 +666,35 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
             failure_summary=failure_summary,
         )
 
-    def discover_model_catalog(self, *, cwd: Path) -> CodexModelCatalog:
-        raise NotImplementedError(
-            "The Claude Code Backend has no Model Catalog yet. Its bundled "
-            "catalog, short-alias resolution to a pinned identifier, and "
-            "account verification arrive with Claude model selection in "
-            "/options."
-        )
+    @property
+    def provider_command(self) -> str:
+        return self.claude
+
+    def discover_model_catalog(self, *, cwd: Path) -> ModelCatalog:
+        """Return the bundled Claude catalog as live, at no verification cost.
+
+        Browsing must stay free: the executable is resolved and the bundled
+        entries are returned. Nothing here calls the provider, so opening
+        `/options` for a Claude-backed Workflow Step costs one path lookup and
+        one file read however many models the bundle lists.
+        """
+        return ClaudeModelCatalogAdapter(self.claude, cwd=cwd).discover()
+
+    def verify_selected_model(self, model_id: str, *, cwd: Path) -> str:
+        """Verify one selected model and return the identifier to persist.
+
+        This is the one call a selection costs. A short alias resolves to the
+        concrete pinned identifier the session-initialisation event reports, and
+        that identifier — never the alias — is what the caller saves, so
+        rerunning a Workflow Run cannot silently change which model works.
+        """
+        return ClaudeModelCatalogAdapter(self.claude, cwd=cwd).verify(model_id)
 
     def authorize_execution_settings(
         self,
         authorizations: Sequence[StepSettingsAuthorization],
         *,
-        model_catalog: CodexModelCatalog,
+        model_catalog: ModelCatalog,
     ) -> None:
         raise NotImplementedError(
             "The Claude Code Backend cannot authorize a run yet. Verifying each "

@@ -322,8 +322,12 @@ The timeout and checkpoint limits governing a Workflow Step attempt independentl
 _Avoid_: Model profile, reasoning-effort preset
 
 **Model Catalog**:
-The account-aware catalog belonging to one Execution Backend that defines its selectable models, their supported reasoning efforts, and their Fast availability. A cached catalog is display-only and can never authorize a run.
+The account-aware catalog belonging to one Execution Backend that defines its selectable models, their supported reasoning efforts, and their Fast availability. A cached catalog is display-only and can never authorize a run. A backend whose provider offers no catalog endpoint supplies its entries as Bundled Catalog Reference Data instead, and a selection from those entries is verified before it is saved.
 _Avoid_: Codex Model Catalog as the only catalog, hard-coded model list, cached authorization
+
+**Bundled Catalog Reference Data**:
+The Model Catalog entries a backend ships in the bundle rather than discovering, offering pinned concrete model identifiers, short aliases, and a free-text identifier. Browsing costs nothing; one model selection costs one verification call, and only the concrete identifier that call reports is ever persisted.
+_Avoid_: Hard-coded model list, account-aware catalog, persisted alias
 
 **Required Capability**:
 A Skill or Agent Reference that a Workflow Step Component depends on and that cannot be removed from its Step Capability Profile.

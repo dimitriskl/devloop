@@ -12,7 +12,7 @@ from devloop.model_catalog import (
     CatalogDiscoveryError,
     CatalogSource,
     CodexModelCatalogAdapter,
-    CodexModelCatalogCache,
+    ModelCatalogCache,
 )
 
 
@@ -459,7 +459,7 @@ class CodexModelCatalogAdapterTests(unittest.TestCase):
             ),
         )
         with tempfile.TemporaryDirectory() as raw:
-            cache = CodexModelCatalogCache(Path(raw) / "models.json")
+            cache = ModelCatalogCache(Path(raw) / "models.json")
             cache.replace(adapter.discover())
 
             restored = cache.load()
@@ -496,7 +496,7 @@ class CodexModelCatalogAdapterTests(unittest.TestCase):
                 ValueError,
                 "control characters or line breaks",
             ):
-                CodexModelCatalogCache(path).load()
+                ModelCatalogCache(path).load()
 
     def test_cached_catalog_rejects_terminal_controls_in_rendered_model_metadata(
         self,
@@ -532,7 +532,7 @@ class CodexModelCatalogAdapterTests(unittest.TestCase):
                     ValueError,
                     "control characters or line breaks",
                 ):
-                    CodexModelCatalogCache(path).load()
+                    ModelCatalogCache(path).load()
 
 
 if __name__ == "__main__":

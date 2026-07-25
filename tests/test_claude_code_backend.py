@@ -1072,13 +1072,16 @@ class ClaudeBackendInvokeTests(unittest.TestCase):
             ExecutionBackendId.CLAUDE_CODE,
         )
 
-    def test_model_selection_and_preflight_are_not_available_yet(self) -> None:
+    def test_model_selection_is_available_while_run_preflight_is_not_yet(self) -> None:
+        """Selecting a model works; authorizing a whole run is separate work."""
         backend = ClaudeCodeExecutionBackend()
 
+        catalog = backend.discover_model_catalog(cwd=Path.cwd())
+
+        self.assertIs(catalog.backend, ExecutionBackendId.CLAUDE_CODE)
+        self.assertTrue(catalog.models)
         with self.assertRaises(NotImplementedError):
-            backend.discover_model_catalog(cwd=Path.cwd())
-        with self.assertRaises(NotImplementedError):
-            backend.authorize_execution_settings((), model_catalog=None)
+            backend.authorize_execution_settings((), model_catalog=catalog)
 
 
 class ClaudePermissionDenialActivityTests(unittest.TestCase):
