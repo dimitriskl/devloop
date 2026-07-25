@@ -12,6 +12,11 @@ from typing import Sequence
 PROCESS_EXIT_GRACE_SECONDS = 1.0
 PROCESS_TERMINATE_GRACE_SECONDS = 5.0
 BUDGET_POLL_SECONDS = 0.05
+# The exit status every Execution Backend reports when an attempt was terminated
+# because its Execution Budget expired. It lives beside the budget itself so both
+# backends and the role runner read one convention rather than each repeating the
+# number.
+EXECUTION_BUDGET_EXPIRY_RETURNCODE = 124
 PROCESS_TREE_ATTRIBUTE = "_devloop_process_group_id"
 _ACTIVE_PROCESS_TREES: set[subprocess.Popen[str]] = set()
 _ACTIVE_PROCESS_TREES_LOCK = threading.RLock()

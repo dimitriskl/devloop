@@ -21,17 +21,22 @@ from .issue_pack import Issue
 from .portable_execution_backend import (
     ActivityCallback,
     ExecutionBackend,
+    ExecutionBackendId,
     LogWriter,
+    RefusalRecord,
     RunWideBlocker,
     RunWideBlockerPolicy,
     StepAttemptRequest,
+    describe_refusals,
     extract_json_object,
     resolve_execution_backend,
 )
 from .portable_text import normalize_single_line_display_name
+from .redaction import redact_persisted_evidence
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
 from .statusui import Stage
 from .step_configuration import STEP_GUIDANCE_PRECEDENCE, StepGuidance
+from .subprocess_utils import EXECUTION_BUDGET_EXPIRY_RETURNCODE
 from .templates import BundleContext, Preset, render_template
 
 if TYPE_CHECKING:
@@ -58,6 +63,15 @@ SELF_IMPROVEMENT_LOG_PREFIX = "self-improvement-compiler"
 EXECUTION_BUDGET_EXPIRATION_PATTERN = re.compile(
     r"Execution Budget (?:timeout|checkpoint deadline) "
     r"\([^)\r\n]+\) expired\."
+)
+# One sentence, reused by both failure summaries, so an operator reads the same
+# promise about an unfinished attempt whichever Execution Backend ran it.
+UNFINISHED_ATTEMPT_WORKSPACE_NOTE = (
+    "Changes already written remain in the workspace. Rerun the unfinished "
+    "issue to continue from them."
+)
+ROLE_SCHEMA_MISMATCH_SUMMARY = (
+    "did not return valid JSON matching the role schema."
 )
 ROLE_STAGES = {
     "coder": Stage.DEVELOPMENT,
@@ -100,12 +114,25 @@ class RoleResult:
     raw_message: str = ""
 
     @classmethod
-    def from_message(cls, message: str) -> "RoleResult":
+    def from_message(
+        cls,
+        message: str,
+        *,
+        backend: ExecutionBackendId | None = None,
+    ) -> "RoleResult":
+        """Parse one attempt's role result, naming the backend that produced it.
+
+        ``backend`` is what keeps a refusal summary honest in a mixed-backend
+        Workflow: the operator is told which provider failed to return the role
+        result, not whichever provider the runner was first written for.
+        """
         data = extract_json_object(message)
         if not data:
             return cls(
                 status="BLOCKED",
-                summary="Codex did not return valid JSON matching the role schema.",
+                summary=(
+                    f"{_backend_subject(backend)} {ROLE_SCHEMA_MISMATCH_SUMMARY}"
+                ),
                 raw_message=message,
             )
 
@@ -177,10 +204,17 @@ class CodexRunner:
         *,
         log_root: Path | None = None,
     ) -> None:
+        """Write one durable attempt log inside the configured log root.
+
+        This is the single point at which an attempt's text becomes durable, so
+        it is where the Redaction Service masks detected secrets. Every Execution
+        Backend writes through here, so both providers' logs are redacted on
+        identical terms rather than each backend being trusted to remember.
+        """
         configured_root = log_root or self.log_root
         configured_root.mkdir(parents=True, exist_ok=True)
         resolved_path = _confined_log_path(path, configured_root)
-        resolved_path.write_text(text, encoding="utf-8")
+        resolved_path.write_text(redact_persisted_evidence(text), encoding="utf-8")
 
     def run_role(
         self,
@@ -240,7 +274,8 @@ class CodexRunner:
         )
         self.write_log_text(logs.prompt, prompt)
 
-        result = self.backend_for_step(execution_settings).invoke(
+        backend = self.backend_for_step(execution_settings)
+        result = backend.invoke(
             StepAttemptRequest(
                 prompt=prompt,
                 repo_root=self.repo_root,
@@ -263,13 +298,50 @@ class CodexRunner:
         self.write_log_text(logs.stdout, process.stdout)
         self.write_log_text(logs.stderr, process.stderr)
 
+        # Step Outcome precedence, in strict order. A Permission Denial is
+        # evaluated first, ahead of every other signal, because a backend can
+        # deny the work an attempt needed while still reporting no error, a
+        # success subtype, a completed terminal reason and a zero exit code — and
+        # the agent may then assert the denied work was done. Nothing an attempt
+        # claims after being denied a tool can be trusted, so no later signal is
+        # allowed to overrule the denial.
+        if result.refusals:
+            return RoleResult(
+                status="BLOCKED",
+                summary=role_permission_denial_summary(
+                    backend=backend.backend_id,
+                    refusals=result.refusals,
+                    log_path=logs.stdout,
+                ),
+                raw_message=result.message,
+            )
+
         if result.run_wide_blocker is not None:
             raise RunWideBlockerError(result.run_wide_blocker)
+
+        # A backend that reported an error, or an ending other than completion,
+        # is BLOCKED in its own words. The backend's judgement decides this
+        # rather than the process exit code, because a provider was observed
+        # exiting zero for a turn it did not carry out. An attempt whose
+        # Execution Budget expired in the same window keeps the workspace promise
+        # of the budget-expiry convention alongside those words.
+        if result.failure_summary:
+            return RoleResult(
+                status="BLOCKED",
+                summary=role_provider_failure_summary(
+                    failure_summary=result.failure_summary,
+                    returncode=process.returncode,
+                    stderr=process.stderr,
+                    stderr_path=logs.stderr,
+                ),
+                raw_message=result.message or process.stderr,
+            )
 
         if process.returncode != 0:
             return RoleResult(
                 status="BLOCKED",
                 summary=role_execution_failure_summary(
+                    backend=backend.backend_id,
                     returncode=process.returncode,
                     stderr=process.stderr,
                     stderr_path=logs.stderr,
@@ -277,7 +349,7 @@ class CodexRunner:
                 raw_message=process.stderr,
             )
 
-        return RoleResult.from_message(result.message)
+        return RoleResult.from_message(result.message, backend=backend.backend_id)
 
     def render_dry_run_prompts(
         self,
@@ -382,7 +454,10 @@ class CodexRunner:
                 raw_message=process.stderr,
             )
 
-        return RoleResult.from_message(result.message)
+        return RoleResult.from_message(
+            result.message,
+            backend=self.execution_backend.backend_id,
+        )
 
     def _log_writer(self, log_root: Path) -> LogWriter:
         """Bind durable log writing, and its confinement, to one log root."""
@@ -544,19 +619,101 @@ def execution_budget_prompt_guidance(
 
 def role_execution_failure_summary(
     *,
+    backend: ExecutionBackendId | None = None,
     returncode: int,
     stderr: str,
     stderr_path: Path,
 ) -> str:
-    expiration = EXECUTION_BUDGET_EXPIRATION_PATTERN.search(stderr)
-    if returncode == 124 and expiration is not None:
+    """Summarize an attempt that failed without words of its own.
+
+    The Execution Backend is named rather than assumed, so a Claude-backed
+    Workflow Step never reports a Codex failure and the operator troubleshoots the
+    provider that actually ran.
+    """
+    subject = _backend_subject(backend)
+    expiration = execution_budget_expiration(returncode=returncode, stderr=stderr)
+    if expiration is not None:
         return (
-            f"{expiration.group(0)} Codex did not return a final role result "
-            "before termination. Changes already written remain in the "
-            "worktree. Rerun the unfinished issue to continue from them. "
+            f"{expiration} {subject} did not return a final role result "
+            f"before termination. {UNFINISHED_ATTEMPT_WORKSPACE_NOTE} "
             f"See {stderr_path}."
         )
-    return f"codex exec failed with exit code {returncode}. See {stderr_path}."
+    return f"{subject} failed with exit code {returncode}. See {stderr_path}."
+
+
+def role_provider_failure_summary(
+    *,
+    failure_summary: str,
+    returncode: int,
+    stderr: str,
+    stderr_path: Path,
+) -> str:
+    """Summarize an attempt that failed in its own words, budget expiry included.
+
+    A provider can report a failure of its own in the same window in which the
+    Execution Budget expires, and its words then remain the summary because they
+    are the most specific thing known about the attempt. They are not allowed to
+    cost the operator what the budget-expiry convention guarantees: that the
+    repository changes already written remain in the workspace and that rerunning
+    the unfinished Issue continues from them. A terminated attempt therefore
+    carries that promise whichever signal produced its summary.
+    """
+    expiration = execution_budget_expiration(returncode=returncode, stderr=stderr)
+    if expiration is None:
+        return failure_summary
+    return (
+        f"{expiration} {_as_sentence(failure_summary)} "
+        f"{UNFINISHED_ATTEMPT_WORKSPACE_NOTE} See {stderr_path}."
+    )
+
+
+def execution_budget_expiration(*, returncode: int, stderr: str) -> str | None:
+    """The Execution Budget annotation of an attempt terminated on expiry.
+
+    The expiry exit status and the stderr annotation have to agree before an
+    attempt counts as terminated by its budget, because a provider can produce
+    either one while failing on its own terms.
+    """
+    if returncode != EXECUTION_BUDGET_EXPIRY_RETURNCODE:
+        return None
+    expiration = EXECUTION_BUDGET_EXPIRATION_PATTERN.search(stderr)
+    return None if expiration is None else expiration.group(0)
+
+
+def _as_sentence(text: str) -> str:
+    """Punctuate a provider's own words so they compose into one summary."""
+    stripped = text.strip()
+    if not stripped or stripped[-1] in ".!?":
+        return stripped
+    return f"{stripped}."
+
+
+def role_permission_denial_summary(
+    *,
+    backend: ExecutionBackendId | None = None,
+    refusals: Iterable[RefusalRecord],
+    log_path: Path,
+) -> str:
+    """Summarize an attempt whose Step Outcome is BLOCKED by a Permission Denial.
+
+    The denied tools and their count are named because they are the diagnosis,
+    and the durable log is referenced because the full denial record — including
+    the exact tool input that was refused — stays there rather than in the
+    Workflow Run's state.
+    """
+    denials = tuple(refusals)
+    return (
+        f"{_backend_subject(backend)} was denied {describe_refusals(denials)} "
+        "during this attempt, so nothing it reported as verified can be trusted. "
+        f"{UNFINISHED_ATTEMPT_WORKSPACE_NOTE} See {log_path}."
+    )
+
+
+def _backend_subject(backend: ExecutionBackendId | None) -> str:
+    """Name the Execution Backend a summary is about, or the boundary itself."""
+    if backend is None:
+        return "The Execution Backend"
+    return f"The {backend.display_name} Backend"
 
 
 def list_of_strings(value: Any) -> list[str]:

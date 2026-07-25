@@ -3,8 +3,9 @@
 Everything Claude-specific about running a Workflow Step attempt lives here: the
 ``claude -p`` command construction and the isolation that makes a Workflow Step
 reproducible, the streaming loop that consumes the CLI's ``stream-json`` event
-stream, the translation of that vocabulary into neutral step activity, and the
-recovery of the structured role result from the terminal result.
+stream under the Execution Budget, the translation of that vocabulary into
+neutral step activity, the recognition of a Permission Denial, and the recovery
+of the structured role result from the terminal result.
 
 The invocation this module builds is a decision established by prototype against
 the installed CLI, not one shape among equals. Each non-obvious element carries
@@ -27,8 +28,11 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from ..redaction import redact_persisted_evidence
 from ..statusui import Stage, WaitingIndicator
 from ..subprocess_utils import (
+    EXECUTION_BUDGET_EXPIRY_RETURNCODE,
+    ProcessExecutionBudget,
     process_tree_creation_kwargs,
     reap_process_after_terminal_event,
     register_process_tree,
@@ -44,7 +48,9 @@ from .backend import (
     StepAttemptRequest,
     StepAttemptResult,
     StepSettingsAuthorization,
+    describe_refusals,
 )
+from .checkpoint import update_checkpoint_for_step_activity
 from .process_stream import (
     drain_process_stream,
     print_step_activity,
@@ -54,7 +60,7 @@ from .structured_result import extract_json_object
 
 if TYPE_CHECKING:
     from ..model_catalog import CodexModelCatalog
-    from ..portable_workflow import StepExecutionSettings
+    from ..portable_workflow import ExecutionBudget, StepExecutionSettings
 
 
 CLAUDE_CLI_COMMAND = "claude"
@@ -68,6 +74,23 @@ JSON_SCHEMA_DRAFT_DECLARATION_KEY = "$schema"
 # The tool the CLI uses to submit the structured result named by `--json-schema`.
 CLAUDE_STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 CLAUDE_TERMINAL_RESULT_FAILURE_RETURNCODE = 1
+# The one terminal reason that means the attempt ran to its own conclusion.
+# Anything else the provider reports is a failure, even when it arrives with no
+# error flag and a success subtype. The field is treated as absent-means-completed
+# rather than absent-means-failed, because failing every attempt a future CLI
+# stops annotating would be worse than trusting its error flag.
+CLAUDE_COMPLETED_TERMINAL_REASON = "completed"
+CLAUDE_TERMINAL_REASON_KEY = "terminal_reason"
+CLAUDE_PERMISSION_DENIALS_KEY = "permission_denials"
+CLAUDE_DENIED_TOOL_NAME_KEY = "tool_name"
+UNNAMED_DENIED_TOOL = "an unnamed tool"
+# Chain of thought is elided from the durable transcript rather than persisted
+# verbatim. The event, its type and every other field stay exactly as recorded,
+# so the log remains a faithful and parseable record of what the attempt did.
+CLAUDE_REASONING_TEXT_KEY = "thinking"
+CLAUDE_REASONING_SIGNATURE_KEY = "signature"
+CLAUDE_REASONING_TEXT_REDACTION = "[reasoning redacted: {characters} characters]"
+CLAUDE_REASONING_SIGNATURE_REDACTION = "[reasoning signature redacted]"
 STREAM_THREAD_JOIN_SECONDS = 1.0
 MAX_ACTIVITY_TEXT_LENGTH = 240
 
@@ -316,7 +339,7 @@ def claude_step_activity_events(
             ),
         )
     if event_type is ClaudeEventType.RESULT:
-        return (_terminal_result_activity(payload),)
+        return _terminal_result_activities(payload)
     return ()
 
 
@@ -335,23 +358,76 @@ def claude_permission_denials(
 ) -> tuple[RefusalRecord, ...]:
     """The tool-permission denials the terminal result recorded.
 
-    Recording a Permission Denial is separate from acting on one: the Step
-    Outcome precedence that makes any denial BLOCKED, and the redacted evidence
-    that names the denied commands, belong to the honest-failure work.
+    This is the provider boundary at which a denial becomes a domain Permission
+    Denial, so the recorded tool name passes through the Redaction Service before
+    any of it can reach a persisted summary or a durable log. The denied tool
+    input is deliberately not carried: the summary needs the tool and the count,
+    and the full record stays in the durable transcript.
     """
     if terminal_result is None:
         return ()
-    denials = terminal_result.get("permission_denials")
+    denials = terminal_result.get(CLAUDE_PERMISSION_DENIALS_KEY)
     if not isinstance(denials, list):
         return ()
     records: list[RefusalRecord] = []
     for denial in denials:
         if not isinstance(denial, dict):
             continue
-        tool_name = denial.get("tool_name")
+        tool_name = denial.get(CLAUDE_DENIED_TOOL_NAME_KEY)
         target = tool_name.strip() if isinstance(tool_name, str) else ""
-        records.append(RefusalRecord(target=target or "an unnamed tool"))
+        records.append(
+            RefusalRecord(
+                target=redact_persisted_evidence(target) or UNNAMED_DENIED_TOOL
+            )
+        )
     return tuple(records)
+
+
+def claude_terminal_result_completed(terminal_result: dict[str, Any]) -> bool:
+    """Whether the terminal result reports the attempt reaching completion."""
+    if terminal_result.get("is_error") is True:
+        return False
+    terminal_reason = terminal_result.get(CLAUDE_TERMINAL_REASON_KEY)
+    if not isinstance(terminal_reason, str):
+        return True
+    return terminal_reason.strip() == CLAUDE_COMPLETED_TERMINAL_REASON
+
+
+def claude_failure_summary(terminal_result: dict[str, Any] | None) -> str:
+    """The provider's own words for a terminal result that did not complete.
+
+    Returned only for a result the provider itself reports as an error or as
+    ending for a reason other than completion; a completed result has no failure
+    to describe. The text is redacted because it is provider output on its way
+    into a persisted Step Outcome summary.
+    """
+    if terminal_result is None or claude_terminal_result_completed(terminal_result):
+        return ""
+    return redact_persisted_evidence(_claude_result_text(terminal_result).strip())
+
+
+def redact_claude_reasoning(stdout: str) -> str:
+    """Elide chain of thought from a transcript that is about to be persisted.
+
+    Reasoning content is never shown in the Portable Activity Feed, so persisting
+    it verbatim to a durable log would contradict that in the one place an
+    operator is most likely to copy from. Each ``thinking`` block keeps its event,
+    its position and its type, and loses only its text and its signature — the
+    two fields that carry the reasoning itself and nothing an operator can act
+    on. Every other line is left byte-for-byte as recorded.
+    """
+    rewritten: list[str] = []
+    for raw_line in stdout.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line) :]
+        payload = parse_claude_event(line)
+        if payload is None or not _redact_reasoning_blocks(payload):
+            rewritten.append(raw_line)
+            continue
+        rewritten.append(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ending
+        )
+    return "".join(rewritten)
 
 
 def claude_role_message(
@@ -393,12 +469,16 @@ def run_streaming_claude_command(
     stage: Stage,
     activity_context: str = "",
     activity_callback: ActivityCallback | None = None,
+    execution_budget: ExecutionBudget | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one Claude attempt, reporting its stream as neutral step activity.
 
-    Execution Budget enforcement is deliberately absent: bounding a
-    Claude-backed attempt belongs with the honest-failure work, which wires the
-    same timeout and inactivity checkpoint the Codex CLI Backend already uses.
+    The Execution Budget is enforced through the same mechanism the Codex CLI
+    Backend uses: one watcher holding a hard deadline from attempt start and an
+    inactivity checkpoint, terminating the process tree on expiry and annotating
+    the attempt's diagnostics with which limit expired. Every stream line counts
+    as activity, so this provider's dense reasoning heartbeat keeps a working
+    attempt alive without any of it having to be displayable.
     """
     process = subprocess.Popen(
         command,
@@ -424,8 +504,19 @@ def run_streaming_claude_command(
         if activity_callback is None
         else None
     )
+    budget = (
+        ProcessExecutionBudget(
+            process,
+            timeout_seconds=execution_budget.timeout_seconds,
+            checkpoint_seconds=execution_budget.checkpoint_seconds,
+        )
+        if execution_budget is not None
+        else None
+    )
 
     def notify_activity(event: StepActivityEvent | None) -> None:
+        if budget is not None:
+            budget.notify_activity()
         if activity_callback is not None:
             activity_callback(event)
             return
@@ -447,13 +538,20 @@ def run_streaming_claude_command(
         daemon=True,
     )
     terminal_result: dict[str, Any] | None = None
+    active_tools: set[str] = set()
 
     if indicator is not None:
         indicator.start()
     input_thread.start()
     stderr_thread.start()
+    if budget is not None:
+        budget.start()
+    budget_expiration: str | None = None
+    budget_finished = False
     try:
         for line in process.stdout:
+            if budget is not None:
+                budget.notify_activity()
             stdout_parts.append(line)
             payload = parse_claude_event(line)
             events = claude_step_activity_events(payload)
@@ -462,6 +560,7 @@ def run_streaming_claude_command(
                 # report, so an ignored event can never look like a hang.
                 notify_activity(None)
             for event in events:
+                update_checkpoint_for_step_activity(budget, event, active_tools)
                 notify_activity(event)
             if payload is not None and _is_terminal_result(payload):
                 terminal_result = payload
@@ -470,12 +569,17 @@ def run_streaming_claude_command(
         if terminal_result is None:
             returncode = process.wait()
         else:
+            if budget is not None:
+                budget_expiration = budget.finish()
+                budget_finished = True
             reap_process_after_terminal_event(process)
             returncode = _terminal_returncode(terminal_result, process.returncode)
     except KeyboardInterrupt:
         terminate_process(process)
         raise
     finally:
+        if budget is not None and not budget_finished:
+            budget_expiration = budget.finish()
         if indicator is not None:
             indicator.stop()
         input_thread.join(timeout=STREAM_THREAD_JOIN_SECONDS)
@@ -485,6 +589,10 @@ def run_streaming_claude_command(
             if callable(close):
                 close()
         unregister_process_tree(process)
+
+    if budget_expiration is not None:
+        stderr_parts.append(f"{budget_expiration}\n")
+        returncode = EXECUTION_BUDGET_EXPIRY_RETURNCODE
 
     return subprocess.CompletedProcess(
         command,
@@ -512,6 +620,11 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
     def invoke(self, request: StepAttemptRequest) -> StepAttemptResult:
         """Run one Workflow Step attempt and recover its structured role result.
 
+        The terminal result is read before the transcript is handed back, because
+        the transcript handed back is the redacted one: chain of thought is elided
+        from what gets persisted, while classification still sees the recording
+        exactly as the provider produced it.
+
         No Run-Wide Blocker is reported yet: classifying exhausted usage,
         invalid authentication and service outages from this provider's API
         status and rate-limit event is separate work.
@@ -529,12 +642,17 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
             stage=request.activity_stage,
             activity_context=request.activity_context,
             activity_callback=request.activity_callback,
+            execution_budget=request.execution_budget,
         )
         terminal_result = claude_terminal_result(process.stdout)
         refusals = claude_permission_denials(terminal_result)
-        if process.returncode != 0:
-            return StepAttemptResult(process=process, refusals=refusals)
-        message = claude_role_message(terminal_result, stdout=process.stdout)
+        failure_summary = claude_failure_summary(terminal_result)
+        message = (
+            ""
+            if process.returncode != 0
+            else claude_role_message(terminal_result, stdout=process.stdout)
+        )
+        process.stdout = redact_claude_reasoning(process.stdout)
         if message:
             # The CLI writes no last-message file of its own, so the recovered
             # role result is persisted through the runner's confined log writer,
@@ -544,6 +662,7 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
             process=process,
             message=message,
             refusals=refusals,
+            failure_summary=failure_summary,
         )
 
     def discover_model_catalog(self, *, cwd: Path) -> CodexModelCatalog:
@@ -698,8 +817,34 @@ def _rate_limit_activity(payload: dict[str, Any]) -> str:
     return f"Claude reported rate limit status {_compact(status)}{detail}."
 
 
+def _terminal_result_activities(
+    payload: dict[str, Any],
+) -> tuple[StepActivityEvent, ...]:
+    """Report a Permission Denial live, ahead of how the turn itself ended.
+
+    A denial is the one condition this provider reports without any other signal
+    changing, so it gets its own activity kind and is reported before the turn
+    outcome. An operator watching the Portable Activity Feed then sees that the
+    attempt was prevented from working at the moment it is known, rather than
+    only once the Step Outcome is published.
+    """
+    denials = claude_permission_denials(payload)
+    if not denials:
+        return (_terminal_result_activity(payload),)
+    return (
+        StepActivityEvent(
+            kind=StepActivityKind.PERMISSION_DENIED,
+            activity=(
+                f"Claude was denied {describe_refusals(denials)}; "
+                "its result cannot be trusted."
+            ),
+        ),
+        _terminal_result_activity(payload),
+    )
+
+
 def _terminal_result_activity(payload: dict[str, Any]) -> StepActivityEvent:
-    if payload.get("is_error") is not True:
+    if claude_terminal_result_completed(payload):
         return StepActivityEvent(kind=StepActivityKind.TURN_COMPLETED)
     result_text = _claude_result_text(payload)
     activity = (
@@ -708,6 +853,29 @@ def _terminal_result_activity(payload: dict[str, Any]) -> StepActivityEvent:
         else "Claude reported an error."
     )
     return StepActivityEvent(kind=StepActivityKind.ERROR, activity=activity)
+
+
+def _redact_reasoning_blocks(payload: dict[str, Any]) -> bool:
+    """Elide every reasoning block in one event, reporting whether any changed."""
+    redacted = False
+    for block in _content_blocks(payload):
+        if (
+            _closed_value(ClaudeContentBlockType, block.get("type"))
+            is not ClaudeContentBlockType.THINKING
+        ):
+            continue
+        reasoning = block.get(CLAUDE_REASONING_TEXT_KEY)
+        if isinstance(reasoning, str):
+            block[CLAUDE_REASONING_TEXT_KEY] = CLAUDE_REASONING_TEXT_REDACTION.format(
+                characters=len(reasoning)
+            )
+            redacted = True
+        if isinstance(block.get(CLAUDE_REASONING_SIGNATURE_KEY), str):
+            block[CLAUDE_REASONING_SIGNATURE_KEY] = (
+                CLAUDE_REASONING_SIGNATURE_REDACTION
+            )
+            redacted = True
+    return redacted
 
 
 def _structured_output_message(terminal_result: dict[str, Any] | None) -> str:
@@ -769,7 +937,13 @@ def _terminal_returncode(
     terminal_result: dict[str, Any],
     process_returncode: int | None,
 ) -> int:
-    if terminal_result.get("is_error") is not True:
+    """The exit status one terminal result deserves, ignoring what the CLI said.
+
+    A terminal reason other than completion is a failure whatever the process
+    exit code was, because the prototype established that this CLI reports a zero
+    exit code for work it did not do.
+    """
+    if claude_terminal_result_completed(terminal_result):
         return 0
     if isinstance(process_returncode, int) and process_returncode != 0:
         return process_returncode

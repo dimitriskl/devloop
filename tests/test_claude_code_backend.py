@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -39,6 +40,7 @@ from devloop.portable_workflow import (
 )
 from devloop.statusui import Stage
 from devloop.step_configuration import STEP_GUIDANCE_PRECEDENCE
+from devloop.subprocess_utils import EXECUTION_BUDGET_EXPIRY_RETURNCODE
 from devloop.templates import BundleContext, Preset
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
@@ -125,6 +127,56 @@ class _FakeClaudeProcess:
         self.returncode = 0
 
     def kill(self) -> None:
+        self.returncode = -9
+
+
+class _PacedClaudeProcess:
+    """A `claude -p` stand-in whose stream is paced, so a budget can really expire.
+
+    The stream stays open after its recorded lines are exhausted and closes only
+    once the process has been signalled, which is what lets a test observe the
+    Execution Budget terminating a genuinely unfinished attempt.
+    """
+
+    IDLE_POLL_SECONDS = 0.02
+
+    def __init__(
+        self,
+        stdout_lines: tuple[str, ...] = (),
+        *,
+        line_delay: float = 0.0,
+    ) -> None:
+        self.stdin = _CapturingStdin()
+        self.stderr: tuple[str, ...] = ()
+        self.returncode: int | None = None
+        self.signals: list[str] = []
+        self._stdout_lines = stdout_lines
+        self._line_delay = line_delay
+        self.stdout = self._paced_stream()
+
+    def _paced_stream(self):
+        for line in self._stdout_lines:
+            if self.returncode is not None:
+                return
+            time.sleep(self._line_delay)
+            yield line
+        while self.returncode is None:
+            time.sleep(self.IDLE_POLL_SECONDS)
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.signals.append("terminate")
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.signals.append("kill")
         self.returncode = -9
 
 
@@ -1029,6 +1081,678 @@ class ClaudeBackendInvokeTests(unittest.TestCase):
             backend.authorize_execution_settings((), model_catalog=None)
 
 
+class ClaudePermissionDenialActivityTests(unittest.TestCase):
+    """A denial reaches the Portable Activity Feed live, not only the outcome."""
+
+    DENIAL_FIXTURES = (
+        "permission-dontask.result.json",
+        "permission-auto.result.json",
+        "permission-acceptedits.result.json",
+    )
+
+    def test_a_recorded_denial_emits_a_permission_denied_activity_event(self) -> None:
+        for fixture in self.DENIAL_FIXTURES:
+            with self.subTest(fixture=fixture):
+                events = claude_code.claude_step_activity_events(
+                    _fixture_json(fixture)
+                )
+
+                self.assertEqual(
+                    [event.kind for event in events],
+                    [
+                        StepActivityKind.PERMISSION_DENIED,
+                        StepActivityKind.TURN_COMPLETED,
+                    ],
+                )
+                self.assertEqual(
+                    events[0].activity,
+                    "Claude was denied 1 tool call (Bash); "
+                    "its result cannot be trusted.",
+                )
+
+    def test_the_denial_is_reported_before_how_the_turn_ended(self) -> None:
+        """Ordering, so a denial is never buried behind the turn outcome."""
+        events = claude_code.claude_step_activity_events(
+            _fixture_json("permission-dontask.result.json")
+        )
+
+        kinds = [event.kind for event in events]
+        self.assertLess(
+            kinds.index(StepActivityKind.PERMISSION_DENIED),
+            kinds.index(StepActivityKind.TURN_COMPLETED),
+        )
+
+    def test_the_clean_terminal_result_emits_no_permission_denied_activity(
+        self,
+    ) -> None:
+        events = claude_code.claude_step_activity_events(
+            _fixture_json("permission-bypass.result.json")
+        )
+
+        self.assertEqual(
+            [event.kind for event in events],
+            [StepActivityKind.TURN_COMPLETED],
+        )
+
+    def test_a_denial_reaches_the_activity_feed_while_the_attempt_streams(
+        self,
+    ) -> None:
+        events: list[StepActivityEvent | None] = []
+        process = _PacedClaudeProcess(
+            (_fixture_text("permission-dontask.result.json"),)
+        )
+        with mock.patch.object(
+            claude_code.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            claude_code.run_streaming_claude_command(
+                ["claude", "-p"],
+                input_text="Implement the issue.",
+                cwd=Path(__file__).parent,
+                stage=Stage.DEVELOPMENT,
+                activity_callback=events.append,
+            )
+
+        self.assertIn(
+            StepActivityKind.PERMISSION_DENIED,
+            [event.kind for event in events if event is not None],
+        )
+
+    def test_portable_plain_mode_prints_the_denial(self) -> None:
+        process = _PacedClaudeProcess(
+            (_fixture_text("permission-dontask.result.json"),)
+        )
+        with mock.patch.object(
+            claude_code.subprocess,
+            "Popen",
+            return_value=process,
+        ), redirect_stdout(io.StringIO()) as printed:
+            claude_code.run_streaming_claude_command(
+                ["claude", "-p"],
+                input_text="Implement the issue.",
+                cwd=Path(__file__).parent,
+                stage=Stage.DEVELOPMENT,
+            )
+
+        self.assertIn(
+            "[development] Claude was denied 1 tool call (Bash);",
+            printed.getvalue(),
+        )
+
+
+class ClaudeExecutionBudgetTests(unittest.TestCase):
+    """The Execution Budget bounds a Claude attempt exactly as it bounds Codex."""
+
+    HEARTBEAT_LINE_DELAY_SECONDS = 0.05
+    HEARTBEAT_CHECKPOINT_SECONDS = 0.5
+    EXPIRING_LIMIT_SECONDS = 0.4
+    UNREACHABLE_LIMIT_SECONDS = 60.0
+
+    def _run(
+        self,
+        process: _PacedClaudeProcess,
+        *,
+        timeout_seconds: float,
+        checkpoint_seconds: float,
+    ):
+        with mock.patch.object(
+            claude_code.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            return claude_code.run_streaming_claude_command(
+                ["claude", "-p"],
+                input_text="Implement the issue.",
+                cwd=Path(__file__).parent,
+                stage=Stage.DEVELOPMENT,
+                activity_callback=lambda _event: None,
+                execution_budget=ExecutionBudget(
+                    timeout_seconds=timeout_seconds,
+                    checkpoint_seconds=checkpoint_seconds,
+                ),
+            )
+
+    def _heartbeat_lines(self) -> tuple[str, ...]:
+        return tuple(
+            f"{line}\n"
+            for line in _fixture_text("bypass-stream.jsonl").splitlines()
+            if claude_code.parse_claude_event(line) is not None
+            and claude_code.parse_claude_event(line).get("subtype")
+            == claude_code.ClaudeSystemSubtype.THINKING_TOKENS.value
+        )
+
+    def _expired_by_hard_timeout(self, process: _PacedClaudeProcess):
+        """Run a busy attempt past its hard deadline.
+
+        The attempt streams recorded activity throughout, so only the hard
+        deadline can end it: this is also the assertion that backend activity
+        does not push the hard timeout back.
+        """
+        return self._run(
+            process,
+            timeout_seconds=self.EXPIRING_LIMIT_SECONDS,
+            checkpoint_seconds=self.EXPIRING_LIMIT_SECONDS,
+        )
+
+    def _busy_process(self) -> _PacedClaudeProcess:
+        return _PacedClaudeProcess(
+            self._heartbeat_lines(),
+            line_delay=self.HEARTBEAT_LINE_DELAY_SECONDS,
+        )
+
+    def test_the_hard_timeout_terminates_the_attempt_and_reaps_its_process_tree(
+        self,
+    ) -> None:
+        process = self._busy_process()
+
+        result = self._expired_by_hard_timeout(process)
+
+        self.assertTrue(process.signals)
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(result.returncode, EXECUTION_BUDGET_EXPIRY_RETURNCODE)
+        self.assertIn(
+            "Execution Budget timeout (0.4 seconds) expired.",
+            result.stderr,
+        )
+
+    def test_the_expiry_annotation_and_exit_status_match_the_codex_convention(
+        self,
+    ) -> None:
+        """The same annotation the role runner already recognises, and 124."""
+        result = self._expired_by_hard_timeout(self._busy_process())
+
+        self.assertEqual(result.returncode, EXECUTION_BUDGET_EXPIRY_RETURNCODE)
+        self.assertEqual(EXECUTION_BUDGET_EXPIRY_RETURNCODE, 124)
+        self.assertIsNotNone(
+            codex_runner.EXECUTION_BUDGET_EXPIRATION_PATTERN.search(result.stderr)
+        )
+
+    def test_an_attempt_reporting_no_backend_activity_expires_at_the_checkpoint(
+        self,
+    ) -> None:
+        process = _PacedClaudeProcess()
+
+        result = self._run(
+            process,
+            timeout_seconds=self.UNREACHABLE_LIMIT_SECONDS,
+            checkpoint_seconds=self.EXPIRING_LIMIT_SECONDS,
+        )
+
+        self.assertTrue(process.signals)
+        self.assertEqual(result.returncode, EXECUTION_BUDGET_EXPIRY_RETURNCODE)
+        self.assertIn(
+            "Execution Budget checkpoint deadline (0.4 seconds without backend "
+            "activity) expired.",
+            result.stderr,
+        )
+
+    def test_the_recorded_reasoning_heartbeat_is_not_mistaken_for_idleness(
+        self,
+    ) -> None:
+        """Recorded thinking-token events alone must keep the attempt alive.
+
+        The heartbeat carries no display text at all, so this is the case where a
+        checkpoint reading only displayable activity would kill working work. The
+        recorded events are paced so the attempt outlives its checkpoint window
+        several times over while never pausing for a tool.
+        """
+        heartbeats = self._heartbeat_lines()
+        terminal = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "terminal_reason": "completed",
+                "result": json.dumps({"status": "PASS", "summary": "Done."}),
+            }
+        )
+        process = _PacedClaudeProcess(
+            heartbeats + (f"{terminal}\n",),
+            line_delay=self.HEARTBEAT_LINE_DELAY_SECONDS,
+        )
+
+        self.assertGreater(
+            len(heartbeats) * self.HEARTBEAT_LINE_DELAY_SECONDS,
+            self.HEARTBEAT_CHECKPOINT_SECONDS,
+        )
+
+        result = self._run(
+            process,
+            timeout_seconds=self.UNREACHABLE_LIMIT_SECONDS,
+            checkpoint_seconds=self.HEARTBEAT_CHECKPOINT_SECONDS,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("Execution Budget", result.stderr)
+
+    def test_an_attempt_without_an_execution_budget_is_never_terminated(
+        self,
+    ) -> None:
+        lines = tuple(
+            f"{line}\n" for line in _fixture_text("bypass-stream.jsonl").splitlines()
+        )
+        process = _PacedClaudeProcess(lines)
+
+        with mock.patch.object(
+            claude_code.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            result = claude_code.run_streaming_claude_command(
+                ["claude", "-p"],
+                input_text="Implement the issue.",
+                cwd=Path(__file__).parent,
+                stage=Stage.DEVELOPMENT,
+                activity_callback=lambda _event: None,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("Execution Budget", result.stderr)
+
+    def test_invoke_supplies_the_requests_execution_budget_to_the_stream(
+        self,
+    ) -> None:
+        budget = ExecutionBudget(timeout_seconds=1800, checkpoint_seconds=300)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            def write_log(path: Path, text: str) -> None:
+                path.write_text(text, encoding="utf-8")
+
+            request = StepAttemptRequest(
+                prompt="Implement the issue.",
+                repo_root=root,
+                schema_path=ROLE_RESULT_SCHEMA,
+                message_path=root / "attempt.last-message.json",
+                stdout_path=root / "attempt.stdout.jsonl",
+                stderr_path=root / "attempt.stderr.txt",
+                write_log=write_log,
+                execution_settings=CLAUDE_SETTINGS,
+                execution_budget=budget,
+            )
+            with mock.patch.object(
+                claude_code,
+                "run_streaming_claude_command",
+                return_value=CompletedProcess(
+                    ["claude"],
+                    0,
+                    _fixture_text("permission-bypass.result.json"),
+                    "",
+                ),
+            ) as streamed:
+                ClaudeCodeExecutionBackend("claude").invoke(request)
+
+            self.assertIs(streamed.call_args.kwargs["execution_budget"], budget)
+
+
+class ClaudeDurableEvidenceTests(unittest.TestCase):
+    """What a Claude attempt leaves on disk, and what it deliberately does not."""
+
+    def _reasoning_blocks(self, transcript: str) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (str(block.get("thinking")), str(block.get("signature")))
+            for payload in (
+                claude_code.parse_claude_event(line)
+                for line in transcript.splitlines()
+            )
+            if payload is not None
+            for block in _content_blocks_of(payload)
+            if block.get("type") == "thinking"
+        )
+
+    def _recorded_reasoning(self) -> tuple[str, ...]:
+        return tuple(
+            reasoning
+            for reasoning, _signature in self._reasoning_blocks(
+                _fixture_text("bypass-stream.jsonl")
+            )
+        )
+
+    def test_the_persisted_transcript_carries_no_verbatim_chain_of_thought(
+        self,
+    ) -> None:
+        recorded = _fixture_text("bypass-stream.jsonl")
+
+        redacted = claude_code.redact_claude_reasoning(recorded)
+
+        recorded_blocks = self._reasoning_blocks(recorded)
+        redacted_blocks = self._reasoning_blocks(redacted)
+        self.assertTrue(recorded_blocks)
+        self.assertEqual(len(redacted_blocks), len(recorded_blocks))
+        for (reasoning, signature), (masked, masked_signature) in zip(
+            recorded_blocks,
+            redacted_blocks,
+            strict=True,
+        ):
+            with self.subTest(characters=len(reasoning)):
+                self.assertGreater(len(reasoning), 0)
+                self.assertGreater(len(signature), 0)
+                self.assertEqual(
+                    masked,
+                    f"[reasoning redacted: {len(reasoning)} characters]",
+                )
+                self.assertEqual(masked_signature, "[reasoning signature redacted]")
+                # The recorded reasoning is gone from the file text as well as
+                # from the parsed block, escaping included.
+                self.assertNotIn(
+                    json.dumps(reasoning, ensure_ascii=False)[1:-1],
+                    redacted,
+                )
+        # The measurement this decision was taken on: one recorded attempt
+        # persisted 1382 characters of verbatim chain of thought.
+        self.assertEqual(
+            sum(len(reasoning) for reasoning, _ in recorded_blocks),
+            1382,
+        )
+
+    def test_the_redacted_transcript_keeps_every_event_and_stays_parseable(
+        self,
+    ) -> None:
+        recorded = _fixture_text("bypass-stream.jsonl")
+
+        redacted = claude_code.redact_claude_reasoning(recorded)
+
+        self.assertEqual(
+            [_event_shape(payload) for payload in _fixture_events("bypass-stream.jsonl")],
+            [
+                _event_shape(payload)
+                for payload in (
+                    claude_code.parse_claude_event(line)
+                    for line in redacted.splitlines()
+                )
+                if payload is not None
+            ],
+        )
+        self.assertEqual(
+            claude_code.claude_terminal_result(redacted),
+            claude_code.claude_terminal_result(recorded),
+        )
+
+    def test_a_transcript_without_reasoning_is_left_byte_for_byte_alone(self) -> None:
+        recorded = _fixture_text("permission-bypass.result.json")
+
+        self.assertEqual(claude_code.redact_claude_reasoning(recorded), recorded)
+
+    def test_invoke_hands_back_the_redacted_transcript_for_persistence(self) -> None:
+        stdout = _fixture_text("bypass-stream.jsonl")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            def write_log(path: Path, text: str) -> None:
+                path.write_text(text, encoding="utf-8")
+
+            request = StepAttemptRequest(
+                prompt="Implement the issue.",
+                repo_root=root,
+                schema_path=ROLE_RESULT_SCHEMA,
+                message_path=root / "attempt.last-message.json",
+                stdout_path=root / "attempt.stdout.jsonl",
+                stderr_path=root / "attempt.stderr.txt",
+                write_log=write_log,
+                execution_settings=CLAUDE_SETTINGS,
+            )
+            with mock.patch.object(
+                claude_code,
+                "run_streaming_claude_command",
+                return_value=CompletedProcess(["claude"], 0, stdout, ""),
+            ):
+                result = ClaudeCodeExecutionBackend("claude").invoke(request)
+
+            for text in self._recorded_reasoning():
+                self.assertNotIn(text, result.process.stdout)
+            # The role result is still recovered from the recording as produced.
+            self.assertEqual(RoleResult.from_message(result.message).status, "PASS")
+
+    def test_the_durable_logs_of_both_backends_are_redacted_on_one_boundary(
+        self,
+    ) -> None:
+        """The Redaction Service is the runner's log writer, not a backend habit."""
+        leaked = (
+            '{"type":"assistant","message":{"content":[{"type":"text",'
+            '"text":"ran with GITHUB_TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ and '
+            'api_key: sk-abcdefghijklmnop"}]}}'
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = _role_runner(root, CodexCliExecutionBackend())
+            written = runner.log_root / "leaked.stdout.jsonl"
+
+            runner.write_log_text(written, leaked)
+
+            persisted = written.read_text(encoding="utf-8")
+            self.assertNotIn("ghp_0123456789abcdefghijABCDEFGHIJ", persisted)
+            self.assertNotIn("sk-abcdefghijklmnop", persisted)
+            self.assertIn("[redacted", persisted)
+            # Masking a value must not swallow the surrounding record.
+            self.assertIsNotNone(claude_code.parse_claude_event(persisted))
+
+    def test_redaction_leaves_the_recorded_token_accounting_intact(self) -> None:
+        """Cost and turn evidence survives; only detected secrets are masked."""
+        recorded = _fixture_text("permission-bypass.result.json")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = _role_runner(root, ClaudeCodeExecutionBackend("claude"))
+            written = runner.log_root / "attempt.stdout.jsonl"
+
+            runner.write_log_text(written, recorded)
+
+            persisted = json.loads(written.read_text(encoding="utf-8"))
+            self.assertEqual(persisted, json.loads(recorded))
+
+    def test_a_persisted_denial_names_only_the_redacted_tool(self) -> None:
+        """The denied tool input stays in the transcript, not in the record."""
+        denial = json.loads(_fixture_text("permission-auto.result.json"))
+        command = denial["permission_denials"][0]["tool_input"]["command"]
+
+        refusals = claude_code.claude_permission_denials(denial)
+
+        self.assertEqual([refusal.target for refusal in refusals], ["Bash"])
+        for refusal in refusals:
+            self.assertNotIn(command, refusal.target)
+            self.assertEqual(refusal.reason, "")
+
+
+def _recorded_tool_use(command: str) -> str:
+    """One durable JSONL record of a Bash tool call, as the stream writes it."""
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Bash",
+                        "input": {"command": command},
+                    }
+                ]
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+def _recorded_tool_result(content: str) -> str:
+    """One durable JSONL record of a tool result, as the stream writes it."""
+    return json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "content": [{"type": "tool_result", "content": content}]
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+class PersistedEvidenceRedactionInvariantTests(unittest.TestCase):
+    """Two invariants of the Redaction Service, asserted together.
+
+    A detected secret must not survive redaction, and a durable record that
+    parsed as JSON before redaction must still parse afterwards. Both matter at
+    once: these logs are what an operator reads to diagnose a failed attempt and
+    what the run reviewer and role-pass recovery parse, so masking a secret by
+    corrupting the record around it silently degrades both. Every case is asserted
+    through the runner's log writer, which is the boundary both Execution Backends
+    persist through.
+    """
+
+    def _persisted(self, text: str, name: str = "attempt.stdout.jsonl") -> str:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = _role_runner(root, ClaudeCodeExecutionBackend("claude"))
+            written = runner.log_root / name
+
+            runner.write_log_text(written, text)
+
+            return written.read_text(encoding="utf-8")
+
+    def _assert_masked_and_parseable(self, recorded: str, *secrets: str) -> None:
+        persisted = self._persisted(recorded)
+        for secret in secrets:
+            self.assertNotIn(secret, persisted)
+        self.assertIn("[redacted", persisted)
+        for line in persisted.splitlines():
+            if line.strip():
+                json.loads(line)
+
+    def test_a_secret_quoted_inside_a_recorded_command_survives_neither_way(
+        self,
+    ) -> None:
+        """The reported corruption: an escaped quote is a value boundary too."""
+        recorded = _recorded_tool_use(
+            'export API_KEY="sk-abcdef123456789" && ./deploy.sh'
+        )
+        self.assertIn("sk-abcdef123456789", json.dumps(json.loads(recorded)))
+
+        persisted = self._persisted(recorded)
+
+        self.assertNotIn("sk-abcdef123456789", persisted)
+        # The record still parses, and everything around the masked value is
+        # exactly what the provider recorded.
+        self.assertEqual(
+            json.loads(persisted)["message"]["content"][0]["input"]["command"],
+            'export API_KEY="[redacted]" && ./deploy.sh',
+        )
+
+    def test_every_recorded_secret_shape_is_masked_without_breaking_its_record(
+        self,
+    ) -> None:
+        shapes = {
+            "escaped-quote JSON": (
+                _recorded_tool_use(
+                    'export API_KEY="sk-abcdef123456789" && ./deploy.sh'
+                ),
+                ("sk-abcdef123456789",),
+            ),
+            "JSON inside JSON": (
+                _recorded_tool_result(
+                    json.dumps({"api_key": 'sk-"quoted', "password": "hunter2"})
+                ),
+                ('sk-"quoted', "hunter2"),
+            ),
+            "dotenv content read back": (
+                _recorded_tool_result(
+                    "API_KEY=sk-abcdef123456789\n"
+                    "DB_PASSWORD=hunter2\n"
+                    'GITHUB_TOKEN="ghp_0123456789abcdefghijABCDEFGHIJ"\n'
+                ),
+                (
+                    "sk-abcdef123456789",
+                    "hunter2",
+                    "ghp_0123456789abcdefghijABCDEFGHIJ",
+                ),
+            ),
+            "single-quoted shell value": (
+                _recorded_tool_use("export DB_PASSWORD='hunter2' && ./run.sh"),
+                ("hunter2",),
+            ),
+            "secret last on the line": (
+                _recorded_tool_use('export API_KEY="hunter2"'),
+                ("hunter2",),
+            ),
+            "secret-named field holding a structure": (
+                json.dumps(
+                    {
+                        "type": "result",
+                        "credentials": {"user": "svc", "value": ["hunter2"]},
+                    },
+                    separators=(",", ":"),
+                ),
+                ("hunter2",),
+            ),
+        }
+        for shape, (recorded, secrets) in shapes.items():
+            with self.subTest(shape=shape):
+                json.loads(recorded)
+                self._assert_masked_and_parseable(recorded, *secrets)
+
+    def test_a_stream_keeps_every_record_parseable_when_one_carries_a_secret(
+        self,
+    ) -> None:
+        recorded = (
+            _fixture_text("bypass-stream.jsonl").rstrip("\n")
+            + "\n"
+            + _recorded_tool_use('export API_KEY="sk-abcdef123456789"')
+            + "\n"
+        )
+
+        persisted = self._persisted(recorded)
+
+        self.assertNotIn("sk-abcdef123456789", persisted)
+        self.assertEqual(
+            [_event_shape(payload) for payload in _fixture_events("bypass-stream.jsonl")]
+            + ["assistant/tool_use"],
+            [
+                _event_shape(payload)
+                for payload in (
+                    claude_code.parse_claude_event(line)
+                    for line in persisted.splitlines()
+                )
+                if payload is not None
+            ],
+        )
+
+    def test_a_masked_diagnostic_keeps_the_escaping_it_was_written_with(
+        self,
+    ) -> None:
+        """A truncated fragment is not JSON, so it is scanned as the text it is."""
+        recorded = 'claude: failed while running API_KEY=\\"hunter2\\" && exit\n'
+
+        persisted = self._persisted(recorded, name="attempt.stderr.txt")
+
+        self.assertEqual(
+            persisted,
+            'claude: failed while running API_KEY=\\"[redacted]\\" && exit\n',
+        )
+
+    def test_a_private_key_spanning_plain_lines_is_still_recognised_whole(
+        self,
+    ) -> None:
+        recorded = (
+            "claude: the session failed\n"
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIBOgIBAAJBAJHc\n"
+            "-----END RSA PRIVATE KEY-----\n"
+            "exiting\n"
+        )
+
+        persisted = self._persisted(recorded, name="attempt.stderr.txt")
+
+        self.assertNotIn("MIIBOgIBAAJBAJHc", persisted)
+        self.assertEqual(
+            persisted,
+            "claude: the session failed\n[redacted-private-key]\nexiting\n",
+        )
+
+    def test_a_record_with_nothing_to_mask_is_persisted_byte_for_byte(self) -> None:
+        """Redaction rewrites only a record that actually carried a secret."""
+        recorded = _fixture_text("bypass-stream.jsonl")
+
+        self.assertEqual(self._persisted(recorded), recorded)
+
+
 class ClaudeBackendRegistryTests(unittest.TestCase):
     def test_the_claude_backend_is_registered_and_resolvable(self) -> None:
         backend = resolve_execution_backend(ExecutionBackendId.CLAUDE_CODE)
@@ -1290,6 +2014,303 @@ class RunnerBackendDispatchTests(unittest.TestCase):
                 "Keep the change small.",
                 rendered[0].read_text(encoding="utf-8"),
             )
+
+
+class ClaudeOutcomePrecedenceTests(unittest.TestCase):
+    """Step Outcome precedence for a Claude attempt, asserted as an order.
+
+    Every case is driven from a recorded terminal-result envelope. Where a case
+    needs two signals to disagree, the recording is copied and only the disputed
+    fields are changed, so what is being asserted is which signal wins rather
+    than any hand-written wire format.
+    """
+
+    DENIAL_FIXTURE = "permission-dontask.result.json"
+
+    def _envelope(self, **overrides: object) -> str:
+        recorded = _fixture_json(self.DENIAL_FIXTURE)
+        return json.dumps({**recorded, **overrides})
+
+    def _role_result(
+        self,
+        *,
+        stdout: str,
+        returncode: int = 0,
+        stderr: str = "",
+    ) -> RoleResult:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = _role_runner(
+                root,
+                _RefusingExecutionBackend(ExecutionBackendId.CODEX_CLI),
+            )
+            with mock.patch.object(
+                claude_code,
+                "run_streaming_claude_command",
+                return_value=CompletedProcess(["claude"], returncode, stdout, stderr),
+            ), mock.patch.object(
+                claude_code,
+                "resolve_claude_executable",
+                return_value="claude",
+            ):
+                return runner.run_role(
+                    role="coder",
+                    issue=_issue(root),
+                    pass_number=1,
+                    execution_settings=CLAUDE_SETTINGS,
+                    execution_budget=ExecutionBudget(
+                        timeout_seconds=1800,
+                        checkpoint_seconds=300,
+                    ),
+                )
+
+    def test_a_denial_bearing_success_envelope_yields_blocked(self) -> None:
+        """The recorded prototype finding: success everywhere, denied underneath."""
+        recorded = _fixture_json(self.DENIAL_FIXTURE)
+        self.assertFalse(recorded["is_error"])
+        self.assertEqual(recorded["subtype"], "success")
+        self.assertEqual(recorded["terminal_reason"], "completed")
+
+        result = self._role_result(stdout=_fixture_text(self.DENIAL_FIXTURE))
+
+        self.assertEqual(result.status, "BLOCKED")
+
+    def test_the_blocked_summary_names_the_denied_tools_their_count_and_the_log(
+        self,
+    ) -> None:
+        result = self._role_result(stdout=_fixture_text(self.DENIAL_FIXTURE))
+
+        self.assertIn("1 tool call (Bash)", result.summary)
+        self.assertIn("The Claude Code Backend was denied", result.summary)
+        self.assertRegex(result.summary, r"See .*\.stdout\.jsonl\.$")
+        self.assertIn(
+            "Changes already written remain in the workspace",
+            result.summary,
+        )
+
+    def test_the_summary_counts_every_denial_and_names_each_denied_tool(self) -> None:
+        recorded = _fixture_json(self.DENIAL_FIXTURE)
+        denial = recorded["permission_denials"][0]
+        stdout = self._envelope(
+            permission_denials=[denial, denial, {**denial, "tool_name": "Read"}]
+        )
+
+        result = self._role_result(stdout=stdout)
+
+        self.assertIn("3 tool calls (Bash, Read)", result.summary)
+
+    def test_the_denial_check_outranks_the_error_flag_reason_and_exit_code(
+        self,
+    ) -> None:
+        """One envelope, every other signal saying failure differently."""
+        stdout = self._envelope(
+            is_error=True,
+            subtype="error_during_execution",
+            terminal_reason="error",
+            result="The provider's own error text.",
+        )
+
+        result = self._role_result(
+            stdout=stdout,
+            returncode=1,
+            stderr="claude: the session failed\n",
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("1 tool call (Bash)", result.summary)
+        self.assertNotIn("The provider's own error text.", result.summary)
+        self.assertNotIn("exit code", result.summary)
+
+    def test_removing_only_the_denials_hands_the_outcome_to_the_next_rule(
+        self,
+    ) -> None:
+        """The control for the ordering assertion above."""
+        stdout = self._envelope(
+            is_error=True,
+            subtype="error_during_execution",
+            terminal_reason="error",
+            result="The provider's own error text.",
+            permission_denials=[],
+        )
+
+        result = self._role_result(
+            stdout=stdout,
+            returncode=1,
+            stderr="claude: the session failed\n",
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(result.summary, "The provider's own error text.")
+
+    def test_the_denial_check_outranks_a_budget_expired_exit_status(self) -> None:
+        result = self._role_result(
+            stdout=_fixture_text(self.DENIAL_FIXTURE),
+            returncode=EXECUTION_BUDGET_EXPIRY_RETURNCODE,
+            stderr="Execution Budget timeout (1800 seconds) expired.\n",
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("1 tool call (Bash)", result.summary)
+        self.assertNotIn("Execution Budget", result.summary)
+
+    def test_a_terminal_reason_other_than_completion_yields_blocked(self) -> None:
+        """Rule 2 does not wait for a failing exit code to agree with it."""
+        stdout = self._envelope(
+            terminal_reason="refusal",
+            permission_denials=[],
+            result="I will not do that.",
+        )
+
+        result = self._role_result(stdout=stdout, returncode=0)
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(result.summary, "I will not do that.")
+
+    def test_a_reported_error_yields_blocked_in_the_providers_own_words(self) -> None:
+        stdout = self._envelope(
+            is_error=True,
+            subtype="error_during_execution",
+            terminal_reason="completed",
+            permission_denials=[],
+            result="Claude ran out of context.",
+        )
+
+        result = self._role_result(stdout=stdout)
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(result.summary, "Claude ran out of context.")
+
+    def test_a_clean_terminal_result_yields_the_parsed_role_result(self) -> None:
+        result = self._role_result(
+            stdout=_fixture_text("permission-bypass.result.json")
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.changed_files, ["spike.txt"])
+        self.assertEqual(result.verification_commands, ["git status --short"])
+
+    def test_a_budget_expired_claude_attempt_names_claude_and_the_workspace(
+        self,
+    ) -> None:
+        result = self._role_result(
+            stdout="",
+            returncode=EXECUTION_BUDGET_EXPIRY_RETURNCODE,
+            stderr="Execution Budget timeout (1800 seconds) expired.\n",
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn("Execution Budget timeout (1800 seconds) expired.", result.summary)
+        self.assertIn(
+            "The Claude Code Backend did not return a final role result",
+            result.summary,
+        )
+        self.assertIn(
+            "Changes already written remain in the workspace",
+            result.summary,
+        )
+        self.assertIn("Rerun the unfinished issue", result.summary)
+        self.assertNotIn("Codex", result.summary)
+
+    def test_a_budget_expired_attempt_keeps_the_workspace_note_and_its_own_words(
+        self,
+    ) -> None:
+        """The provider failed on its own terms as its budget expired.
+
+        The stream captures a genuine non-completed terminal result and, in the
+        same window, the budget detects that the deadline had passed: the exit
+        status becomes the expiry convention's and stderr is annotated, while the
+        provider's own words are still there to be used as the summary. The
+        operator has to be told both.
+        """
+        stdout = self._envelope(
+            is_error=True,
+            subtype="error_during_execution",
+            terminal_reason="error",
+            permission_denials=[],
+            result="Claude ran out of context",
+        )
+
+        result = self._role_result(
+            stdout=stdout,
+            returncode=EXECUTION_BUDGET_EXPIRY_RETURNCODE,
+            stderr=(
+                "Execution Budget checkpoint deadline (300 seconds) expired.\n"
+            ),
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertIn(
+            "Execution Budget checkpoint deadline (300 seconds) expired.",
+            result.summary,
+        )
+        self.assertIn("Claude ran out of context.", result.summary)
+        self.assertIn(
+            "Changes already written remain in the workspace",
+            result.summary,
+        )
+        self.assertIn("Rerun the unfinished issue", result.summary)
+        self.assertRegex(result.summary, r"See .*\.stderr\.txt\.$")
+
+    def test_a_providers_own_words_carry_no_budget_note_when_none_expired(
+        self,
+    ) -> None:
+        """The control: only a terminated attempt gets the budget's promise."""
+        stdout = self._envelope(
+            is_error=True,
+            terminal_reason="error",
+            permission_denials=[],
+            result="Claude ran out of context.",
+        )
+
+        result = self._role_result(
+            stdout=stdout,
+            returncode=EXECUTION_BUDGET_EXPIRY_RETURNCODE,
+            stderr="claude: the session failed\n",
+        )
+
+        self.assertEqual(result.summary, "Claude ran out of context.")
+
+    def test_a_failed_claude_attempt_never_reports_a_codex_failure(self) -> None:
+        result = self._role_result(
+            stdout="",
+            returncode=1,
+            stderr="claude: command failed\n",
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(
+            result.summary.split(". See ")[0],
+            "The Claude Code Backend failed with exit code 1",
+        )
+        self.assertNotIn("codex", result.summary.lower())
+
+    def test_a_claude_attempt_returning_no_role_result_names_claude(self) -> None:
+        result = self._role_result(
+            stdout="claude printed prose and never returned a role result\n"
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        self.assertEqual(
+            result.summary,
+            "The Claude Code Backend did not return valid JSON matching the "
+            "role schema.",
+        )
+
+    def test_a_codex_attempt_returning_no_role_result_names_codex(self) -> None:
+        self.assertEqual(
+            RoleResult.from_message(
+                "no json here",
+                backend=ExecutionBackendId.CODEX_CLI,
+            ).summary,
+            "The Codex CLI Backend did not return valid JSON matching the "
+            "role schema.",
+        )
+        # With no backend named the summary blames the boundary, never a provider.
+        self.assertEqual(
+            RoleResult.from_message("no json here").summary,
+            "The Execution Backend did not return valid JSON matching the "
+            "role schema.",
+        )
 
 
 if __name__ == "__main__":

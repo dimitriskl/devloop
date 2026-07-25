@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from .issue_pack import Issue
 from .portable_workflow import IssueStatus, parse_issue_status
+from .subprocess_utils import EXECUTION_BUDGET_EXPIRY_RETURNCODE
 from .terminal_text import compact_terminal_text, sanitize_terminal_text
 
 
@@ -15,8 +16,18 @@ REVIEW_SCREEN_PATH = "Dev Loop > Completion Review"
 REVIEW_SUCCESS_HEADING = "WORKFLOW FINISHED - SUCCESS"
 REVIEW_ATTENTION_HEADING = "WORKFLOW FINISHED - ATTENTION REQUIRED"
 ISSUE_DETAIL_MAX_LENGTH = 4096
-LEGACY_CODEX_TIMEOUT_PATTERN = re.compile(
-    r"^codex exec failed with exit code 124\. See (?P<log_path>.+)\.$"
+# A budget-expired attempt whose stored summary carries only its exit status: the
+# runner records the readable Execution Budget wording when it can see the
+# expiry annotation, so anything reaching here is an attempt whose annotation was
+# lost. Two spellings are recognised. `codex exec failed ...` is loop state
+# written before Execution Backend was a per-step choice, so it can only have
+# been Codex; `The <backend> Backend failed ...` names the backend that ran and is
+# what the runner writes now.
+LEGACY_BUDGET_EXPIRY_BACKEND = "Codex"
+UNANNOTATED_BUDGET_EXPIRY_PATTERN = re.compile(
+    r"^(?:codex exec failed|The (?P<backend>[^.]+?) Backend failed) "
+    rf"with exit code {EXECUTION_BUDGET_EXPIRY_RETURNCODE}\. "
+    r"See (?P<log_path>.+)\.$"
 )
 
 
@@ -194,13 +205,14 @@ def _normalize_issue_detail(value: object) -> str:
     normalized = " ".join(
         sanitize_terminal_text(value, preserve_newlines=False).split()
     )
-    legacy_timeout = LEGACY_CODEX_TIMEOUT_PATTERN.fullmatch(normalized)
-    if legacy_timeout is not None:
+    budget_expiry = UNANNOTATED_BUDGET_EXPIRY_PATTERN.fullmatch(normalized)
+    if budget_expiry is not None:
+        backend = budget_expiry.group("backend") or LEGACY_BUDGET_EXPIRY_BACKEND
         normalized = (
-            "Execution Budget timeout expired before Codex returned a final "
-            "role result. Changes already written remain in the worktree. "
+            f"Execution Budget timeout expired before {backend} returned a final "
+            "role result. Changes already written remain in the workspace. "
             "Rerun the unfinished issue to continue from them. Full log: "
-            f"{legacy_timeout.group('log_path')}"
+            f"{budget_expiry.group('log_path')}"
         )
     return compact_terminal_text(
         normalized,

@@ -1318,10 +1318,17 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             result.summary,
         )
         self.assertIn(
-            "Changes already written remain in the worktree",
+            "Changes already written remain in the workspace",
             result.summary,
         )
         self.assertIn("Rerun the unfinished issue", result.summary)
+        # The summary names the Execution Backend that actually ran, so a
+        # mixed-backend Workflow never reports the wrong provider.
+        self.assertIn(
+            "The Codex CLI Backend did not return a final role result",
+            result.summary,
+        )
+        self.assertNotIn("Claude", result.summary)
         self.assertNotIn("failed with exit code 124", result.summary)
 
     def test_every_delivery_role_maps_to_its_visible_phase(self) -> None:

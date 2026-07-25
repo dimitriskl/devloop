@@ -32,6 +32,7 @@ from ..codex_events import (
 from ..model_catalog import CodexModelCatalog, CodexModelCatalogAdapter
 from ..statusui import Stage, WaitingIndicator
 from ..subprocess_utils import (
+    EXECUTION_BUDGET_EXPIRY_RETURNCODE,
     AttemptExecutionBudget,
     ProcessExecutionBudget,
     output_text,
@@ -71,7 +72,6 @@ CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
 STREAM_THREAD_JOIN_SECONDS = 1.0
 FAST_CLI_SERVICE_TIER = "fast"
 STANDARD_CLI_SERVICE_TIER = "default"
-EXECUTION_BUDGET_EXPIRY_RETURNCODE = 124
 # Codex items Dev Loop treats as an active backend operation: while one is
 # running the attempt is working even though the stream stays silent.
 CHECKPOINT_PAUSING_ITEM_TYPES = frozenset(

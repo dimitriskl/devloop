@@ -89,6 +89,23 @@ class RefusalRecord:
     reason: str = ""
 
 
+def describe_refusals(refusals: Sequence[RefusalRecord]) -> str:
+    """Name the refused targets and their count, as `2 tool calls (Bash, Read)`.
+
+    Both the live Portable Activity Feed and the persisted Step Outcome summary
+    have to say how many tool calls were denied and which tools they were, so the
+    phrasing lives once, beside the records it describes.
+    """
+    if not refusals:
+        return "no tool calls"
+    targets: list[str] = []
+    for refusal in refusals:
+        if refusal.target not in targets:
+            targets.append(refusal.target)
+    noun = "tool call" if len(refusals) == 1 else "tool calls"
+    return f"{len(refusals)} {noun} ({', '.join(targets)})"
+
+
 @dataclass(frozen=True)
 class StepAttemptRequest:
     """Everything an Execution Backend needs for one Workflow Step attempt.
@@ -120,12 +137,18 @@ class StepAttemptResult:
     ``refusals`` records tool or capability denials the backend observed. The
     Codex CLI Backend reports none because its sandbox refuses work before the
     agent can claim it ran.
+
+    ``failure_summary`` is the backend's own words for a failed attempt, used as
+    the Step Outcome summary in place of Dev Loop's paraphrase. It is empty
+    whenever the provider said nothing usable, which leaves the runner's own
+    exit-status summary in charge.
     """
 
     process: subprocess.CompletedProcess[str]
     message: str = ""
     run_wide_blocker: RunWideBlocker | None = None
     refusals: tuple[RefusalRecord, ...] = ()
+    failure_summary: str = ""
 
 
 @dataclass(frozen=True)

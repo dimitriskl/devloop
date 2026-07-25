@@ -16,6 +16,15 @@ provider executable.
 | `permission-auto.result.json` | The same denial under `auto`. |
 | `permission-acceptedits.result.json` | The same denial under `acceptEdits`. |
 
+The four `permission-*.result.json` envelopes also carry the Step Outcome
+precedence contract from issue `0004-fail-honestly-on-denied-tools`: a
+denial-bearing envelope must yield `BLOCKED` even though it reports no error, a
+`success` subtype, a `completed` terminal reason and a zero exit code, and the
+clean `bypass` envelope must still yield its parsed role result. Where a
+precedence test needs two signals to disagree it copies one of these recordings
+and changes only the disputed fields, so the recordings themselves stay as
+captured.
+
 ## These recordings are sanitised
 
 This repository is published publicly, so the recordings were edited before being

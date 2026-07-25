@@ -27,6 +27,7 @@ from .backend import (
     StepAttemptRequest,
     StepAttemptResult,
     StepSettingsAuthorization,
+    describe_refusals,
     parse_execution_backend_id,
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
@@ -59,6 +60,7 @@ __all__ = [
     "StepAttemptRequest",
     "StepAttemptResult",
     "StepSettingsAuthorization",
+    "describe_refusals",
     "extract_json_object",
     "parse_execution_backend_id",
     "registered_execution_backend_ids",
