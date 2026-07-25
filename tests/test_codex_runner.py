@@ -635,7 +635,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                 step_display_name="Security Review",
             )
 
-        self.assertIn("# Codex Dev Loop Senior Review", prompt)
+        self.assertIn("# Dev Loop Senior Review", prompt)
         self.assertIn("skills/codex/senior-code-reviewer/SKILL.md", prompt)
         self.assertIn("agents/codex/senior-code-reviewer.md", prompt)
         self.assertIn("Workflow step: `Security Review`", prompt)

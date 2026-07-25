@@ -1,4 +1,4 @@
-# Codex Dev Loop Coder
+# Dev Loop Coder
 
 You are the coding worker for a local PRD issue loop.
 
@@ -31,11 +31,11 @@ below if it exists:
 
 {{REQUIRED_DOCS}}
 
-Read these copied Codex skill instructions from the bundle:
+Read these copied skill instructions from the bundle:
 
 {{SKILL_PATHS}}
 
-Read these copied Codex agent-reference instructions for additional local guidance:
+Read these copied agent-reference instructions for additional local guidance:
 
 {{AGENT_PATHS}}
 
@@ -46,8 +46,8 @@ Read these Dev Loop self-improvement wiki pages from the bundle if they exist:
 
 {{BUNDLE_MEMORY_DOCS}}
 
-If a copied Codex agent reference conflicts with repository rules, follow the repository
-rules, copied Codex skills, and Dev Loop self-improvement wiki first.
+If a copied agent reference conflicts with repository rules, follow the repository
+rules, copied skills, and Dev Loop self-improvement wiki first.
 
 ## Step Guidance
 

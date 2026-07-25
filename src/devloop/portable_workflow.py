@@ -18,7 +18,7 @@ from .portable_execution_backend import (
     ExecutionBackendId,
     StepSettingsAuthorization,
     parse_execution_backend_id,
-    sole_registered_execution_backend,
+    resolve_execution_backend,
 )
 from .portable_text import normalize_single_line_display_name
 from .step_configuration import (
@@ -1549,6 +1549,11 @@ def preflight_step_execution_settings(
 
     The workflow decides which Workflow Steps are agent-backed; the backend
     decides whether their settings are runnable and reports every refusal.
+
+    One Model Catalog is supplied, so one backend authorizes every agent-backed
+    Workflow Step. Loading a catalog per referenced Execution Backend, and
+    letting each backend authorize only its own Workflow Steps, is separate
+    preflight work.
     """
     authorizations = tuple(
         StepSettingsAuthorization(
@@ -1558,7 +1563,9 @@ def preflight_step_execution_settings(
         for step in workflow.steps
         if component_catalog.resolve(step.component_id).is_agent_backed
     )
-    sole_registered_execution_backend().authorize_execution_settings(
+    resolve_execution_backend(
+        ExecutionBackendId.CODEX_CLI
+    ).authorize_execution_settings(
         authorizations,
         model_catalog=model_catalog,
     )

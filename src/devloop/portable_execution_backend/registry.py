@@ -1,8 +1,10 @@
 """The registry of installed Execution Backends.
 
-Exactly one Execution Backend is registered today. Callers resolve a backend
-through this registry instead of naming an implementation, so adding a provider
-means registering it here and implementing the boundary.
+Callers resolve a backend through this registry instead of naming an
+implementation, so adding a provider means registering it here and implementing
+the boundary. Each factory is called only when a Workflow Step actually needs
+that backend, which is what keeps a Workflow that uses one provider independent
+of the other provider's installation.
 """
 
 from __future__ import annotations
@@ -10,12 +12,17 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from .backend import ExecutionBackend, ExecutionBackendId
+from .claude_code import ClaudeCodeExecutionBackend
 from .codex_cli import CodexCliExecutionBackend
 
 ExecutionBackendFactory = Callable[[], ExecutionBackend]
 
 REGISTERED_EXECUTION_BACKENDS: Mapping[ExecutionBackendId, ExecutionBackendFactory] = {
     ExecutionBackendId.CODEX_CLI: CodexCliExecutionBackend,
+    # The Claude CLI is commonly installed as a shim rather than an executable,
+    # so its factory resolves the command; resolution happens at factory time,
+    # never at import time.
+    ExecutionBackendId.CLAUDE_CODE: ClaudeCodeExecutionBackend.resolved,
 }
 
 
@@ -23,16 +30,13 @@ def registered_execution_backend_ids() -> tuple[ExecutionBackendId, ...]:
     return tuple(REGISTERED_EXECUTION_BACKENDS)
 
 
-def sole_registered_execution_backend() -> ExecutionBackend:
-    """The single registered Execution Backend in its default configuration.
-
-    Used where a run has no per-Workflow-Step backend choice to honour yet, such
-    as preflight authorization of settings against a Model Catalog.
-    """
-    backend_ids = registered_execution_backend_ids()
-    if len(backend_ids) != 1:
+def resolve_execution_backend(backend_id: ExecutionBackendId) -> ExecutionBackend:
+    """Build the registered implementation of one Execution Backend."""
+    try:
+        factory = REGISTERED_EXECUTION_BACKENDS[backend_id]
+    except KeyError as error:
         raise ValueError(
-            "Exactly one Execution Backend must be registered to resolve a "
-            f"backend without an explicit choice; found {len(backend_ids)}."
-        )
-    return REGISTERED_EXECUTION_BACKENDS[backend_ids[0]]()
+            f"No implementation is registered for the {backend_id.display_name} "
+            "Execution Backend."
+        ) from error
+    return factory()

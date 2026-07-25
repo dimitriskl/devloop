@@ -26,6 +26,7 @@ from .portable_execution_backend import (
     RunWideBlockerPolicy,
     StepAttemptRequest,
     extract_json_object,
+    resolve_execution_backend,
 )
 from .portable_text import normalize_single_line_display_name
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
@@ -150,6 +151,25 @@ class CodexRunner:
     def ensure_log_root(self) -> None:
         self.log_root.mkdir(parents=True, exist_ok=True)
 
+    def backend_for_step(
+        self,
+        execution_settings: StepExecutionSettings | None,
+    ) -> ExecutionBackend:
+        """Resolve the Execution Backend one Workflow Step attempt runs on.
+
+        The backend the runner was constructed with stays authoritative for its
+        own backend identity, so a Workflow Step that names it keeps the exact
+        command-line configuration the run was started with. A Workflow Step
+        naming another Execution Backend is dispatched to that backend's
+        registered implementation, which is resolved only at that point.
+        """
+        if (
+            execution_settings is None
+            or execution_settings.backend is self.execution_backend.backend_id
+        ):
+            return self.execution_backend
+        return resolve_execution_backend(execution_settings.backend)
+
     def write_log_text(
         self,
         path: Path,
@@ -220,7 +240,7 @@ class CodexRunner:
         )
         self.write_log_text(logs.prompt, prompt)
 
-        result = self.execution_backend.invoke(
+        result = self.backend_for_step(execution_settings).invoke(
             StepAttemptRequest(
                 prompt=prompt,
                 repo_root=self.repo_root,

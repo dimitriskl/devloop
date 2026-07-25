@@ -19,7 +19,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO
+from typing import TYPE_CHECKING, Any
 
 from ..codex_events import (
     CodexItemType,
@@ -42,7 +42,6 @@ from ..subprocess_utils import (
     terminate_process,
     unregister_process_tree,
 )
-from ..terminal_text import sanitize_terminal_text
 from .activity import ActivityCallback, StepActivityEvent, StepActivityKind
 from .backend import (
     ExecutionBackend,
@@ -54,6 +53,11 @@ from .backend import (
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import update_checkpoint_for_step_activity
+from .process_stream import (
+    drain_process_stream,
+    print_step_activity,
+    write_process_input,
+)
 from .structured_result import extract_json_object
 
 if TYPE_CHECKING:
@@ -373,12 +377,12 @@ def run_streaming_codex_command(
         stderr_activity_callback(event)
 
     input_thread = threading.Thread(
-        target=_write_process_input,
+        target=write_process_input,
         args=(process.stdin, input_text),
         daemon=True,
     )
     stderr_thread = threading.Thread(
-        target=_drain_process_stream,
+        target=drain_process_stream,
         args=(
             process.stderr,
             stderr_parts,
@@ -411,7 +415,7 @@ def run_streaming_codex_command(
                 indicator.notify_activity()
                 if step_activity is not None and step_activity.activity:
                     indicator.stop()
-                    _print_codex_activity(stage, activity_context, step_activity)
+                    print_step_activity(stage, activity_context, step_activity)
                     indicator.start()
             turn_outcome = codex_turn_outcome(event)
             if turn_outcome is not None:
@@ -589,49 +593,6 @@ def extract_last_structured_agent_message(text: str) -> str | None:
             last_message = message
 
     return last_message
-
-
-def _write_process_input(stream: TextIO, input_text: str) -> None:
-    try:
-        stream.write(input_text)
-        stream.flush()
-    except (BrokenPipeError, OSError, ValueError):
-        pass
-    finally:
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
-
-
-def _drain_process_stream(
-    stream: TextIO,
-    captured: list[str],
-    notify_activity: ActivityCallback,
-) -> None:
-    try:
-        for line in stream:
-            captured.append(line)
-            notify_activity(None)
-    except (OSError, ValueError):
-        pass
-
-
-def _print_codex_activity(
-    stage: Stage,
-    context: str,
-    event: StepActivityEvent,
-) -> None:
-    """Print one neutral step activity as a Portable Plain Mode line."""
-    prefix = f"[{stage.value}]"
-    if context:
-        safe_context = sanitize_terminal_text(context, preserve_newlines=False)
-        prefix = f"{prefix} {safe_context}:"
-    safe_activity = sanitize_terminal_text(
-        event.activity or "",
-        preserve_newlines=False,
-    )
-    print(f"{prefix} {safe_activity}")
 
 
 def _terminal_returncode(

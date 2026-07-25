@@ -9,10 +9,13 @@ from typing import Any, Iterable, Mapping
 
 
 MAX_STEP_GUIDANCE_CHARACTERS = 4_000
+# Supplied verbatim to every agent-backed Workflow Step attempt, on every
+# Execution Backend, so it names the Step Execution Settings type rather than one
+# provider's settings.
 STEP_GUIDANCE_PRECEDENCE = (
     "Component instructions, the Step Contract, Step Execution Policy, output "
     "requirements, required capabilities, permissions, and safety boundaries "
-    "outrank Step Guidance. Guidance cannot change workflow structure or Codex "
+    "outrank Step Guidance. Guidance cannot change workflow structure or Step "
     "Execution Settings."
 )
 

@@ -15,6 +15,8 @@ from devloop import codex_runner, statusui
 from devloop.codex_events import parse_codex_event, render_safe_codex_activity
 from devloop.issue_pack import Issue
 from devloop.portable_execution_backend import (
+    ClaudeCodeExecutionBackend,
+    CodexCliExecutionBackend,
     ExecutionBackend,
     ExecutionBackendId,
     RunWideBlocker,
@@ -25,7 +27,7 @@ from devloop.portable_execution_backend import (
     StepAttemptResult,
     codex_cli,
     registered_execution_backend_ids,
-    sole_registered_execution_backend,
+    resolve_execution_backend,
     update_checkpoint_for_step_activity,
 )
 from devloop.portable_workflow import (
@@ -136,16 +138,35 @@ class _RecordingExecutionBackend(ExecutionBackend):
 
 
 class ExecutionBackendRegistryTests(unittest.TestCase):
-    def test_exactly_one_execution_backend_is_registered(self) -> None:
+    def test_both_execution_backends_are_registered(self) -> None:
         self.assertEqual(
             registered_execution_backend_ids(),
-            (ExecutionBackendId.CODEX_CLI,),
+            (ExecutionBackendId.CODEX_CLI, ExecutionBackendId.CLAUDE_CODE),
         )
 
-        backend = sole_registered_execution_backend()
+    def test_each_registered_backend_resolves_to_its_own_implementation(self) -> None:
+        expected_implementations = {
+            ExecutionBackendId.CODEX_CLI: CodexCliExecutionBackend,
+            ExecutionBackendId.CLAUDE_CODE: ClaudeCodeExecutionBackend,
+        }
+        for backend_id, implementation in expected_implementations.items():
+            with self.subTest(backend=backend_id):
+                backend = resolve_execution_backend(backend_id)
 
-        self.assertIsInstance(backend, ExecutionBackend)
-        self.assertIs(backend.backend_id, ExecutionBackendId.CODEX_CLI)
+                self.assertIsInstance(backend, ExecutionBackend)
+                self.assertIsInstance(backend, implementation)
+                self.assertIs(backend.backend_id, backend_id)
+
+    def test_the_codex_backend_keeps_its_historical_default_configuration(self) -> None:
+        backend = resolve_execution_backend(ExecutionBackendId.CODEX_CLI)
+
+        assert isinstance(backend, CodexCliExecutionBackend)
+        self.assertEqual(backend.codex, codex_cli.CODEX_CLI_COMMAND)
+        self.assertEqual(backend.sandbox, codex_cli.CODEX_CLI_DEFAULT_SANDBOX)
+        self.assertEqual(
+            backend.approval_policy,
+            codex_cli.CODEX_CLI_DEFAULT_APPROVAL_POLICY,
+        )
 
 
 class CodexInvocationTests(unittest.TestCase):

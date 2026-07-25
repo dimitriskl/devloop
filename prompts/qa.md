@@ -1,4 +1,4 @@
-# Codex Dev Loop QA Gate
+# Dev Loop QA Gate
 
 You are the QA automation gate for a local PRD issue loop.
 

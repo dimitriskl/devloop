@@ -31,11 +31,12 @@ from .backend import (
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import CheckpointBudget, update_checkpoint_for_step_activity
+from .claude_code import ClaudeCodeExecutionBackend
 from .codex_cli import CodexCliExecutionBackend
 from .registry import (
     REGISTERED_EXECUTION_BACKENDS,
     registered_execution_backend_ids,
-    sole_registered_execution_backend,
+    resolve_execution_backend,
 )
 from .structured_result import extract_json_object
 
@@ -44,6 +45,7 @@ __all__ = [
     "TOOL_ACTIVITY_KINDS",
     "ActivityCallback",
     "CheckpointBudget",
+    "ClaudeCodeExecutionBackend",
     "CodexCliExecutionBackend",
     "ExecutionBackend",
     "ExecutionBackendId",
@@ -60,6 +62,6 @@ __all__ = [
     "extract_json_object",
     "parse_execution_backend_id",
     "registered_execution_backend_ids",
-    "sole_registered_execution_backend",
+    "resolve_execution_backend",
     "update_checkpoint_for_step_activity",
 ]

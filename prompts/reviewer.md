@@ -1,4 +1,4 @@
-# Codex Dev Loop Senior Review
+# Dev Loop Senior Review
 
 You are the senior code reviewer gate for a local PRD issue loop.
 
