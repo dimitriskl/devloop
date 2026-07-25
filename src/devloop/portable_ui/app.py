@@ -518,7 +518,7 @@ class PortableApplicationShell(App[None]):
         menu.highlighted = 0
         menu.focus()
         self.query_one("#portable-actions", Static).update(
-            "Enter Exit | F4 Logs | F5 Context"
+            "Enter Exit | Esc Exit | F4 Logs | F5 Context"
         )
 
     def _drain_runtime_events(self) -> None:
@@ -742,6 +742,9 @@ class PortableApplicationShell(App[None]):
         self._respond(request_id, event.value, "Input accepted")
 
     def action_back(self) -> None:
+        if self._workflow_complete:
+            self.exit()
+            return
         if self._active_request_id is None:
             if not self._workflow_complete:
                 self._show_working_explanation()

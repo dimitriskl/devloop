@@ -220,6 +220,26 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(app.operation_result, 0)
 
+    async def test_escape_closes_the_completed_application(self) -> None:
+        app = PortableApplicationShell(PortableRuntimeBridge(), lambda: 0)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                if app._workflow_complete:
+                    break
+
+            self.assertTrue(app._workflow_complete)
+            self.assertTrue(app.is_running)
+            self.assertIn(
+                "Esc Exit",
+                str(app.query_one("#portable-actions", Static).render()),
+            )
+
+            await pilot.press("escape")
+
+            self.assertFalse(app.is_running)
+
     async def test_shell_shutdown_releases_worker_and_terminates_processes(
         self,
     ) -> None:
