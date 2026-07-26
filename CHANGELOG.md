@@ -56,6 +56,30 @@ Also in this change:
   command once as its own default backend. The interactive repair loop keeps its
   choices and refreshes every referenced backend's catalog on retry, naming the
   backend that refused.
+- A Claude provider-account condition now pauses the Workflow Run instead of
+  corrupting Issue outcomes. Unauthorised and forbidden API statuses classify as
+  invalid authentication, a rate-limit status or a rate-limit event reporting the
+  account's usage as spent classifies as exhausted usage, server-error statuses
+  classify as service unavailability, and a not-found status classifies as
+  `MODEL_ACCESS_WITHDRAWN` and points at `/options`. All four reuse the existing
+  pause path: the run stops scheduling immediately, the active Issue keeps its
+  outcome and spends no normal or additional pass, and durable state records a
+  redacted reason with the exact Issue, Workflow Step, pass, scheduling phase,
+  round, and remaining budgets, so rerunning the same command resumes that work.
+- **A Run-Wide Blocker now outranks a Permission Denial** when one terminal
+  result carries both. A pause publishes no Step Outcome, so denied work still
+  cannot be reported as done, while recording `BLOCKED` would have spent an Issue
+  attempt budget on a provider that never ran the work.
+- Retryability is now a per-backend predicate on the Execution Backend interface
+  and both backends share one bounded retry policy: one Execution Budget across
+  every process run of an attempt, one delay, one accumulated transcript. Codex
+  retries exactly the connection failures it always did. Claude retries
+  transport-level failures — dropped connections, network errors, server errors
+  reported before any terminal result — and never retries a classified Run-Wide
+  Blocker.
+- `RUN PAUSED` is no longer announced with the `BLOCKED` Issue status word. A
+  paused run has its own label, coloured as attention on a colour-capable stream
+  and identical in words without one.
 
 ## v0.1.0 - 2026-07-17
 

@@ -14,9 +14,20 @@ from enum import Enum
 
 
 class RunWideBlockerKind(str, Enum):
+    """The closed set of conditions that prevent every Issue from executing.
+
+    ``MODEL_ACCESS_WITHDRAWN`` is run-wide for the same reason the other three
+    are, even though it names a model: run preflight verifies model access
+    against the account before the first attempt, so a provider reporting the
+    model as unavailable *during* a run means the account's access changed while
+    the run was in flight. No Issue did anything wrong, and no other Issue could
+    fare better, so it pauses the run instead of becoming an Issue outcome.
+    """
+
     USAGE_LIMIT = "USAGE_LIMIT"
     AUTHENTICATION = "AUTHENTICATION"
     SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+    MODEL_ACCESS_WITHDRAWN = "MODEL_ACCESS_WITHDRAWN"
 
 
 @dataclass(frozen=True)

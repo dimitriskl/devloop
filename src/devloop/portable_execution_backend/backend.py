@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..execution_backend_id import ExecutionBackendId, parse_execution_backend_id
 from ..statusui import Stage
@@ -36,6 +36,7 @@ __all__ = [
     "StepAttemptRequest",
     "StepAttemptResult",
     "StepSettingsAuthorization",
+    "TransientFailurePredicate",
     "describe_refusals",
     "parse_execution_backend_id",
 ]
@@ -44,6 +45,17 @@ __all__ = [
 # Durable log writing stays with the role runner, which owns log-root
 # confinement and long-path compaction; a backend only ever writes through it.
 LogWriter = Callable[[Path, str], None]
+
+
+class TransientFailurePredicate(Protocol):
+    """Whether one failed attempt's captured output describes a transient failure.
+
+    The two arguments are keyword-only because both are captured provider output
+    of the same type, and a caller that swapped them positionally would compile,
+    run, and quietly retry the wrong evidence.
+    """
+
+    def __call__(self, *, stdout: str, stderr: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -211,6 +223,24 @@ class ExecutionBackend(ABC):
             installed=False,
             detail="not installed",
         )
+
+    def is_retryable_transient_failure(self, *, stdout: str, stderr: str) -> bool:
+        """Whether a bounded retry could clear what ended this failed attempt.
+
+        Each provider recognises its own transient conditions, so retryability is
+        per backend rather than one shared string match over every provider's
+        diagnostics. The default is that nothing is transient: a backend that has
+        not identified a condition a wait can clear must not have its attempts
+        repeated on a guess.
+
+        A backend's predicate is also where the promise that a Run-Wide Blocker is
+        never retried is kept. Exhausted usage, invalid authentication, and
+        withdrawn model access cannot change without operator action, so a backend
+        that recognises one of them in this output must refuse retryability rather
+        than spend the attempt's remaining budget re-asking a provider that has
+        already given its answer.
+        """
+        return False
 
     def verify_selected_model(self, model_id: str, *, cwd: Path) -> str:
         """Verify one selected model and return the identifier to persist.

@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +50,7 @@ from .backend import (
     StepAttemptRequest,
     StepAttemptResult,
     StepSettingsAuthorization,
+    TransientFailurePredicate,
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import update_checkpoint_for_step_activity
@@ -60,6 +60,10 @@ from .process_stream import (
     write_process_input,
 )
 from .structured_result import extract_json_object
+from .transient_retry import (
+    TRANSIENT_RETRY_DELAY_SECONDS,
+    run_attempt_with_transient_retries,
+)
 
 if TYPE_CHECKING:
     from ..portable_workflow import ExecutionBudget, StepExecutionSettings
@@ -68,7 +72,10 @@ if TYPE_CHECKING:
 CODEX_CLI_COMMAND = "codex"
 CODEX_CLI_DEFAULT_SANDBOX = "workspace-write"
 CODEX_CLI_DEFAULT_APPROVAL_POLICY = "never"
-CODEX_CONNECTION_RETRY_DELAY_SECONDS = 30
+CODEX_CONNECTION_RETRY_DELAY_SECONDS = TRANSIENT_RETRY_DELAY_SECONDS
+# What the operator-facing retry notice says failed. It names the invocation, not
+# any captured provider text, so the notice can carry no provider payload.
+CODEX_RETRY_SUBJECT = "codex exec connection"
 STREAM_THREAD_JOIN_SECONDS = 1.0
 FAST_CLI_SERVICE_TIER = "fast"
 STANDARD_CLI_SERVICE_TIER = "default"
@@ -310,7 +317,17 @@ def classify_run_wide_blocker(stdout: str, stderr: str) -> RunWideBlocker | None
     return None
 
 
-def is_retryable_codex_connection_failure(stderr: str) -> bool:
+def is_retryable_codex_transient_failure(*, stdout: str, stderr: str) -> bool:
+    """Whether a bounded retry could clear what ended this failed Codex attempt.
+
+    A Run-Wide Blocker is refused outright, which is what stops the bounded retry
+    policy from re-asking a provider that has already reported exhausted usage,
+    invalid authentication, or an outage. What remains retryable is the one
+    transient condition observed in practice: the response websocket failing to
+    open or dropping, which a wait clears.
+    """
+    if classify_run_wide_blocker(stdout, stderr) is not None:
+        return False
     lower = stderr.lower()
     return (
         "failed to connect to websocket" in lower
@@ -469,21 +486,20 @@ def run_codex_exec_with_connection_retries(
     activity_context: str = "",
     activity_callback: ActivityCallback | None = None,
     execution_budget: ExecutionBudget | None = None,
+    is_retryable: TransientFailurePredicate | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    attempt = 1
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
-    attempt_budget = (
-        AttemptExecutionBudget(
-            timeout_seconds=execution_budget.timeout_seconds,
-            checkpoint_seconds=execution_budget.checkpoint_seconds,
-        )
-        if execution_budget is not None
-        else None
-    )
+    """Run one Codex attempt under the shared bounded transient-retry policy.
 
-    while True:
-        result = run_streaming_codex_command(
+    ``is_retryable`` defaults to this module's own Codex predicate so a direct
+    caller retries exactly what Codex has always retried; the backend passes its
+    own bound predicate, which is what makes retryability a per-backend property
+    of the Execution Backend rather than a fact about this module.
+    """
+
+    def run_attempt(
+        attempt_budget: AttemptExecutionBudget | None,
+    ) -> subprocess.CompletedProcess[str]:
+        return run_streaming_codex_command(
             command,
             input_text=prompt,
             cwd=cwd,
@@ -493,60 +509,18 @@ def run_codex_exec_with_connection_retries(
             execution_budget=execution_budget,
             attempt_budget=attempt_budget,
         )
-        current_stdout = output_text(result.stdout)
-        current_stderr = output_text(result.stderr)
-        if attempt_budget is not None and (current_stdout or current_stderr):
-            attempt_budget.notify_activity()
-        stdout_parts.append(current_stdout)
-        stderr_parts.append(current_stderr)
-        result.stdout = "".join(stdout_parts)
-        result.stderr = "".join(stderr_parts)
 
-        if attempt_budget is not None:
-            expiration = attempt_budget.expiration()
-            if expiration is not None:
-                result.returncode = EXECUTION_BUDGET_EXPIRY_RETURNCODE
-                if expiration not in result.stderr:
-                    result.stderr += f"{expiration}\n"
-                return result
-
-        if classify_run_wide_blocker(current_stdout, current_stderr) is not None:
-            return result
-
-        if result.returncode == 0 or not is_retryable_codex_connection_failure(
-            current_stderr
-        ):
-            return result
-
-        retry_message = (
-            f"codex exec connection failed on attempt {attempt}; "
-            f"retrying in {CODEX_CONNECTION_RETRY_DELAY_SECONDS} seconds.\n"
-        )
-        if activity_callback is None:
-            print(retry_message.strip())
-        else:
-            activity_callback(
-                StepActivityEvent(
-                    kind=StepActivityKind.ERROR,
-                    activity=retry_message.strip(),
-                )
-            )
-        stderr_parts.append(retry_message)
-        result.stderr = "".join(stderr_parts)
-        write_log(stdout_path, result.stdout)
-        write_log(stderr_path, result.stderr)
-        if attempt_budget is None:
-            time.sleep(CODEX_CONNECTION_RETRY_DELAY_SECONDS)
-        else:
-            expiration = attempt_budget.wait_for_retry(
-                CODEX_CONNECTION_RETRY_DELAY_SECONDS
-            )
-            if expiration is not None:
-                result.returncode = EXECUTION_BUDGET_EXPIRY_RETURNCODE
-                if expiration not in result.stderr:
-                    result.stderr += f"{expiration}\n"
-                return result
-        attempt += 1
+    return run_attempt_with_transient_retries(
+        run_attempt,
+        is_retryable=is_retryable or is_retryable_codex_transient_failure,
+        retry_subject=CODEX_RETRY_SUBJECT,
+        retry_delay_seconds=CODEX_CONNECTION_RETRY_DELAY_SECONDS,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        write_log=write_log,
+        activity_callback=activity_callback,
+        execution_budget=execution_budget,
+    )
 
 
 def load_or_recover_role_message(
@@ -654,6 +628,7 @@ class CodexCliExecutionBackend(ExecutionBackend):
             activity_context=request.activity_context,
             activity_callback=request.activity_callback,
             execution_budget=request.execution_budget,
+            is_retryable=self.is_retryable_transient_failure,
         )
         run_wide_blocker = (
             classify_run_wide_blocker(
@@ -676,6 +651,10 @@ class CodexCliExecutionBackend(ExecutionBackend):
                 write_log=request.write_log,
             ),
         )
+
+    def is_retryable_transient_failure(self, *, stdout: str, stderr: str) -> bool:
+        """Recognise the one Codex condition a bounded retry has been seen to clear."""
+        return is_retryable_codex_transient_failure(stdout=stdout, stderr=stderr)
 
     @property
     def provider_command(self) -> str:

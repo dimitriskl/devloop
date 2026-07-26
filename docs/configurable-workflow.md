@@ -58,12 +58,17 @@ translation, structured-message recovery, and Codex Run-Wide Blocker
 classification; `codex_events.py` remains the Codex wire-format parser.
 `claude_code.py` owns `claude -p` command construction and its reproducibility
 isolation, the `stream-json` streaming loop under the Execution Budget, event
-translation, Permission Denial recognition, structured-result recovery, and run
-authorization, and reaches its Model Catalog and its one verification call
-through `claude_catalog.py`; both are injectable on the backend so run
-authorization is testable from recorded provider output. Classifying Claude
-Run-Wide Blockers is still separate work. This package must not import any
-CodexCLI package, which `tests/test_product_boundary.py` enforces.
+translation, Permission Denial recognition, structured-result recovery, Claude
+Run-Wide Blocker classification, and run authorization, and reaches its Model
+Catalog and its one verification call through `claude_catalog.py`; both are
+injectable on the backend so run authorization is testable from recorded provider
+output. `transient_retry.py` owns the bounded retry policy both backends share:
+one attempt-wide Execution Budget across every process run, one delay, and one
+accumulated transcript. What is worth retrying is asked of the backend through
+`is_retryable_transient_failure` on the interface, which is also where each
+backend keeps the promise that a Run-Wide Blocker is never retried. This package
+must not import any CodexCLI package, which `tests/test_product_boundary.py`
+enforces.
 
 The deep execution seam is `PortableWorkflowExecutor.run`: callers provide a
 resolved Workflow Definition, component catalog, and role-runner adapter. The

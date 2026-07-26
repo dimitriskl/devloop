@@ -25,6 +25,7 @@ from .model_catalog import (
 from .portable_execution_backend import (
     BackendModelCatalogAccess,
     BackendModelCatalogLoader,
+    RunWideBlocker,
 )
 from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
 from .product_scope import require_portable_target
@@ -111,6 +112,24 @@ def renew_exhausted_scheduler_for_explicit_start(
         issue.number for issue in issues
     )
     return True
+
+
+def render_run_pause_notice(blocker: RunWideBlocker, *, stream=None) -> str:
+    """Announce a run-wide pause as one line, distinctly from any Issue status.
+
+    One rendering serves every surface. The interactive TTY and the append-only
+    Plain Mode read the same words, and the colour decision belongs to the stream
+    rather than to the caller, so a redirected or `NO_COLOR` run shows the
+    identical sentence without escape sequences.
+
+    Both parts after the label come from the classified blocker: its kind and the
+    backend's own Dev Loop wording for that condition. Neither is provider output,
+    so the notice can carry no credential and no raw provider payload.
+    """
+    return (
+        f"{statusui.render_run_paused_label(stream=stream)} · "
+        f"{blocker.kind.value} · {blocker.summary}"
+    )
 
 
 def execute_dependency_schedule(
@@ -730,10 +749,8 @@ def _run_devloop_attempt(
         )
     except RunWideBlockerError as error:
         state_writer.record_run_paused(error.blocker)
-        paused_status = statusui.render_status("BLOCKED", stream=sys.stderr)
         print(
-            f"RUN PAUSED · {paused_status} · {error.blocker.kind.value} · "
-            f"{error.blocker.summary}",
+            render_run_pause_notice(error.blocker, stream=sys.stderr),
             file=sys.stderr,
         )
     finally:

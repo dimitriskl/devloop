@@ -53,6 +53,8 @@ _FAIL_COLOR = "\x1b[1;31m"
 _WORKING_COLOR = "\x1b[1;33m"
 _RESET = "\x1b[0m"
 _BANNER_WIDTH = 79
+# How a run-wide pause names itself, in every surface and both colour modes.
+RUN_PAUSED_LABEL = "RUN PAUSED"
 WAITING_FRAMES = ("|", "/", "-", "\\")
 UNICODE_WAITING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 WAITING_FRAME_SECONDS = 0.12
@@ -1057,6 +1059,21 @@ def render_status(status: str | DashboardStatus, stream=None) -> str:
     if not _use_color(stream):
         return parsed.value
     return _color_status_word(parsed.value, parsed)
+
+
+def render_run_paused_label(stream=None) -> str:
+    """The label a run-wide pause is announced with, in colour or plain words.
+
+    Deliberately not a :class:`DashboardStatus`. A paused run is not a blocked
+    Issue: no Issue outcome changed, no attempt budget was spent, and rerunning
+    the same command continues the exact work that stopped. Announcing it with the
+    Issue status vocabulary would tell the operator the opposite of all three, so
+    the pause carries its own label — coloured as attention rather than failure on
+    a colour-capable stream, and the identical words without one.
+    """
+    if not _use_color(stream):
+        return RUN_PAUSED_LABEL
+    return f"{_WORKING_COLOR}{RUN_PAUSED_LABEL}{_RESET}"
 
 
 def _terminal_display_width(text: str) -> int:

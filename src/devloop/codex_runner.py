@@ -298,13 +298,28 @@ class CodexRunner:
         self.write_log_text(logs.stdout, process.stdout)
         self.write_log_text(logs.stderr, process.stderr)
 
-        # Step Outcome precedence, in strict order. A Permission Denial is
-        # evaluated first, ahead of every other signal, because a backend can
-        # deny the work an attempt needed while still reporting no error, a
-        # success subtype, a completed terminal reason and a zero exit code — and
-        # the agent may then assert the denied work was done. Nothing an attempt
-        # claims after being denied a tool can be trusted, so no later signal is
-        # allowed to overrule the denial.
+        # Step Outcome precedence, in strict order. A Run-Wide Blocker is
+        # evaluated first, ahead of every other signal including a Permission
+        # Denial, because it is the only signal that says this attempt never got a
+        # fair chance: the provider account or service refused the call, no Issue
+        # caused it, and no other Issue could do better. Publishing any Step
+        # Outcome for it would assert something about the Issue that the evidence
+        # does not support, spend an Issue attempt budget on a provider that
+        # cannot answer, and then spend every remaining Issue's budget the same
+        # way — while pausing costs one rerun once the condition is repaired.
+        #
+        # A Permission Denial is evaluated immediately after, ahead of every
+        # signal that could describe success, because a backend can deny the work
+        # an attempt needed while still reporting no error, a success subtype, a
+        # completed terminal reason and a zero exit code — and the agent may then
+        # assert the denied work was done. That rule exists to stop a *success*
+        # overruling a denial. A pause is not a success: it publishes no Step
+        # Outcome, so denied work still cannot be reported as done, and the denial
+        # stays in the Portable Activity Feed and the durable transcript for the
+        # rerun that follows.
+        if result.run_wide_blocker is not None:
+            raise RunWideBlockerError(result.run_wide_blocker)
+
         if result.refusals:
             return RoleResult(
                 status="BLOCKED",
@@ -315,9 +330,6 @@ class CodexRunner:
                 ),
                 raw_message=result.message,
             )
-
-        if result.run_wide_blocker is not None:
-            raise RunWideBlockerError(result.run_wide_blocker)
 
         # A backend that reported an error, or an ending other than completion,
         # is BLOCKED in its own words. The backend's judgement decides this

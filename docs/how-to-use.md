@@ -380,10 +380,13 @@ agent-backed Workflow Step in the editable Workflow Default scope.
 Dependency scheduler state is stored in the same JSON file. It includes ready
 and waiting projections, normal attempts, per-issue additional-pass counters,
 and the active scheduling reservation. Rerunning the same command resumes that
-reservation without double charging it. Usage exhaustion, authentication
-failure, or Codex service unavailability pauses the entire run as `RUN PAUSED`;
-restore the backend condition and rerun the same command to continue the exact
-issue, workflow step, pass, scheduling phase, and Blocker Resolution round.
+reservation without double charging it. On either Execution Backend, usage
+exhaustion, authentication failure, service unavailability, or model access
+withdrawn mid-run pauses the entire run as `RUN PAUSED`; restore the backend
+condition and rerun the same command to continue the exact issue, workflow step,
+pass, scheduling phase, and Blocker Resolution round. A pause changes no issue
+outcome and spends no attempt budget. A transient network failure is retried
+inside the same attempt instead, under that attempt's Execution Budget.
 
 Completed issue files are updated in place with `Completed: [x]`, checked
 acceptance criteria, and implementation notes. Completed issues are skipped on

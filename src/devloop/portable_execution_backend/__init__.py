@@ -28,6 +28,7 @@ from .backend import (
     StepAttemptRequest,
     StepAttemptResult,
     StepSettingsAuthorization,
+    TransientFailurePredicate,
     describe_refusals,
     parse_execution_backend_id,
 )
@@ -51,10 +52,15 @@ from .registry import (
     resolve_execution_backend,
 )
 from .structured_result import extract_json_object
+from .transient_retry import (
+    TRANSIENT_RETRY_DELAY_SECONDS,
+    run_attempt_with_transient_retries,
+)
 
 __all__ = [
     "REGISTERED_EXECUTION_BACKENDS",
     "TOOL_ACTIVITY_KINDS",
+    "TRANSIENT_RETRY_DELAY_SECONDS",
     "ActivityCallback",
     "BackendAvailability",
     "BackendModelCatalogAccess",
@@ -78,6 +84,7 @@ __all__ = [
     "StepAttemptRequest",
     "StepAttemptResult",
     "StepSettingsAuthorization",
+    "TransientFailurePredicate",
     "describe_refusals",
     "execution_backend_availability",
     "extract_json_object",
@@ -85,5 +92,6 @@ __all__ = [
     "parse_execution_backend_id",
     "registered_execution_backend_ids",
     "resolve_execution_backend",
+    "run_attempt_with_transient_retries",
     "update_checkpoint_for_step_activity",
 ]

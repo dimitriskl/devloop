@@ -163,12 +163,25 @@ issues.
 
 ## The runner prints `RUN PAUSED`
 
-This is a run-wide Codex availability problem, not an issue failure. Restore
-usage capacity, authentication, or service availability, then rerun the exact
-same `devloop` command. Do not delete the loop-state JSON: it preserves the
-active issue, workflow step, pass, scheduling phase, round, and remaining
-budgets. A repeated global failure remains paused and does not consume another
-issue attempt.
+This is a run-wide backend availability problem, not an issue failure. It is
+reported for either Execution Backend. The line names the condition:
+
+| Kind | What it means | What to do |
+| --- | --- | --- |
+| `USAGE_LIMIT` | The provider reports the account's usage as spent | Restore usage capacity |
+| `AUTHENTICATION` | The credentials on this machine no longer authorize the call | Restore authentication |
+| `SERVICE_UNAVAILABLE` | The provider answered with a server error | Wait for recovery |
+| `MODEL_ACCESS_WITHDRAWN` | The account can no longer use the model a step selects, although run preflight verified it | Choose another model for that step in `/options` |
+
+Then rerun the exact same `devloop` command. Do not delete the loop-state JSON:
+it preserves the active issue, workflow step, pass, scheduling phase, round, and
+remaining budgets. A paused run changes no issue outcome and consumes no issue
+attempt budget, so waiting and independent issues are still first in line on the
+rerun. A repeated global failure remains paused and still consumes nothing.
+
+A brief network failure is not a pause. Transport-level failures are retried
+inside the same attempt, under that attempt's Execution Budget and the shared
+retry delay, and the attempt continues if one succeeds.
 
 ## Codex returns invalid JSON
 

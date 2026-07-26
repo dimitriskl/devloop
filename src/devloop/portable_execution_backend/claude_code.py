@@ -4,8 +4,9 @@ Everything Claude-specific about running a Workflow Step attempt lives here: the
 ``claude -p`` command construction and the isolation that makes a Workflow Step
 reproducible, the streaming loop that consumes the CLI's ``stream-json`` event
 stream under the Execution Budget, the translation of that vocabulary into
-neutral step activity, the recognition of a Permission Denial, and the recovery
-of the structured role result from the terminal result.
+neutral step activity, the recognition of a Permission Denial, the recovery of the
+structured role result from the terminal result, and the classification of this
+provider's Run-Wide Blockers and its transient retryable failures.
 
 The invocation this module builds is a decision established by prototype against
 the installed CLI, not one shape among equals. Each non-obvious element carries
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,7 @@ from ..redaction import redact_persisted_evidence
 from ..statusui import Stage, WaitingIndicator
 from ..subprocess_utils import (
     EXECUTION_BUDGET_EXPIRY_RETURNCODE,
+    AttemptExecutionBudget,
     ProcessExecutionBudget,
     process_tree_creation_kwargs,
     reap_process_after_terminal_event,
@@ -50,6 +53,7 @@ from .backend import (
     StepSettingsAuthorization,
     describe_refusals,
 )
+from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import update_checkpoint_for_step_activity
 from .claude_catalog import (
     ClaudeModelCatalogAdapter,
@@ -63,6 +67,10 @@ from .process_stream import (
     write_process_input,
 )
 from .structured_result import extract_json_object
+from .transient_retry import (
+    TRANSIENT_RETRY_DELAY_SECONDS,
+    run_attempt_with_transient_retries,
+)
 
 if TYPE_CHECKING:
     from ..model_catalog import ModelCatalog
@@ -80,6 +88,14 @@ JSON_SCHEMA_DRAFT_DECLARATION_KEY = "$schema"
 # The tool the CLI uses to submit the structured result named by `--json-schema`.
 CLAUDE_STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 CLAUDE_TERMINAL_RESULT_FAILURE_RETURNCODE = 1
+# Where the provider records the HTTP status of the API call that ended the turn.
+# It is ``null`` on every recorded successful attempt, so a present status is the
+# provider's own statement that the call itself failed.
+CLAUDE_API_ERROR_STATUS_KEY = "api_error_status"
+# The rate-limit event's payload, and the field inside it that states the
+# disposition rather than merely describing the window.
+CLAUDE_RATE_LIMIT_INFO_KEY = "rate_limit_info"
+CLAUDE_RATE_LIMIT_STATUS_KEY = "status"
 # The one terminal reason that means the attempt ran to its own conclusion.
 # Anything else the provider reports is a failure, even when it arrives with no
 # error flag and a success subtype. The field is treated as absent-means-completed
@@ -165,6 +181,105 @@ class ClaudeSettingSource(str, Enum):
     USER = "user"
     PROJECT = "project"
     LOCAL = "local"
+
+
+class ClaudeApiErrorStatus(int, Enum):
+    """The closed set of individual API statuses this backend classifies.
+
+    Server errors are deliberately not members. They are a whole status class
+    rather than a handful of codes, and any provider is free to answer with one
+    this set had never heard of, so they are recognised by range instead of being
+    enumerated incompletely.
+    """
+
+    UNAUTHORIZED = 401
+    FORBIDDEN = 403
+    NOT_FOUND = 404
+    RATE_LIMITED = 429
+
+
+class ClaudeRateLimitStatus(str, Enum):
+    """The closed set of dispositions the stream's own rate-limit event carries."""
+
+    ALLOWED = "allowed"
+    ALLOWED_WARNING = "allowed_warning"
+    REJECTED = "rejected"
+
+
+# Every status the provider answers with in this range is a fault on its side that
+# no Issue caused and no Issue can avoid.
+HTTP_SERVER_ERROR_STATUS_RANGE = range(500, 600)
+# The one rate-limit disposition that means the account can spend nothing further.
+# The other two accompany work that ran, and the committed recording of a healthy
+# attempt carries this event with an allowed status — so the event's presence
+# cannot be the signal, or every successful attempt would pause the run.
+CLAUDE_EXHAUSTED_RATE_LIMIT_STATUS = ClaudeRateLimitStatus.REJECTED
+# Which Run-Wide Blocker each individually classified API status is evidence of.
+# 401 and 403 both mean the credentials this machine holds do not authorise the
+# call; 429 is the provider stating the account's usage is spent; 404 for a model
+# that run preflight verified against this same account means its access was
+# withdrawn while the run was in flight.
+CLAUDE_API_ERROR_BLOCKER_KINDS = {
+    ClaudeApiErrorStatus.UNAUTHORIZED: RunWideBlockerKind.AUTHENTICATION,
+    ClaudeApiErrorStatus.FORBIDDEN: RunWideBlockerKind.AUTHENTICATION,
+    ClaudeApiErrorStatus.RATE_LIMITED: RunWideBlockerKind.USAGE_LIMIT,
+    ClaudeApiErrorStatus.NOT_FOUND: RunWideBlockerKind.MODEL_ACCESS_WITHDRAWN,
+}
+# Dev Loop's own words for each classified condition, and the only text a pause
+# ever shows. No provider payload is interpolated into any of them, so a pause
+# notice and a persisted pause reason can carry neither a credential nor a raw
+# provider message however the provider worded its refusal. Each names the remedy
+# that can actually work and ends by pointing at the rerun that resumes the run.
+CLAUDE_RUN_WIDE_BLOCKER_SUMMARIES = {
+    RunWideBlockerKind.USAGE_LIMIT: (
+        "Claude usage is exhausted. Restore usage availability, then rerun the "
+        "same command."
+    ),
+    RunWideBlockerKind.AUTHENTICATION: (
+        "Claude authentication is unavailable. Restore authentication, then "
+        "rerun the same command."
+    ),
+    RunWideBlockerKind.SERVICE_UNAVAILABLE: (
+        "The Claude service is unavailable. Wait for recovery, then rerun the "
+        "same command."
+    ),
+    RunWideBlockerKind.MODEL_ACCESS_WITHDRAWN: (
+        "This account can no longer use the Claude model this Workflow Step "
+        "selects. Choose a model this account can use in /options, then rerun "
+        "the same command."
+    ),
+}
+# The transport-level failures a bounded retry can clear. Each is a condition in
+# which the attempt never reached a terminal result at all, so the provider
+# reported no API status and there is nothing to classify: the connection never
+# opened, dropped mid-turn, or the far side answered with a server error before
+# the turn began. A status that *did* reach the terminal result is the provider's
+# decided answer to a call it received, and is classified rather than repeated.
+CLAUDE_TRANSIENT_FAILURE_PATTERNS = (
+    re.compile(
+        r"\b(econnreset|econnrefused|econnaborted|etimedout|epipe|eai_again|"
+        r"enotfound|eproto)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(socket hang ?up|connection (reset|refused|closed|aborted|error)|"
+        r"network (error|timeout)|fetch failed|request timed out|"
+        r"stream (error|closed))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(internal server error|bad gateway|service unavailable|"
+        r"gateway timeout|overloaded)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:http|api error:?)\s*50[0-4]\b", re.IGNORECASE),
+)
+# What the operator-facing retry notice says failed. It names the invocation, not
+# any captured provider text, so the notice can carry no provider payload.
+CLAUDE_RETRY_SUBJECT = "claude -p connection"
+# The wait between two process runs of one attempt, shared with the Codex CLI
+# Backend so a transient failure costs the same everywhere.
+CLAUDE_TRANSIENT_RETRY_DELAY_SECONDS = TRANSIENT_RETRY_DELAY_SECONDS
 
 
 # Permissions are bypassed because every less permissive mode was found to fail
@@ -405,6 +520,57 @@ def claude_permission_denials(
     return tuple(records)
 
 
+def claude_run_wide_blocker(
+    terminal_result: dict[str, Any] | None,
+    *,
+    stdout: str,
+) -> RunWideBlocker | None:
+    """Recognise a Claude condition that blocks every Issue in the run.
+
+    Two signals decide, and only these two. The first is the API status the
+    terminal result carries: the provider's own statement about the call it
+    received, which is evidence about the account or the service and never about
+    the Issue. The second is the dedicated rate-limit event the stream emits as
+    its own type, which can report exhausted usage before any turn ends.
+
+    Nothing here reads the provider's prose. A diagnostic mentioning a limit is
+    not the same as the provider reporting one, and matching text would let an
+    Issue whose own work merely discussed an outage pause the whole run.
+
+    The returned summary is Dev Loop's own wording for the classified condition,
+    so a pause reason on its way into durable state carries no credential and no
+    raw provider payload by construction rather than by redaction.
+    """
+    kind = _api_error_blocker_kind(terminal_result)
+    if kind is None and _reports_exhausted_rate_limit(stdout):
+        kind = RunWideBlockerKind.USAGE_LIMIT
+    if kind is None:
+        return None
+    return RunWideBlocker(kind=kind, summary=CLAUDE_RUN_WIDE_BLOCKER_SUMMARIES[kind])
+
+
+def is_retryable_claude_transient_failure(*, stdout: str, stderr: str) -> bool:
+    """Whether a bounded retry could clear what ended this failed Claude attempt.
+
+    A classified Run-Wide Blocker is refused outright, which is how the promise
+    that a Run-Wide Blocker is never retried is kept for this backend: the
+    provider has answered the call, and repeating it would spend the attempt's
+    remaining budget to be told the same thing.
+
+    What remains retryable is a transport-level failure, recognised from the
+    attempt's diagnostics rather than from any structured field, because in these
+    conditions the CLI never produced a terminal result to carry one.
+    """
+    if (
+        claude_run_wide_blocker(claude_terminal_result(stdout), stdout=stdout)
+        is not None
+    ):
+        return False
+    return any(
+        pattern.search(stderr) for pattern in CLAUDE_TRANSIENT_FAILURE_PATTERNS
+    )
+
+
 def claude_terminal_result_completed(terminal_result: dict[str, Any]) -> bool:
     """Whether the terminal result reports the attempt reaching completion."""
     if terminal_result.get("is_error") is True:
@@ -492,6 +658,7 @@ def run_streaming_claude_command(
     activity_context: str = "",
     activity_callback: ActivityCallback | None = None,
     execution_budget: ExecutionBudget | None = None,
+    attempt_budget: AttemptExecutionBudget | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one Claude attempt, reporting its stream as neutral step activity.
 
@@ -501,6 +668,11 @@ def run_streaming_claude_command(
     the attempt's diagnostics with which limit expired. Every stream line counts
     as activity, so this provider's dense reasoning heartbeat keeps a working
     attempt alive without any of it having to be displayable.
+
+    ``attempt_budget`` is the one budget a whole Workflow Step attempt shares. A
+    transient failure that costs the attempt a second process must not also hand
+    it a second full deadline, so the caller that retries owns the budget and this
+    process enforces it rather than starting its own.
     """
     process = subprocess.Popen(
         command,
@@ -531,6 +703,7 @@ def run_streaming_claude_command(
             process,
             timeout_seconds=execution_budget.timeout_seconds,
             checkpoint_seconds=execution_budget.checkpoint_seconds,
+            attempt_budget=attempt_budget,
         )
         if execution_budget is not None
         else None
@@ -659,14 +832,20 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
     def invoke(self, request: StepAttemptRequest) -> StepAttemptResult:
         """Run one Workflow Step attempt and recover its structured role result.
 
+        A transient transport failure costs the attempt another process rather
+        than costing the Issue anything, under the same bounded retry policy, the
+        same delay, and the same single Execution Budget the Codex CLI Backend
+        uses. Only once retries are done is the attempt classified.
+
         The terminal result is read before the transcript is handed back, because
         the transcript handed back is the redacted one: chain of thought is elided
         from what gets persisted, while classification still sees the recording
         exactly as the provider produced it.
 
-        No Run-Wide Blocker is reported yet: classifying exhausted usage,
-        invalid authentication and service outages from this provider's API
-        status and rate-limit event is separate work.
+        A reported Run-Wide Blocker deliberately carries no role message. The
+        attempt is not an Issue result at all — it pauses the run — so recovering
+        and persisting a `.last-message.json` for it would leave an Issue outcome
+        on disk that no Workflow Step ever published.
         """
         command = build_claude_command(
             self.claude,
@@ -674,21 +853,43 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
             session_id=new_attempt_session_id(),
             execution_settings=request.execution_settings,
         )
-        process = run_streaming_claude_command(
-            command,
-            input_text=request.prompt,
-            cwd=request.repo_root,
-            stage=request.activity_stage,
-            activity_context=request.activity_context,
+
+        def run_attempt(
+            attempt_budget: AttemptExecutionBudget | None,
+        ) -> subprocess.CompletedProcess[str]:
+            return run_streaming_claude_command(
+                command,
+                input_text=request.prompt,
+                cwd=request.repo_root,
+                stage=request.activity_stage,
+                activity_context=request.activity_context,
+                activity_callback=request.activity_callback,
+                execution_budget=request.execution_budget,
+                attempt_budget=attempt_budget,
+            )
+
+        process = run_attempt_with_transient_retries(
+            run_attempt,
+            is_retryable=self.is_retryable_transient_failure,
+            retry_subject=CLAUDE_RETRY_SUBJECT,
+            retry_delay_seconds=CLAUDE_TRANSIENT_RETRY_DELAY_SECONDS,
+            stdout_path=request.stdout_path,
+            stderr_path=request.stderr_path,
+            write_log=request.write_log,
             activity_callback=request.activity_callback,
             execution_budget=request.execution_budget,
         )
         terminal_result = claude_terminal_result(process.stdout)
+        run_wide_blocker = (
+            claude_run_wide_blocker(terminal_result, stdout=process.stdout)
+            if request.run_wide_blocker_policy is RunWideBlockerPolicy.REPORT
+            else None
+        )
         refusals = claude_permission_denials(terminal_result)
         failure_summary = claude_failure_summary(terminal_result)
         message = (
             ""
-            if process.returncode != 0
+            if run_wide_blocker is not None or process.returncode != 0
             else claude_role_message(terminal_result, stdout=process.stdout)
         )
         process.stdout = redact_claude_reasoning(process.stdout)
@@ -700,9 +901,14 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
         return StepAttemptResult(
             process=process,
             message=message,
+            run_wide_blocker=run_wide_blocker,
             refusals=refusals,
             failure_summary=failure_summary,
         )
+
+    def is_retryable_transient_failure(self, *, stdout: str, stderr: str) -> bool:
+        """Recognise the transport-level Claude failures a bounded retry can clear."""
+        return is_retryable_claude_transient_failure(stdout=stdout, stderr=stderr)
 
     @property
     def provider_command(self) -> str:
@@ -1090,6 +1296,73 @@ def _last_structured_assistant_message(stdout: str) -> str:
             if isinstance(text, str) and extract_json_object(text) is not None:
                 last_message = text
     return last_message
+
+
+def _api_error_blocker_kind(
+    terminal_result: dict[str, Any] | None,
+) -> RunWideBlockerKind | None:
+    """Classify the API status one terminal result reported, if it reported one."""
+    if terminal_result is None:
+        return None
+    status = _http_status(terminal_result.get(CLAUDE_API_ERROR_STATUS_KEY))
+    if status is None:
+        return None
+    try:
+        classified = ClaudeApiErrorStatus(status)
+    except ValueError:
+        classified = None
+    if classified is not None:
+        return CLAUDE_API_ERROR_BLOCKER_KINDS[classified]
+    if status in HTTP_SERVER_ERROR_STATUS_RANGE:
+        return RunWideBlockerKind.SERVICE_UNAVAILABLE
+    return None
+
+
+def _http_status(value: Any) -> int | None:
+    """Parse the provider's API status field into an HTTP status code.
+
+    The field is ``null`` on every recorded successful attempt, and a future CLI
+    could report it as a string, so both a number and a decimal string are
+    accepted. Anything else is not an HTTP status: it is left unclassified rather
+    than crashing an attempt, because a status shape Dev Loop does not recognise
+    is not evidence that the whole run must pause.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _reports_exhausted_rate_limit(stdout: str) -> bool:
+    """Whether a rate-limit event reported the account's usage as spent.
+
+    Only the disposition decides. The committed recording of a healthy attempt
+    carries this event with an allowed status *and* an unrelated rejected overage
+    status, so reading the wrong field — or treating the event's mere presence as
+    exhaustion — would pause the run on an attempt that completed its work.
+    """
+    for line in stdout.splitlines():
+        payload = parse_claude_event(line)
+        if payload is None:
+            continue
+        if (
+            _closed_value(ClaudeEventType, payload.get("type"))
+            is not ClaudeEventType.RATE_LIMIT
+        ):
+            continue
+        info = payload.get(CLAUDE_RATE_LIMIT_INFO_KEY)
+        if not isinstance(info, dict):
+            continue
+        status = _closed_value(
+            ClaudeRateLimitStatus,
+            info.get(CLAUDE_RATE_LIMIT_STATUS_KEY),
+        )
+        if status is CLAUDE_EXHAUSTED_RATE_LIMIT_STATUS:
+            return True
+    return False
 
 
 def _claude_result_text(terminal_result: dict[str, Any] | None) -> str:

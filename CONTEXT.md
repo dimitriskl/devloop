@@ -542,5 +542,5 @@ One additional pass for each unresolved Dependency-Ready Issue in Ready Issue Or
 _Avoid_: Exhaust one blocker before the next, retry sweep
 
 **Run-Wide Blocker**:
-A backend condition such as exhausted usage, invalid authentication, or service unavailability that prevents every Issue from executing. It pauses the run without changing Issue outcomes or consuming Issue attempt budgets.
+A backend condition such as exhausted usage, invalid authentication, service unavailability, or model access withdrawn after run preflight verified it, that prevents every Issue from executing. It pauses the run without changing Issue outcomes or consuming Issue attempt budgets.
 _Avoid_: Issue blocker, failed Issue attempt
