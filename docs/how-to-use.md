@@ -161,8 +161,14 @@ once before it is saved, an alias is stored as the concrete identifier it
 resolved to, and a refusal is shown in the provider's own words.
 `retry-catalog` retries temporary discovery
 failures; any stale cache is labeled display-only and cannot authorize a run.
-Run startup refreshes the catalog and stops with the exact step and unsupported
-setting instead of silently falling back. Fast Off is passed explicitly, so a
+Run startup refreshes the catalog of every Execution Backend the workflow
+actually uses — and only those, so a workflow with no Claude steps never needs
+the Claude CLI and a workflow with no Codex steps never needs Codex signed in —
+then stops with the exact step and unsupported setting instead of silently
+falling back. Each distinct Claude model the run selects is also verified once
+against your own account before the run starts; if that is refused, the message
+names the step and the provider's reason, and the fix is to choose another model
+in `/options`. Fast Off is passed explicitly, so a
 global Codex `/fast` setting cannot change the saved step choice.
 Use `budget` to edit the selected step's separate timeout and checkpoint
 inactivity deadline. Budget changes never alter model, reasoning, or Fast.

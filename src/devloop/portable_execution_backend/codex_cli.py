@@ -689,7 +689,14 @@ class CodexCliExecutionBackend(ExecutionBackend):
         authorizations: Sequence[StepSettingsAuthorization],
         *,
         model_catalog: ModelCatalog,
+        cwd: Path,
     ) -> None:
+        """Authorize Codex-backed Workflow Steps against the live Codex catalog.
+
+        ``cwd`` is deliberately unused: this backend's catalog is already the
+        account-aware answer, so authorization reads the catalog and asks the
+        provider nothing.
+        """
         if not model_catalog.is_fresh:
             raise ValueError(
                 "Run preflight requires a fresh live Codex Model Catalog; cached data "

@@ -153,11 +153,11 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
         adapter.load_catalog.assert_called_once_with(
             interactive_runner.ExecutionBackendId.CODEX_CLI
         )
-        preflight.assert_called_once_with(
-            mock.ANY,
-            catalog,
-            live_catalog,
-        )
+        preflight.assert_called_once()
+        self.assertIs(preflight.call_args.args[1], catalog)
+        # Preflight is handed the per-backend loader itself, not one already
+        # loaded catalog, so it asks only for the backends the Workflow names.
+        self.assertIs(preflight.call_args.args[2], adapter.load_catalog)
         config = run_chat.call_args.kwargs["config"]
         self.assertEqual(
             config.execution_settings.as_tuple(),

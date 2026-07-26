@@ -684,7 +684,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             preflight_step_execution_settings(
                 workflow,
                 default_portable_component_catalog(),
-                self._live_catalog(sol_fast=False),
+                lambda _backend: self._live_catalog(sol_fast=False),
             )
 
     def test_editor_constrains_and_persists_model_effort_and_fast_per_step(self) -> None:
@@ -995,8 +995,8 @@ class StepExecutionSettingsTests(unittest.TestCase):
                     writer,
                     default_portable_component_catalog(),
                     user_workflow_path=configuration_path,
-                    live_model_catalog=self._live_catalog(),
-                    require_codex_preflight=True,
+                    model_catalog_loader=self._live_catalog,
+                    require_preflight=True,
                 )
 
         self.assertNotIn("resolved_workflow", writer.state)
@@ -1035,8 +1035,8 @@ class StepExecutionSettingsTests(unittest.TestCase):
                     writer,
                     catalog,
                     user_workflow_path=configuration_path,
-                    live_model_catalog=self._live_catalog(),
-                    require_codex_preflight=True,
+                    model_catalog_loader=self._live_catalog,
+                    require_preflight=True,
                 )
 
             restored = LoopStateWriter(issue_index)

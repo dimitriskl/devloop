@@ -50,6 +50,7 @@ from .portable_workflow import (
 )
 from .portable_execution_backend import (
     BackendAvailability,
+    BackendModelCatalogAccess,
     ExecutionBackendId,
     execution_backend_availability,
     parse_execution_backend_id,
@@ -100,6 +101,37 @@ def single_backend_model_catalog_loader(
         return load()
 
     return load_for
+
+
+def backend_model_catalog_loader(
+    catalog_access: BackendModelCatalogAccess | None,
+    codex_catalog_loader: Callable[[], ModelCatalog] | None = None,
+) -> ModelCatalogLoader:
+    """The per-backend Model Catalog loader one command can honestly offer.
+
+    Full per-backend access wins whenever the session has it, because it is the
+    only reach that can authorize or edit a Workflow Step naming any backend. A
+    command holding nothing but a Codex loader keeps exactly its current reach:
+    the Codex catalog loads and any other backend is reported unavailable rather
+    than quietly served Codex's models. With neither, every backend is reported
+    unavailable, which is all a command with no provider access can truthfully
+    say.
+    """
+    if catalog_access is not None:
+        return catalog_access.load_catalog
+    if codex_catalog_loader is not None:
+        return single_backend_model_catalog_loader(
+            ExecutionBackendId.CODEX_CLI,
+            codex_catalog_loader,
+        )
+
+    def refuse(requested: ExecutionBackendId) -> ModelCatalog:
+        raise CatalogDiscoveryError(
+            f"No {requested.display_name} Model Catalog access was supplied for "
+            "this command."
+        )
+
+    return refuse
 
 
 @dataclass(frozen=True)

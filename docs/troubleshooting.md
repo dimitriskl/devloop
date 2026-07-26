@@ -101,6 +101,20 @@ If selecting a Claude model is refused, the message is the provider's own: check
 the identifier and whether your account can use that model. The selection is not
 saved, so the step keeps the model it had.
 
+Run startup verifies each distinct Claude model the run selects against your own
+account, once per model. If that verification is refused, the run does not start
+and the message names the Workflow Step, the model, and the provider's own reason.
+`retry-catalog` cannot fix it: the offered Claude entries ship with the bundle, so
+refreshing them changes nothing about what your account may use. Open `/options`
+and choose a model that account can use for that Workflow Step.
+
+If the Claude CLI cannot be started at all, the message says that instead of
+blaming your account, and names the command it tried to start. This is the usual
+shape on a new machine, a CI runner, or a restored configuration directory whose
+saved Workflow Default names Claude. Install or repair the Claude CLI, or give
+that Workflow Step a different Execution Backend in `/options`. Choosing another
+Claude model cannot help, because every one of them needs the same CLI.
+
 ## Dashboard rows wrap, lack color, or repeat in redirected output
 
 Widen the terminal when possible. Narrow layouts window long workflows while

@@ -69,6 +69,7 @@ from .workflow_editor import (
     EditorResult,
     SelectionMenu,
     WorkflowDraft,
+    backend_model_catalog_loader,
     run_workflow_editor,
     single_backend_model_catalog_loader,
 )
@@ -369,21 +370,27 @@ def preflight_analysis_workflow(
 ) -> WorkflowDefinition | None:
     """Return the exact workflow authorized for Analysis after interactive repair.
 
-    ``catalog_access`` supplies the per-backend Model Catalogs `/options` needs;
-    ``model_catalog_loader`` supplies the single catalog this preflight
-    authorizes against. Authorizing a Workflow against every backend it
-    references is separate preflight work.
+    ``catalog_access`` supplies the per-backend Model Catalogs this preflight
+    authorizes against and that `/options` needs; the Workflow is authorized
+    against every Execution Backend it references and no other.
+    ``model_catalog_loader`` is the narrower Codex-only loader some callers hold;
+    with only that, a Workflow Step naming another backend is reported
+    unavailable rather than served Codex's models.
     """
-    load_codex_catalog = model_catalog_loader or _codex_catalog_loader(catalog_access)
+    load_backend_catalog = backend_model_catalog_loader(
+        catalog_access,
+        model_catalog_loader,
+    )
+    preflight_cwd = catalog_access.cwd if catalog_access is not None else None
     while True:
         try:
             workflow = WorkflowDefaultStore(state_path, component_catalog).load()
             planning_step = planning_workflow_step(workflow, component_catalog)
-            live_model_catalog = load_codex_catalog()
             preflight_step_execution_settings(
                 workflow,
                 component_catalog,
-                live_model_catalog,
+                load_backend_catalog,
+                cwd=preflight_cwd,
             )
             if planning_step.execution_settings is None:
                 raise ValueError(
@@ -399,7 +406,8 @@ def preflight_analysis_workflow(
             )
             print(
                 "Recovery: /options opens the Workflow Editor; retry-catalog "
-                "retries live discovery; /quit stops planning."
+                "retries live discovery for every backend this Workflow "
+                "references; /quit stops planning."
             )
         from .portable_runtime import active_portable_runtime
 
@@ -415,7 +423,7 @@ def preflight_analysis_workflow(
                 render=lambda selected: render_app_screen(
                     "Dev Loop > Preflight Recovery\n\n"
                     f"Selected: {selected}\n\n"
-                    "Choose how to recover the Codex execution settings."
+                    "Choose how to recover the Step Execution Settings."
                 ),
                 fallback=lambda: "/quit",
             )
@@ -850,19 +858,6 @@ def read_workflow_value(prompt: str) -> str:
         )
     )
     return read_prompt("> ")
-
-
-def _codex_catalog_loader(
-    catalog_access: BackendModelCatalogAccess | None,
-) -> Callable[[], ModelCatalog]:
-    """The Codex Model Catalog loader this run's catalog access provides."""
-    if catalog_access is None:
-        return lambda: (_ for _ in ()).throw(
-            CatalogDiscoveryError(
-                "No Model Catalog access was supplied for this command."
-            )
-        )
-    return lambda: catalog_access.load_catalog(ExecutionBackendId.CODEX_CLI)
 
 
 def run_options_menu(

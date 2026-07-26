@@ -233,7 +233,13 @@ class _RecordingExecutionBackend(ExecutionBackend):
     def discover_model_catalog(self, *, cwd: Path):
         raise AssertionError("A step attempt must not discover a Model Catalog.")
 
-    def authorize_execution_settings(self, authorizations, *, model_catalog) -> None:
+    def authorize_execution_settings(
+        self,
+        authorizations,
+        *,
+        model_catalog,
+        cwd: Path,
+    ) -> None:
         raise AssertionError("A step attempt must not run preflight authorization.")
 
 
@@ -255,7 +261,13 @@ class _RefusingExecutionBackend(ExecutionBackend):
     def discover_model_catalog(self, *, cwd: Path):
         raise AssertionError("A step attempt must not discover a Model Catalog.")
 
-    def authorize_execution_settings(self, authorizations, *, model_catalog) -> None:
+    def authorize_execution_settings(
+        self,
+        authorizations,
+        *,
+        model_catalog,
+        cwd: Path,
+    ) -> None:
         raise AssertionError("A step attempt must not run preflight authorization.")
 
 
@@ -1072,16 +1084,25 @@ class ClaudeBackendInvokeTests(unittest.TestCase):
             ExecutionBackendId.CLAUDE_CODE,
         )
 
-    def test_model_selection_is_available_while_run_preflight_is_not_yet(self) -> None:
-        """Selecting a model works; authorizing a whole run is separate work."""
-        backend = ClaudeCodeExecutionBackend()
+    def test_browsing_the_bundled_catalog_still_costs_no_provider_call(self) -> None:
+        """Discovery reads the bundle; only a selection or a run pays a call."""
+        backend = ClaudeCodeExecutionBackend(
+            session_factory=lambda _cwd: (_ for _ in ()).throw(
+                AssertionError("Discovery must make no verification call.")
+            ),
+        )
 
         catalog = backend.discover_model_catalog(cwd=Path.cwd())
 
         self.assertIs(catalog.backend, ExecutionBackendId.CLAUDE_CODE)
         self.assertTrue(catalog.models)
-        with self.assertRaises(NotImplementedError):
-            backend.authorize_execution_settings((), model_catalog=catalog)
+        # A Workflow with no Claude-backed Workflow Steps reaches authorization
+        # with nothing to authorize, and must still not call the provider.
+        backend.authorize_execution_settings(
+            (),
+            model_catalog=catalog,
+            cwd=Path.cwd(),
+        )
 
 
 class ClaudePermissionDenialActivityTests(unittest.TestCase):

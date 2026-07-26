@@ -170,8 +170,16 @@ class ExecutionBackend(ABC):
         authorizations: Sequence[StepSettingsAuthorization],
         *,
         model_catalog: ModelCatalog,
+        cwd: Path,
     ) -> None:
-        """Authorize snapshotted settings for run preflight, or refuse clearly."""
+        """Authorize snapshotted settings for run preflight, or refuse clearly.
+
+        ``authorizations`` carries only the Workflow Steps that named this
+        backend, and ``model_catalog`` is this backend's own catalog. ``cwd`` is
+        the repository checkout a backend that has to ask its provider runs that
+        call in, exactly as model discovery does; a backend that can authorize
+        from its catalog alone ignores it.
+        """
 
     @property
     def provider_command(self) -> str:

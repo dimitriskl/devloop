@@ -24,7 +24,7 @@ from .model_catalog import (
 )
 from .portable_execution_backend import (
     BackendModelCatalogAccess,
-    ExecutionBackendId,
+    BackendModelCatalogLoader,
 )
 from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
 from .product_scope import require_portable_target
@@ -73,8 +73,8 @@ from .workflow_defaults import (
     portable_planner_configuration_path,
 )
 from .workflow_editor import (
+    backend_model_catalog_loader,
     run_workflow_editor,
-    single_backend_model_catalog_loader,
 )
 from . import statusui
 from .statusui import Stage
@@ -558,9 +558,6 @@ def _run_devloop_attempt(
                 state_writer,
                 component_catalog,
                 user_workflow_path=portable_planner_configuration_path(),
-                model_catalog_loader=lambda: execution_backend.discover_model_catalog(
-                    cwd=repo_root
-                ),
                 catalog_access=BackendModelCatalogAccess(
                     cwd=repo_root,
                     codex=args.codex,
@@ -1392,10 +1389,17 @@ def resolve_run_workflow(
     catalog: PortableStepComponentCatalog,
     *,
     user_workflow_path: Path | None = None,
-    live_model_catalog: ModelCatalog | None = None,
-    require_codex_preflight: bool = False,
+    model_catalog_loader: BackendModelCatalogLoader | None = None,
+    preflight_cwd: Path | None = None,
+    require_preflight: bool = False,
     workflow_snapshot: WorkflowDefinition | None = None,
 ) -> WorkflowDefinition:
+    """Resolve the exact Workflow a run will use, authorizing it when required.
+
+    ``model_catalog_loader`` is asked for a catalog only for the Execution
+    Backends the resolved Workflow actually references, so a run that uses one
+    provider never reaches for the other.
+    """
     saved_default = (
         WorkflowDefaultStore(user_workflow_path, catalog).load_saved()
         if user_workflow_path is not None
@@ -1416,13 +1420,12 @@ def resolve_run_workflow(
                 ).to_dict(),
                 catalog,
             )
-        if require_codex_preflight:
-            if live_model_catalog is None:
-                raise ValueError("A fresh live Codex Model Catalog is required.")
-            preflight_step_execution_settings(
+        if require_preflight:
+            _authorize_run_workflow(
                 workflow,
                 catalog,
-                live_model_catalog,
+                model_catalog_loader,
+                preflight_cwd,
             )
         if workflow != current_workflow and preferred_workflow is not None:
             workflow = state_writer.refresh_resolved_workflow_execution_preferences(
@@ -1442,15 +1445,33 @@ def resolve_run_workflow(
             )
     else:
         workflow = saved_default or default_portable_workflow()
-    if require_codex_preflight:
-        if live_model_catalog is None:
-            raise ValueError("A fresh live Codex Model Catalog is required.")
-        preflight_step_execution_settings(
+    if require_preflight:
+        _authorize_run_workflow(
             workflow,
             catalog,
-            live_model_catalog,
+            model_catalog_loader,
+            preflight_cwd,
         )
     return state_writer.record_resolved_workflow(workflow, catalog)
+
+
+def _authorize_run_workflow(
+    workflow: WorkflowDefinition,
+    catalog: PortableStepComponentCatalog,
+    model_catalog_loader: BackendModelCatalogLoader | None,
+    preflight_cwd: Path | None,
+) -> None:
+    if model_catalog_loader is None:
+        raise ValueError(
+            "A fresh live Model Catalog is required for every Execution Backend "
+            "this Workflow references."
+        )
+    preflight_step_execution_settings(
+        workflow,
+        catalog,
+        model_catalog_loader,
+        cwd=preflight_cwd,
+    )
 
 
 def resolve_run_workflow_with_repair(
@@ -1458,7 +1479,7 @@ def resolve_run_workflow_with_repair(
     catalog: PortableStepComponentCatalog,
     *,
     user_workflow_path: Path,
-    model_catalog_loader: Callable[[], ModelCatalog],
+    model_catalog_loader: Callable[[], ModelCatalog] | None = None,
     read_line: Callable[[str], str] | None = None,
     write: Callable[[str], None] | None = None,
     workflow_snapshot: WorkflowDefinition | None = None,
@@ -1467,25 +1488,37 @@ def resolve_run_workflow_with_repair(
 ) -> WorkflowDefinition | None:
     """Authorize and snapshot a run, with a reachable terminal repair loop.
 
-    ``catalog_access`` is what `/options` opened from this loop uses for
-    per-backend Model Catalogs and model verification; without it the editor
-    offers the Codex catalog this loop already loads and nothing else.
+    ``catalog_access`` is the full per-backend access a normal session has: every
+    referenced backend's Model Catalog, one verification call per model, and
+    Backend Availability. It authorizes the run and is what `/options` opened
+    from this loop uses. Without it, this loop reaches only the Codex catalog
+    ``model_catalog_loader`` supplies, and a Workflow Step naming another backend
+    is reported unavailable rather than served Codex's models.
+
+    Each turn of the loop reloads the catalog of every backend the Workflow
+    references, so the retry action refreshes all of them rather than only the
+    one that failed.
     """
     reader = read_line or input
     writer = write or print
+    load_backend_catalog = backend_model_catalog_loader(
+        catalog_access,
+        model_catalog_loader,
+    )
+    preflight_cwd = catalog_access.cwd if catalog_access is not None else None
     has_current_snapshot = workflow_snapshot is not None or (
         "resolved_workflow" in state_writer.state
         or "resolved_workflow_hash" in state_writer.state
     )
     while True:
         try:
-            live_model_catalog = model_catalog_loader()
             return resolve_run_workflow(
                 state_writer,
                 catalog,
                 user_workflow_path=user_workflow_path,
-                live_model_catalog=live_model_catalog,
-                require_codex_preflight=True,
+                model_catalog_loader=load_backend_catalog,
+                preflight_cwd=preflight_cwd,
+                require_preflight=True,
                 workflow_snapshot=workflow_snapshot,
             )
         except (CatalogDiscoveryError, ValueError) as error:
@@ -1501,12 +1534,14 @@ def resolve_run_workflow_with_repair(
                     "The Current Run structure is fixed. /options can update "
                     "capabilities for the resumed attempt, and model, effort, Fast "
                     "only if the Execution Backend matches; retry-catalog retries "
-                    "live discovery; /quit stops the run."
+                    "live discovery for every backend this Workflow references; "
+                    "/quit stops the run."
                 )
             else:
                 writer(
                     "Recovery: /options opens the Workflow Editor; retry-catalog "
-                    "retries live discovery; /quit stops the run."
+                    "retries live discovery for every backend this Workflow "
+                    "references; /quit stops the run."
                 )
         action = reader(
             "Preflight action [/options/retry-catalog/quit]: "
@@ -1532,14 +1567,7 @@ def resolve_run_workflow_with_repair(
                 ),
                 catalog=catalog,
                 current_workflow=current_workflow,
-                model_catalog_loader=(
-                    catalog_access.load_catalog
-                    if catalog_access is not None
-                    else single_backend_model_catalog_loader(
-                        ExecutionBackendId.CODEX_CLI,
-                        model_catalog_loader,
-                    )
-                ),
+                model_catalog_loader=load_backend_catalog,
                 verify_model=(
                     catalog_access.verify_model if catalog_access is not None else None
                 ),

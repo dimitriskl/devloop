@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -68,8 +69,39 @@ VERIFICATION_PROMPT = "Reply with OK."
 MAX_REFUSAL_TEXT_LENGTH = 600
 
 
+class ModelVerificationFailure(Enum):
+    """Why one model verification produced no concrete model identifier.
+
+    The two members share nothing but their timing, and they lead an operator to
+    entirely different places: an account refusal is about this one model and is
+    repaired by choosing another, while a provider that never started says
+    nothing about the account or the model and is repaired by installing the CLI
+    or moving the Workflow Step to another Execution Backend. Callers therefore
+    have to tell them apart, and this closed value is how — never by reading the
+    cause back out of the message text.
+    """
+
+    PROVIDER_UNREACHABLE = "provider_unreachable"
+    ACCOUNT_REFUSED = "account_refused"
+
+
 class ModelVerificationError(RuntimeError):
-    """A selected model was refused, reported in the provider's own words."""
+    """A selected model was not verified, carrying which cause stopped it.
+
+    ``failure`` defaults to an account refusal because that is what a provider
+    answering and declining a model is, and it is the only cause a raiser that
+    quotes the provider's own words can be reporting. The unreachable cause is
+    set exactly where Dev Loop knows the provider never answered at all.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure: ModelVerificationFailure = ModelVerificationFailure.ACCOUNT_REFUSED,
+    ) -> None:
+        super().__init__(message)
+        self.failure = failure
 
 
 def bundled_claude_catalog_path() -> Path:
@@ -179,6 +211,10 @@ class ClaudeModelCatalogAdapter:
         Exactly one call, and only what the concrete identifier needs: the
         session is closed as soon as the initialisation event names the model the
         provider resolved. A refusal is raised with the provider's own text.
+
+        An operating-system failure talking to the CLI is reported as the
+        provider being unreachable rather than as a refusal, because the account
+        never got the chance to decide anything.
         """
         requested = model_id.strip()
         if not requested:
@@ -189,7 +225,14 @@ class ClaudeModelCatalogAdapter:
                 resolved = session.resolve_model(requested)
         except ModelVerificationError:
             raise
-        except (OSError, ValueError) as error:
+        except OSError as error:
+            raise ModelVerificationError(
+                "The Claude CLI could not be reached to verify model "
+                f"{requested!r}: "
+                f"{sanitize_terminal_text(error, preserve_newlines=False)}",
+                failure=ModelVerificationFailure.PROVIDER_UNREACHABLE,
+            ) from error
+        except ValueError as error:
             raise ModelVerificationError(
                 f"Could not verify model {requested!r}: "
                 f"{sanitize_terminal_text(error, preserve_newlines=False)}"
@@ -358,9 +401,14 @@ class _ClaudeVerificationSession:
                 **process_tree_creation_kwargs(),
             )
         except OSError as error:
+            # The process never started, so nothing here is evidence about the
+            # account or the model. Saying which command failed to start is what
+            # an operator can act on, and the closed cause keeps every caller
+            # from having to guess that from the text.
             raise ModelVerificationError(
-                f"Could not start the Claude CLI to verify model {model_id!r}: "
-                f"{error}"
+                f"The Claude CLI at {self._claude!r} could not be started: "
+                f"{error}",
+                failure=ModelVerificationFailure.PROVIDER_UNREACHABLE,
             ) from error
         register_process_tree(process)
         self._process = process

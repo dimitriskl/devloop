@@ -36,6 +36,7 @@ from .checkpoint import CheckpointBudget, update_checkpoint_for_step_activity
 from .claude_catalog import (
     ClaudeModelCatalogAdapter,
     ModelVerificationError,
+    ModelVerificationFailure,
     load_bundled_model_catalog,
 )
 from .claude_code import ClaudeCodeExecutionBackend
@@ -43,6 +44,8 @@ from .codex_cli import CodexCliExecutionBackend
 from .registry import (
     REGISTERED_EXECUTION_BACKENDS,
     BackendModelCatalogAccess,
+    BackendModelCatalogLoader,
+    BackendResolver,
     execution_backend_availability,
     registered_execution_backend_ids,
     resolve_execution_backend,
@@ -55,6 +58,8 @@ __all__ = [
     "ActivityCallback",
     "BackendAvailability",
     "BackendModelCatalogAccess",
+    "BackendModelCatalogLoader",
+    "BackendResolver",
     "CheckpointBudget",
     "ClaudeCodeExecutionBackend",
     "ClaudeModelCatalogAdapter",
@@ -63,6 +68,7 @@ __all__ = [
     "ExecutionBackendId",
     "LogWriter",
     "ModelVerificationError",
+    "ModelVerificationFailure",
     "RefusalRecord",
     "RunWideBlocker",
     "RunWideBlockerKind",

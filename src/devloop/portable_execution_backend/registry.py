@@ -19,6 +19,14 @@ from .claude_code import CLAUDE_CLI_COMMAND, ClaudeCodeExecutionBackend
 from .codex_cli import CODEX_CLI_COMMAND, CodexCliExecutionBackend
 
 ExecutionBackendFactory = Callable[[], ExecutionBackend]
+# One Model Catalog per Execution Backend, asked for only when a Workflow Step
+# actually names that backend. Run preflight and the Workflow Editor share this
+# shape so neither can accidentally load a provider the user is not using.
+BackendModelCatalogLoader = Callable[[ExecutionBackendId], ModelCatalog]
+# How a caller turns one Execution Backend identity into its implementation. The
+# registry below is the default; a test injects a backend driven from recorded
+# provider output through the same seam.
+BackendResolver = Callable[[ExecutionBackendId], ExecutionBackend]
 
 REGISTERED_EXECUTION_BACKENDS: Mapping[ExecutionBackendId, ExecutionBackendFactory] = {
     ExecutionBackendId.CODEX_CLI: CodexCliExecutionBackend,

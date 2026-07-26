@@ -319,7 +319,12 @@ backend, and a separate `budget` timeout/checkpoint for every step. The
 here, and changing a step's backend moves its model and reasoning effort to that
 backend's component defaults. Selecting a Claude model verifies it against your
 own account once before it is saved, and a short alias is stored as the pinned
-identifier it resolves to. Its `capabilities` command still lets you
+identifier it resolves to. Starting a run authorizes it against every Execution
+Backend the workflow uses and no other, verifying each distinct Claude model once
+more, so authorizing a run and executing its Workflow Step attempts never need a
+provider the workflow does not name. The post-run self-improvement wiki compiler
+is the one exception: it still runs on Codex, so a fully Codex-free run needs
+`--no-self-improvement-wiki`. Its `capabilities` command still lets you
 search and toggle agents and skills for the selected Step Instance, reset that
 profile to its component defaults, or install new ones from GitHub. Required
 capabilities stay enabled and show the component-contract reason. Applying the

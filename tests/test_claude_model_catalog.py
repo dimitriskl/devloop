@@ -24,6 +24,7 @@ from devloop.model_catalog import (
 from devloop.portable_execution_backend.claude_catalog import (
     ClaudeModelCatalogAdapter,
     ModelVerificationError,
+    ModelVerificationFailure,
     bundled_claude_catalog_path,
     claude_init_event_model,
     load_bundled_model_catalog,
@@ -73,6 +74,19 @@ class _RefusingVerificationSession:
     def resolve_model(self, model_id: str) -> str:
         self._calls.append(model_id)
         raise ModelVerificationError(self._message)
+
+
+class _UnstartableVerificationSession:
+    """A session whose provider never starts, as a missing executable presents it."""
+
+    def __enter__(self) -> _UnstartableVerificationSession:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def resolve_model(self, model_id: str) -> str:
+        raise FileNotFoundError(2, "The system cannot find the file specified")
 
 
 class BundledClaudeCatalogTests(unittest.TestCase):
@@ -210,6 +224,46 @@ class ClaudeModelCatalogAdapterTests(unittest.TestCase):
 
         self.assertEqual(str(refused.exception), refusal)
         self.assertEqual(calls, ["made-up-model"])
+
+    def test_a_refusal_and_an_unreachable_provider_carry_different_causes(
+        self,
+    ) -> None:
+        """The cause is a closed value, so no caller reads it out of the text.
+
+        The two lead to different remedies — another model versus the CLI itself —
+        so a caller that could not tell them apart had to claim one of them for
+        both.
+        """
+        refusing = ClaudeModelCatalogAdapter(
+            "claude",
+            cwd=Path.cwd(),
+            catalog_path=BUNDLED_CATALOG,
+            session_factory=lambda _cwd: _RefusingVerificationSession(
+                "Invalid model name: made-up-model.",
+                [],
+            ),
+        )
+        unreachable = ClaudeModelCatalogAdapter(
+            "claude",
+            cwd=Path.cwd(),
+            catalog_path=BUNDLED_CATALOG,
+            session_factory=lambda _cwd: _UnstartableVerificationSession(),
+        )
+
+        with self.assertRaises(ModelVerificationError) as refused:
+            refusing.verify("made-up-model")
+        with self.assertRaises(ModelVerificationError) as unreached:
+            unreachable.verify("claude-opus-5")
+
+        self.assertIs(
+            refused.exception.failure,
+            ModelVerificationFailure.ACCOUNT_REFUSED,
+        )
+        self.assertIs(
+            unreached.exception.failure,
+            ModelVerificationFailure.PROVIDER_UNREACHABLE,
+        )
+        self.assertIn("could not be reached", str(unreached.exception))
 
     def test_discovery_without_an_executable_is_refused(self) -> None:
         adapter = ClaudeModelCatalogAdapter(

@@ -9,12 +9,15 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from .codex_runner import RoleResult, result_to_dict
 from .issue_pack import Issue
-from .model_catalog import ModelCatalog
+from .model_catalog import CatalogDiscoveryError
 from .portable_execution_backend import (
+    BackendModelCatalogLoader,
+    BackendResolver,
     ExecutionBackendId,
     StepSettingsAuthorization,
     parse_execution_backend_id,
@@ -1544,32 +1547,90 @@ def planning_workflow_step(
 def preflight_step_execution_settings(
     workflow: WorkflowDefinition,
     component_catalog: PortableStepComponentCatalog,
-    model_catalog: ModelCatalog,
+    load_model_catalog: BackendModelCatalogLoader,
+    *,
+    cwd: Path | None = None,
+    resolve_backend: BackendResolver = resolve_execution_backend,
 ) -> None:
-    """Ask the Execution Backend to authorize exact snapshotted settings.
+    """Authorize a Workflow Run against every Execution Backend it references.
 
-    The workflow decides which Workflow Steps are agent-backed; the backend
-    decides whether their settings are runnable and reports every refusal.
+    The workflow decides which Workflow Steps are agent-backed and which
+    Execution Backend each of them names; each backend then decides whether its
+    own Workflow Steps' settings are runnable and reports every refusal in its
+    own words. A refusal is re-raised naming the backend that refused, so a
+    mixed-backend diagnostic says which provider to go and fix.
 
-    One Model Catalog is supplied, so one backend authorizes every agent-backed
-    Workflow Step. Loading a catalog per referenced Execution Backend, and
-    letting each backend authorize only its own Workflow Steps, is separate
-    preflight work.
+    ``load_model_catalog`` is asked for exactly the backends this Workflow
+    references, once each, and is never asked for a backend no Workflow Step
+    names. That laziness is the mechanism behind the guarantee that a Workflow
+    using one provider neither resolves nor invokes the other provider's
+    executable, so it must stay lazy: resolving or loading both backends up front
+    would reintroduce the dependency this ordering exists to remove.
+
+    ``cwd`` is the repository checkout a backend that has to ask its provider
+    runs that call in; a backend authorizing from its catalog alone ignores it.
+    ``resolve_backend`` is the installed registry by default, and is the seam a
+    test injects a backend driven from recorded provider output through.
     """
-    authorizations = tuple(
-        StepSettingsAuthorization(
-            step_display_name=step.display_name,
-            settings=step.execution_settings,
+    checkout = cwd or Path.cwd()
+    for backend_id, authorizations in _authorizations_by_backend(
+        workflow,
+        component_catalog,
+    ):
+        backend = resolve_backend(backend_id)
+        try:
+            backend.authorize_execution_settings(
+                authorizations,
+                model_catalog=load_model_catalog(backend_id),
+                cwd=checkout,
+            )
+        except CatalogDiscoveryError as error:
+            raise CatalogDiscoveryError(_backend_refusal(backend_id, error)) from error
+        except ValueError as error:
+            raise ValueError(_backend_refusal(backend_id, error)) from error
+
+
+def _authorizations_by_backend(
+    workflow: WorkflowDefinition,
+    component_catalog: PortableStepComponentCatalog,
+) -> tuple[tuple[ExecutionBackendId, tuple[StepSettingsAuthorization, ...]], ...]:
+    """Group agent-backed Workflow Steps by the Execution Backend they name.
+
+    This grouping is what "the backends a Workflow actually references" means: a
+    backend missing from it is never resolved and its catalog is never requested.
+    Groups keep Workflow Step order so preflight authorizes, and refuses, in a
+    deterministic order.
+
+    An agent-backed Workflow Step carrying no settings at all names no backend,
+    so it is refused here rather than attributed to some backend that never
+    configured it. A document loaded through :func:`load_portable_workflow`
+    cannot reach that state, because an agent-backed component always supplies
+    Component Execution Defaults.
+    """
+    grouped: dict[ExecutionBackendId, list[StepSettingsAuthorization]] = {}
+    for step in workflow.steps:
+        if not component_catalog.resolve(step.component_id).is_agent_backed:
+            continue
+        settings = step.execution_settings
+        if settings is None:
+            raise ValueError(
+                f"Step {step.display_name!r} has no Step Execution Settings. "
+                "Repair it in /options."
+            )
+        grouped.setdefault(settings.backend, []).append(
+            StepSettingsAuthorization(
+                step_display_name=step.display_name,
+                settings=settings,
+            )
         )
-        for step in workflow.steps
-        if component_catalog.resolve(step.component_id).is_agent_backed
+    return tuple(
+        (backend_id, tuple(authorizations))
+        for backend_id, authorizations in grouped.items()
     )
-    resolve_execution_backend(
-        ExecutionBackendId.CODEX_CLI
-    ).authorize_execution_settings(
-        authorizations,
-        model_catalog=model_catalog,
-    )
+
+
+def _backend_refusal(backend_id: ExecutionBackendId, error: Exception) -> str:
+    return f"{backend_id.display_name} Backend: {error}"
 
 
 def _reachable_step_ids(workflow: WorkflowDefinition) -> frozenset[StepInstanceId]:

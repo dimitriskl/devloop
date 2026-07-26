@@ -51,7 +51,12 @@ from .backend import (
     describe_refusals,
 )
 from .checkpoint import update_checkpoint_for_step_activity
-from .claude_catalog import ClaudeModelCatalogAdapter
+from .claude_catalog import (
+    ClaudeModelCatalogAdapter,
+    ModelVerificationError,
+    ModelVerificationFailure,
+    VerificationSessionFactory,
+)
 from .process_stream import (
     drain_process_stream,
     print_step_activity,
@@ -94,6 +99,22 @@ CLAUDE_REASONING_TEXT_REDACTION = "[reasoning redacted: {characters} characters]
 CLAUDE_REASONING_SIGNATURE_REDACTION = "[reasoning signature redacted]"
 STREAM_THREAD_JOIN_SECONDS = 1.0
 MAX_ACTIVITY_TEXT_LENGTH = 240
+# A quoted provider reason is composed into Dev Loop's own sentences, and the
+# provider does not always end its text. Without these the remedy ran straight on
+# from the provider's last word, so a preflight refusal read as one broken
+# sentence.
+SENTENCE_ENDINGS = ".!?"
+# The remedy each cause of a failed verification actually supports. Neither may
+# borrow the other's: an operator whose CLI never started cannot repair anything
+# by choosing another model, because every model fails identically until the CLI
+# runs.
+UNREACHABLE_PROVIDER_REMEDY = (
+    "Install or repair the Claude CLI, or choose a different Execution Backend "
+    "for that Workflow Step in /options."
+)
+REFUSED_MODEL_REMEDY = (
+    "Choose a model this account can use for that Workflow Step in /options."
+)
 
 _ClosedValueT = TypeVar("_ClosedValueT", bound=Enum)
 
@@ -608,11 +629,28 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
     """The Execution Backend that delegates agent runs to the installed Claude CLI."""
 
     claude: str = CLAUDE_CLI_COMMAND
+    # The bundled reference data and the one verification call are injectable at
+    # the backend boundary for the same reason the catalog adapter makes them
+    # injectable: run authorization can then be driven from recorded provider
+    # output, so no test starts the CLI. Both default to the installed bundle and
+    # a real short-lived session.
+    catalog_path: Path | None = None
+    session_factory: VerificationSessionFactory | None = None
 
     @classmethod
-    def resolved(cls, claude: str = CLAUDE_CLI_COMMAND) -> ClaudeCodeExecutionBackend:
+    def resolved(
+        cls,
+        claude: str = CLAUDE_CLI_COMMAND,
+        *,
+        catalog_path: Path | None = None,
+        session_factory: VerificationSessionFactory | None = None,
+    ) -> ClaudeCodeExecutionBackend:
         """Build the backend with the Claude command resolved to an executable."""
-        return cls(claude=resolve_claude_executable(claude))
+        return cls(
+            claude=resolve_claude_executable(claude),
+            catalog_path=catalog_path,
+            session_factory=session_factory,
+        )
 
     @property
     def backend_id(self) -> ExecutionBackendId:
@@ -678,7 +716,7 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
         `/options` for a Claude-backed Workflow Step costs one path lookup and
         one file read however many models the bundle lists.
         """
-        return ClaudeModelCatalogAdapter(self.claude, cwd=cwd).discover()
+        return self._catalog_adapter(cwd).discover()
 
     def verify_selected_model(self, model_id: str, *, cwd: Path) -> str:
         """Verify one selected model and return the identifier to persist.
@@ -688,19 +726,146 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
         that identifier — never the alias — is what the caller saves, so
         rerunning a Workflow Run cannot silently change which model works.
         """
-        return ClaudeModelCatalogAdapter(self.claude, cwd=cwd).verify(model_id)
+        return self._catalog_adapter(cwd).verify(model_id)
 
     def authorize_execution_settings(
         self,
         authorizations: Sequence[StepSettingsAuthorization],
         *,
         model_catalog: ModelCatalog,
+        cwd: Path,
     ) -> None:
-        raise NotImplementedError(
-            "The Claude Code Backend cannot authorize a run yet. Verifying each "
-            "selected Claude model against the operator's own account arrives "
-            "with Claude-backed run preflight."
+        """Authorize Claude-backed Workflow Steps before any budget is spent.
+
+        Each *distinct* model the Run Snapshot selects costs exactly one
+        verification call, however many Workflow Steps select it: the selections
+        are collected first and each model is verified once, so a five-step
+        Workflow on two models pays two calls rather than five. It is the same
+        roughly one-second, negligible-cost call a selection pays in `/options`.
+
+        The account, not the bundle, decides. A model the account can no longer
+        use fails here — before the first attempt and before any attempt budget
+        is spent — and the refusal names the Workflow Step that selects it, the
+        provider's own reason, and `/options` as the place to choose another
+        model. Refreshing the catalog cannot fix that, because the bundled
+        entries are not what refused it.
+
+        A CLI that never started is a different failure and gets a different
+        diagnosis. It is also the likelier one — a fresh machine, a CI runner, or
+        a restored User Configuration Directory can all hold a Claude-backed
+        saved Workflow Default with no Claude CLI on the executable search path —
+        and nothing about it is evidence about the account, so it is never
+        reported as one.
+
+        Fast is not checked: Step Execution Settings already refuse Fast ON for a
+        backend that advertises none, so this backend can never be handed it.
+        """
+        if not model_catalog.is_fresh:
+            raise ValueError(
+                "Run preflight requires a fresh live Claude Code Model Catalog; "
+                "cached data is display-only. Start the run again once the "
+                "Claude CLI is installed and reachable."
+            )
+        selections = self._selected_models(authorizations, model_catalog)
+        adapter = self._catalog_adapter(cwd)
+        for model, display_name in selections.items():
+            try:
+                adapter.verify(model)
+            except ModelVerificationError as error:
+                raise ValueError(
+                    _verification_refusal(display_name, model, error)
+                ) from error
+
+    def _catalog_adapter(self, cwd: Path) -> ClaudeModelCatalogAdapter:
+        return ClaudeModelCatalogAdapter(
+            self.claude,
+            cwd=cwd,
+            catalog_path=self.catalog_path,
+            session_factory=self.session_factory,
         )
+
+    @staticmethod
+    def _selected_models(
+        authorizations: Sequence[StepSettingsAuthorization],
+        model_catalog: ModelCatalog,
+    ) -> dict[str, str]:
+        """Each distinct selected model, keyed to the first step that selects it.
+
+        Every Workflow Step's settings are validated here, before any
+        verification call is made, so a Workflow Step configured against a
+        reasoning effort this backend does not accept is refused without spending
+        a call. The retained display name is the first Workflow Step selecting
+        that model, which is the one a refusal names.
+        """
+        selections: dict[str, str] = {}
+        for authorization in authorizations:
+            display_name = authorization.step_display_name
+            settings = authorization.settings
+            if settings is None:
+                raise ValueError(
+                    f"Step {display_name!r} has no Step Execution Settings. "
+                    "Repair it in /options."
+                )
+            if settings.backend is not ExecutionBackendId.CLAUDE_CODE:
+                raise ValueError(
+                    "The Claude Code Backend cannot authorize Step Execution "
+                    f"Settings naming the {settings.backend.display_name} "
+                    "Backend."
+                )
+            try:
+                model = model_catalog.selectable_model(settings.model)
+            except ValueError as error:
+                raise ValueError(
+                    f"Step {display_name!r} selects Claude model "
+                    f"{settings.model!r}, which this backend's Model Catalog "
+                    "does not offer. Choose a model in /options."
+                ) from error
+            if settings.reasoning_effort not in model.reasoning_efforts:
+                offered = ", ".join(model.reasoning_efforts)
+                raise ValueError(
+                    f"Step {display_name!r} selects unsupported reasoning effort "
+                    f"{settings.reasoning_effort!r} for model {settings.model!r}. "
+                    f"Choose one of {offered} in /options."
+                )
+            selections.setdefault(settings.model, display_name)
+        return selections
+
+
+def _verification_refusal(
+    display_name: str,
+    model: str,
+    error: ModelVerificationError,
+) -> str:
+    """The preflight diagnosis one failed verification actually supports.
+
+    The two causes are worded apart deliberately. A single wording had to claim
+    one of them for both, and claiming the account for a CLI that never started
+    contradicted its own quoted reason and sent the operator to `/options` to pick
+    another model — a loop in which every model fails the same way. Each cause
+    now states only what it knows and offers a remedy that can work.
+    """
+    if error.failure is ModelVerificationFailure.PROVIDER_UNREACHABLE:
+        head = (
+            f"Step {display_name!r} selects Claude model {model!r}, which could "
+            "not be verified on this machine"
+        )
+        remedy = UNREACHABLE_PROVIDER_REMEDY
+    else:
+        head = (
+            f"Step {display_name!r} selects Claude model {model!r}, which this "
+            "account cannot use"
+        )
+        remedy = REFUSED_MODEL_REMEDY
+    reason = _ended_sentence(str(error))
+    return f"{head}: {reason} {remedy}" if reason else f"{head}. {remedy}"
+
+
+def _ended_sentence(text: str) -> str:
+    """A quoted reason ended so whatever Dev Loop appends starts a new sentence."""
+    reason = text.strip()
+    if not reason or reason[-1] in SENTENCE_ENDINGS:
+        return reason
+    return f"{reason}."
 
 
 def _system_activity(payload: dict[str, Any]) -> tuple[StepActivityEvent, ...]:

@@ -58,12 +58,12 @@ translation, structured-message recovery, and Codex Run-Wide Blocker
 classification; `codex_events.py` remains the Codex wire-format parser.
 `claude_code.py` owns `claude -p` command construction and its reproducibility
 isolation, the `stream-json` streaming loop under the Execution Budget, event
-translation, Permission Denial recognition, and structured-result recovery, and
-reaches its Model Catalog through `claude_catalog.py`. Two Claude-side pieces are
-still separate work: classifying Claude Run-Wide Blockers, and
-`authorize_execution_settings`, which raises `NotImplementedError` so a
-Claude-backed run cannot be authorized at preflight. This package must not import
-any CodexCLI package, which `tests/test_product_boundary.py` enforces.
+translation, Permission Denial recognition, structured-result recovery, and run
+authorization, and reaches its Model Catalog and its one verification call
+through `claude_catalog.py`; both are injectable on the backend so run
+authorization is testable from recorded provider output. Classifying Claude
+Run-Wide Blockers is still separate work. This package must not import any
+CodexCLI package, which `tests/test_product_boundary.py` enforces.
 
 The deep execution seam is `PortableWorkflowExecutor.run`: callers provide a
 resolved Workflow Definition, component catalog, and role-runner adapter. The
@@ -109,11 +109,22 @@ model selection costs one verification call that resolves a short alias to the
 concrete pinned identifier the session-initialisation event reports, which is the
 only identifier ever persisted. Cached data exists only to render the editor; its
 path is backend-qualified, with the Codex cache keeping its historical name, and a
-cache recorded for one backend is refused for another. Before a new run, `cli.py`
-requires a fresh catalog, and `preflight_step_execution_settings` asks the
-registered Execution Backend to authorize the exact model, reasoning effort, and
-Fast preference for every agent-backed instance. Authorization names the affected Step
-Display Name and setting and never falls back. Command construction in
+cache recorded for one backend is refused for another. Before a new run,
+`preflight_step_execution_settings` groups the agent-backed Workflow Steps by the
+Execution Backend each one names and asks that backend to authorize its own
+steps' exact model, reasoning effort, and Fast preference against its own fresh
+catalog. Both the backend and its catalog are resolved lazily, per referenced
+backend, which is what keeps a Workflow that uses one provider independent of the
+other provider's installation and sign-in; `tests/test_claude_run_preflight.py`
+asserts both directions by failing if an unreferenced backend is resolved, if its
+catalog is requested, if its command is looked up on the executable search path,
+or if any provider process starts.
+The Codex CLI Backend authorizes from its account-aware catalog alone. The Claude
+Code Backend verifies each *distinct* model the Run Snapshot selects exactly once,
+however many Workflow Steps select it, and a model the account cannot use is
+refused before any attempt budget is spent. Authorization names the affected Step
+Display Name and setting, is re-raised naming the backend that refused, and never
+falls back. Command construction in
 `portable_execution_backend/codex_cli.py` passes model, reasoning effort, and
 explicit Fast On or Off from the currently authorized run definition. Timeouts
 and checkpoint deadlines remain separate Execution Budget values.

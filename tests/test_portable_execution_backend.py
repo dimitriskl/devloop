@@ -133,7 +133,13 @@ class _RecordingExecutionBackend(ExecutionBackend):
     def discover_model_catalog(self, *, cwd: Path):
         raise AssertionError("A step attempt must not discover a Model Catalog.")
 
-    def authorize_execution_settings(self, authorizations, *, model_catalog) -> None:
+    def authorize_execution_settings(
+        self,
+        authorizations,
+        *,
+        model_catalog,
+        cwd: Path,
+    ) -> None:
         raise AssertionError("A step attempt must not run preflight authorization.")
 
 

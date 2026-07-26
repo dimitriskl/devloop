@@ -40,8 +40,22 @@ Also in this change:
   Claude CLI, and its models come from `catalogs/claude-code-models.json` as
   Bundled Catalog Reference Data: browsing costs nothing, one selection costs one
   verification call, a short alias is saved as the concrete identifier that call
-  reports, and a refusal is shown in the provider's own words. Authorizing a
-  Claude-backed run at preflight is still separate work.
+  reports, and a refusal is shown in the provider's own words.
+- Run preflight now authorizes a Workflow against every Execution Backend it
+  references, and only those. Codex-backed Workflow Steps are authorized exactly
+  as before, and each distinct Claude model a run selects is verified once
+  against the operator's own account before any attempt budget is spent; a
+  refusal names the Workflow Step, the model, the provider's own reason, and
+  `/options`. A Claude CLI that cannot be started is reported as exactly that,
+  with installing or repairing the CLI or moving the Workflow Step to another
+  Execution Backend as its remedies, rather than as something the account
+  refused. A Workflow with no Claude-backed Workflow Steps never resolves or
+  invokes the Claude CLI, and authorizing a Workflow with no Codex-backed
+  Workflow Steps loads no Codex Model Catalog, invokes no Codex CLI, and needs no
+  signed-in Codex session — the runner still resolves the configured `--codex`
+  command once as its own default backend. The interactive repair loop keeps its
+  choices and refreshes every referenced backend's catalog on retry, naming the
+  backend that refused.
 
 ## v0.1.0 - 2026-07-17
 
