@@ -153,7 +153,12 @@ choose its Execution Backend, then `model`, `reasoning`, or `fast` to choose its
 execution settings for that backend. The `backend` menu annotates each backend
 with whether it is installed on this machine, and changing the backend moves the
 step's model and reasoning effort to that backend's component defaults so the
-step stays valid. Codex choices are filtered by the live Codex CLI Model
+step stays valid. A step is only ever offered its own backend's models, so the
+model list states which backend it belongs to and carries a `backend` choice that
+names the other backend and whether it is installed; taking it moves the step and
+re-opens the list on that backend's models, so a Codex CLI list is not a dead end
+when you came looking for a Claude model. Codex choices are filtered by the live
+Codex CLI Model
 Catalog. Claude choices come from the bundled Claude catalog, which offers
 pinned identifiers, short aliases, and an entry for typing an identifier the
 bundle does not list; the model you pick is verified against your own account

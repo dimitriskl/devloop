@@ -36,6 +36,15 @@ Also in this change:
   availability on this machine. Changing it moves that step's model and reasoning
   effort to the new backend's Component Execution Defaults, and `model`,
   `reasoning`, and `fast` then operate on that backend's Model Catalog.
+- The model list itself now reaches the other backend's models. It states which
+  Execution Backend the Workflow Step runs on and carries a `backend` entry that
+  names the other backend and its availability; choosing it moves the step and
+  re-opens the list on that backend's Model Catalog, so a Claude model is two
+  selections from a Codex CLI list instead of unreachable from it. The same route
+  exists in redirected output as a typed word. With more than two Execution
+  Backends registered, the entry opens the annotated chooser first. A Model
+  Catalog that cannot be discovered names the Execution Backend as a way out too,
+  since that message replaces the list entirely.
 - The Claude Code Backend executes a Workflow Step attempt through the installed
   Claude CLI, and its models come from `catalogs/claude-code-models.json` as
   Bundled Catalog Reference Data: browsing costs nothing, one selection costs one

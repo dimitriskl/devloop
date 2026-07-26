@@ -53,6 +53,7 @@ from devloop.portable_workflow import (
 )
 from devloop.workflow_defaults import WorkflowDefaultStore
 from devloop.workflow_editor import (
+    BACKEND_SWITCH_KEY,
     EDITOR_COMMAND_GROUPS,
     FREE_TEXT_MODEL_KEY,
     WORKFLOW_ACTIONS,
@@ -2552,6 +2553,163 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertEqual(
             stored.step(ANALYSIS_STEP_ID).execution_settings.as_tuple(),
             expected.as_tuple(),
+        )
+
+    def test_the_model_list_switches_backend_and_offers_that_backends_models(
+        self,
+    ) -> None:
+        """The list's own entry names one backend, so it must deliver that backend.
+
+        A Workflow Step is only ever offered its own backend's models, so someone
+        looking for a Claude model in a Codex CLI list finds nothing and no
+        indication that anything else exists. The entry that fixes that promises
+        to run the step on the named backend and choose its model, so it must not
+        stop at asking the same question again.
+        """
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier()
+        recorder = _MenuRecorder(
+            {
+                "Model · Codex CLI": BACKEND_SWITCH_KEY,
+                "Model · Claude Code": "1",
+            }
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        codex_menu = recorder.menu("Model · Codex CLI")
+        offered = dict(codex_menu.options)
+        self.assertIn(BACKEND_SWITCH_KEY, offered)
+        self.assertIn("Claude Code", offered[BACKEND_SWITCH_KEY])
+        self.assertIn("Codex CLI", " ".join(codex_menu.description))
+        self.assertEqual(
+            [menu.title for menu in recorder.menus if menu.title.startswith("Model")],
+            [
+                "Model · Codex CLI · Analysis",
+                "Model · Claude Code · Analysis",
+            ],
+        )
+        # The intermediate chooser is what the label promised to skip.
+        self.assertNotIn(
+            "Execution Backend",
+            [menu.title.split(" · ")[0] for menu in recorder.menus],
+        )
+        claude_model = _bundled_claude_catalog().models[0].model_id
+        self.assertEqual(
+            verifier.calls,
+            [(ExecutionBackendId.CLAUDE_CODE, claude_model)],
+        )
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.backend,
+            ExecutionBackendId.CLAUDE_CODE,
+        )
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            claude_model,
+        )
+
+    def test_the_model_list_route_names_a_backend_that_is_not_installed(self) -> None:
+        """The direct route must not hide what the annotated chooser would show."""
+        component_catalog = default_portable_component_catalog()
+        recorder = _MenuRecorder({})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(claude_installed=False),
+                select_option=recorder.select,
+            )
+
+        label = dict(recorder.menu("Model · Codex CLI").options)[BACKEND_SWITCH_KEY]
+        self.assertIn("Claude Code", label)
+        self.assertIn("not installed", label)
+
+    def test_an_unavailable_catalog_still_points_at_the_execution_backend(self) -> None:
+        """With no catalog the model list never opens, so the message must route.
+
+        Someone whose Codex CLI cannot serve a catalog has no way through the
+        model list at all, and that is exactly the person who needs to be told
+        another Execution Backend exists.
+        """
+        component_catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
+                    CatalogDiscoveryError("codex unavailable")
+                ),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+            )
+
+        message = next(
+            entry
+            for entry in output
+            if entry.startswith("No Codex CLI Model Catalog is available")
+        )
+        self.assertIn("Execution Backend", message)
+
+    def test_the_non_tty_model_list_documents_the_backend_switch(self) -> None:
+        """Line-by-line output must offer the same route, typed as a word."""
+        component_catalog = default_portable_component_catalog()
+        rendered_picker = render_model_picker(_codex_catalog(), terminal_width=100)
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(
+                    ["1", "model", BACKEND_SWITCH_KEY, "1", "apply"]
+                ).read_line,
+                write=output.append,
+                terminal_width=100,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        rendered = "\n".join(output)
+        self.assertIn(BACKEND_SWITCH_KEY, rendered_picker)
+        self.assertIn("Execution Backend", rendered_picker)
+        self.assertIn("Claude Code Models", rendered)
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.as_tuple()[:2],
+            (
+                ExecutionBackendId.CLAUDE_CODE,
+                _bundled_claude_catalog().models[0].model_id,
+            ),
         )
 
     def test_opening_options_for_a_claude_step_costs_no_verification_call(self) -> None:

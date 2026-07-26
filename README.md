@@ -317,7 +317,11 @@ agent-backed step, `model`, `reasoning`, and `fast` choices scoped to that
 backend, and a separate `budget` timeout/checkpoint for every step. The
 `backend` menu annotates each Execution Backend with whether it is installed
 here, and changing a step's backend moves its model and reasoning effort to that
-backend's component defaults. Selecting a Claude model verifies it against your
+backend's component defaults. Because a step is only ever offered its own
+backend's models, the model list names that backend and carries a `backend` entry
+that moves the step to the other backend and re-opens on its models, so a Claude
+model is two selections away from a Codex CLI list. Selecting a Claude model
+verifies it against your
 own account once before it is saved, and a short alias is stored as the pinned
 identifier it resolves to. Starting a run authorizes it against every Execution
 Backend the workflow uses and no other, verifying each distinct Claude model once

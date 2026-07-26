@@ -79,6 +79,11 @@ BackendAvailabilityProbe = Callable[[], "tuple[BackendAvailability, ...]"]
 # The menu key for entering an identifier the catalog does not list. It is a
 # word rather than a sentinel so the non-TTY fallback stays typeable.
 FREE_TEXT_MODEL_KEY = "other"
+# The menu key that leaves the model list for the Execution Backend chooser. A
+# Workflow Step is only offered its own backend's models, so without this the
+# model list is a dead end for anyone looking for another backend's models. It
+# matches the editor's own 'backend' command so both surfaces read the same.
+BACKEND_SWITCH_KEY = "backend"
 
 
 def single_backend_model_catalog_loader(
@@ -1723,6 +1728,15 @@ class _WorkflowEditorSession:
         to that backend's Component Execution Defaults, so the step stays valid
         without further edits.
         """
+        self._choose_execution_backend()
+
+    def _choose_execution_backend(self) -> bool:
+        """Ask which Execution Backend to move to, reporting whether it moved.
+
+        Separate from the dispatched command because the model list needs the
+        answer: it re-opens itself on the new backend's catalog only if the
+        Workflow Step actually moved.
+        """
         step = self._draft.workflow.step(self._future_selected_step_id)
         component = self._catalog.resolve(step.component_id)
         if not component.is_agent_backed or step.execution_settings is None:
@@ -1730,7 +1744,7 @@ class _WorkflowEditorSession:
                 f"{step.display_name!r} is local deterministic; it runs no "
                 "Execution Backend."
             )
-            return
+            return False
         current = step.execution_settings.backend
         availability = {
             report.backend: report for report in self._backend_availability()
@@ -1764,28 +1778,38 @@ class _WorkflowEditorSession:
             ),
         )
         if choice.casefold() == "cancel":
-            return
+            return False
         try:
             selected = parse_execution_backend_id(choice)
         except ValueError:
             self._message("Choose an installed Execution Backend, or cancel.")
-            return
+            return False
         if selected is current:
             self._message(
                 f"{step.display_name} already runs on the {current.display_name} "
                 "Backend."
             )
-            return
+            return False
+        return self._move_step_to_backend(step, component, selected, availability)
+
+    def _move_step_to_backend(
+        self,
+        step: WorkflowStep,
+        component: PortableStepComponent,
+        selected: ExecutionBackendId,
+        availability: Mapping[ExecutionBackendId, BackendAvailability],
+    ) -> bool:
+        """Move one Workflow Step to a backend's Component Execution Defaults."""
         try:
             defaults = component.execution_defaults_for(selected)
         except ValueError as error:
             self._message(f"Cannot change Execution Backend: {error}")
-            return
+            return False
         try:
             self._draft.set_execution_settings(step.instance_id, defaults)
         except ValueError as error:
             self._message(f"Cannot change Execution Backend: {error}")
-            return
+            return False
         self._ensure_model_catalog(selected)
         report = availability.get(selected)
         warning = (
@@ -1798,65 +1822,147 @@ class _WorkflowEditorSession:
             f"with model {defaults.model} and effort {defaults.reasoning_effort}."
             f"{warning}"
         )
+        return True
 
     def _set_model(self) -> None:
-        selection = self._selected_step_context()
-        if selection is None:
-            return
-        step, settings, model_catalog = selection
-        backend = model_catalog.backend
-        current_position = next(
-            (
-                index
-                for index, model in enumerate(model_catalog.models, start=1)
-                if model.model_id == settings.model
-            ),
-            1,
-        )
-        free_text_option: tuple[tuple[str, str], ...] = (
-            ((FREE_TEXT_MODEL_KEY, "Enter another model identifier…"),)
-            if model_catalog.accepts_free_text_model
-            else ()
-        )
-        raw_choice = self._choose_menu(
-            SelectionMenu(
-                title=f"Model · {backend.display_name} · {step.display_name}",
-                options=(
-                    *(
-                        (str(index), _model_option_label(model))
-                        for index, model in enumerate(model_catalog.models, start=1)
+        """Choose this Workflow Step's model, or the backend whose models it wants.
+
+        Re-opened on the new backend's catalog after a change of backend, because
+        the entry that offers the change promises a model on the other side of it.
+        Each pass still costs one explicit selection, so it cannot spin.
+        """
+        while True:
+            selection = self._selected_step_context()
+            if selection is None:
+                return
+            step, settings, model_catalog = selection
+            backend = model_catalog.backend
+            current_position = next(
+                (
+                    index
+                    for index, model in enumerate(model_catalog.models, start=1)
+                    if model.model_id == settings.model
+                ),
+                1,
+            )
+            free_text_option: tuple[tuple[str, str], ...] = (
+                ((FREE_TEXT_MODEL_KEY, "Enter another model identifier…"),)
+                if model_catalog.accepts_free_text_model
+                else ()
+            )
+            raw_choice = self._choose_menu(
+                SelectionMenu(
+                    title=f"Model · {backend.display_name} · {step.display_name}",
+                    options=(
+                        *(
+                            (str(index), _model_option_label(model))
+                            for index, model in enumerate(
+                                model_catalog.models,
+                                start=1,
+                            )
+                        ),
+                        *free_text_option,
+                        *self._backend_switch_option(backend),
+                        ("cancel", "Back without changing the model"),
                     ),
-                    *free_text_option,
-                    ("cancel", "Back without changing the model"),
+                    default_key=str(current_position),
+                    cancel_key="cancel",
+                    description=(
+                        (
+                            f"Choose the {backend.display_name} model for this "
+                            "workflow step."
+                        ),
+                        (
+                            f"This step runs on the {backend.display_name} Backend; "
+                            "only its own models are listed."
+                        ),
+                        "Catalog source: live",
+                    ),
                 ),
-                default_key=str(current_position),
-                cancel_key="cancel",
-                description=(
-                    f"Choose the {backend.display_name} model for this workflow step.",
-                    "Catalog source: live",
+                fallback_prompt="Model number (or cancel): ",
+                fallback_content=render_model_picker(
+                    model_catalog,
+                    terminal_width=self._terminal_width,
                 ),
-            ),
-            fallback_prompt="Model number (or cancel): ",
-            fallback_content=render_model_picker(
-                model_catalog,
-                terminal_width=self._terminal_width,
-            ),
-        )
-        if raw_choice.casefold() == "cancel":
+            )
+            if raw_choice.casefold() == "cancel":
+                return
+            if raw_choice.casefold() == BACKEND_SWITCH_KEY:
+                if not self._change_backend_from_model_list(step, backend):
+                    return
+                continue
+            if raw_choice.casefold() == FREE_TEXT_MODEL_KEY:
+                requested = self._read_free_text_model(backend)
+                if requested is None:
+                    return
+            else:
+                position = _parse_one_based_integer(raw_choice)
+                if position is None or position > len(model_catalog.models):
+                    self._message(
+                        f"Choose a {backend.display_name} model by number, or cancel."
+                    )
+                    return
+                requested = model_catalog.models[position - 1].model_id
+            self._save_verified_model(step, settings, model_catalog, requested)
             return
-        if raw_choice.casefold() == FREE_TEXT_MODEL_KEY:
-            requested = self._read_free_text_model(backend)
-            if requested is None:
-                return
-        else:
-            position = _parse_one_based_integer(raw_choice)
-            if position is None or position > len(model_catalog.models):
-                self._message(
-                    f"Choose a {backend.display_name} model by number, or cancel."
-                )
-                return
-            requested = model_catalog.models[position - 1].model_id
-        self._save_verified_model(step, settings, model_catalog, requested)
+
+    def _backend_switch_option(
+        self,
+        backend: ExecutionBackendId,
+    ) -> tuple[tuple[str, str], ...]:
+        """The model list's own route to the models of another backend.
+
+        Annotated from Backend Availability when it names a single destination,
+        so this shorter route cannot hide what the full chooser would have shown.
+        """
+        alternatives = _alternative_backends(backend)
+        if not alternatives:
+            return ()
+        if len(alternatives) > 1:
+            return (
+                (BACKEND_SWITCH_KEY, "Change Execution Backend, then choose a model…"),
+            )
+        destination = alternatives[0]
+        report = next(
+            (
+                candidate
+                for candidate in self._backend_availability()
+                if candidate.backend is destination
+            ),
+            None,
+        )
+        caveat = (
+            ""
+            if report is not None and report.installed
+            else f" ({_backend_availability_annotation(report)})"
+        )
+        label = (
+            f"Run this step on {destination.display_name}{caveat} and choose "
+            "its model…"
+        )
+        return ((BACKEND_SWITCH_KEY, label),)
+
+    def _change_backend_from_model_list(
+        self,
+        step: WorkflowStep,
+        current: ExecutionBackendId,
+    ) -> bool:
+        """Take the model list's own route to another Execution Backend.
+
+        With exactly one other backend the list's entry already names it, so that
+        label is honoured literally rather than asking the same question twice.
+        With more than one there is a real choice left to make, so the annotated
+        chooser makes it.
+        """
+        alternatives = _alternative_backends(current)
+        if len(alternatives) != 1:
+            return self._choose_execution_backend()
+        return self._move_step_to_backend(
+            step,
+            self._catalog.resolve(step.component_id),
+            alternatives[0],
+            {report.backend: report for report in self._backend_availability()},
+        )
 
     def _read_free_text_model(self, backend: ExecutionBackendId) -> str | None:
         requested = self._read_line(
@@ -2190,7 +2296,7 @@ class _WorkflowEditorSession:
             self._message(
                 f"No {backend.display_name} Model Catalog is available. Use Retry "
                 f"Catalog after checking the {backend.display_name} installation "
-                "and authentication."
+                "and authentication, or change this step's Execution Backend."
             )
             return None
         if not catalog.is_fresh:
@@ -3100,6 +3206,13 @@ def _backend_option_label(
     return f"{backend.display_name} · {annotation}{marker}"
 
 
+def _alternative_backends(
+    current: ExecutionBackendId,
+) -> tuple[ExecutionBackendId, ...]:
+    """Every Execution Backend a Workflow Step could move to from here."""
+    return tuple(other for other in ExecutionBackendId if other is not current)
+
+
 def _model_option_label(model: CatalogModel) -> str:
     """One model's menu label, marking an alias as the convenience it is."""
     suffix = " (alias)" if model.is_alias else ""
@@ -3123,6 +3236,13 @@ def render_model_picker(
         lines.append(
             f"Enter {FREE_TEXT_MODEL_KEY} to type a model identifier this bundle "
             "does not list, or cancel to keep the current model."
+        )
+    if _alternative_backends(catalog.backend):
+        # Short enough to survive the 80-column fit: the route must not be the
+        # part that gets truncated away.
+        lines.append(
+            f"Enter {BACKEND_SWITCH_KEY} to change the Execution Backend and "
+            "choose its model."
         )
     return "\n".join(_fit_to_width(line, width) for line in lines)
 
