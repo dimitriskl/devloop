@@ -27,6 +27,7 @@ from devloop.portable_execution_backend import (
     ExecutionBackendId,
     StepActivityEvent,
     StepActivityKind,
+    StepAttemptProvenance,
     StepAttemptRequest,
     StepAttemptResult,
     claude_code,
@@ -34,12 +35,20 @@ from devloop.portable_execution_backend import (
     update_checkpoint_for_step_activity,
 )
 from devloop.portable_workflow import (
+    DEVELOPMENT_STEP_ID,
     ExecutionBudget,
     FastPreference,
     StepExecutionSettings,
+    StepRuntimeState,
+    StepRuntimeStatus,
+    default_portable_component_catalog,
+    default_portable_workflow,
 )
-from devloop.statusui import Stage
-from devloop.step_configuration import STEP_GUIDANCE_PRECEDENCE
+from devloop.statusui import IssueDashboard, Stage, project_workflow_progress
+from devloop.step_configuration import (
+    MODEL_MISMATCH_LABEL,
+    STEP_GUIDANCE_PRECEDENCE,
+)
 from devloop.subprocess_utils import EXECUTION_BUDGET_EXPIRY_RETURNCODE
 from devloop.templates import BundleContext, Preset
 
@@ -1776,6 +1785,52 @@ class PersistedEvidenceRedactionInvariantTests(unittest.TestCase):
 
         self.assertEqual(self._persisted(recorded), recorded)
 
+    def test_a_whole_attempt_persists_neither_stream_with_its_secrets_intact(
+        self,
+    ) -> None:
+        """Both durable streams of one real attempt, asserted end to end.
+
+        The attempt's own stderr is the case worth pinning down: it never passes
+        through any backend-side rewriting, so the only thing masking it is the
+        runner's log writer. Driving a whole attempt proves the writer is actually
+        on that path rather than only reachable directly.
+        """
+        secret = "ghp_0123456789abcdefghijABCDEFGHIJ"
+        stdout = (
+            _recorded_tool_use(f'export GITHUB_TOKEN="{secret}" && ./deploy.sh')
+            + "\n"
+            + _fixture_text("permission-bypass.result.json")
+        )
+        stderr = f"claude: refused with GITHUB_TOKEN={secret}\n"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = _role_runner(root, ClaudeCodeExecutionBackend("claude"))
+            with mock.patch.object(
+                claude_code,
+                "run_streaming_claude_command",
+                return_value=CompletedProcess(["claude"], 0, stdout, stderr),
+            ):
+                runner.run_role(
+                    role="coder",
+                    issue=_issue(root),
+                    pass_number=1,
+                    execution_settings=CLAUDE_SETTINGS,
+                )
+
+            persisted = {
+                path.suffixes[-2]: path.read_text(encoding="utf-8")
+                for path in runner.log_root.iterdir()
+            }
+            self.assertIn(".stderr", persisted)
+            self.assertIn(".stdout", persisted)
+            for suffix, text in persisted.items():
+                with self.subTest(log=suffix):
+                    self.assertNotIn(secret, text)
+            self.assertEqual(
+                persisted[".stderr"],
+                "claude: refused with GITHUB_TOKEN=[redacted]\n",
+            )
+
 
 class ClaudeBackendRegistryTests(unittest.TestCase):
     def test_the_claude_backend_is_registered_and_resolvable(self) -> None:
@@ -2334,6 +2389,507 @@ class ClaudeOutcomePrecedenceTests(unittest.TestCase):
             RoleResult.from_message("no json here").summary,
             "The Execution Backend did not return valid JSON matching the "
             "role schema.",
+        )
+
+
+class RecordedAttemptProvenanceTests(unittest.TestCase):
+    """What the terminal result says about which model worked and what it cost."""
+
+    def _provenance(
+        self,
+        fixture: str,
+        *,
+        requested_model: str | None = None,
+    ) -> StepAttemptProvenance:
+        terminal_result = claude_code.claude_terminal_result(_fixture_text(fixture))
+        assert terminal_result is not None
+        return claude_code.claude_attempt_provenance(
+            terminal_result,
+            requested_model=requested_model,
+        )
+
+    def test_the_serving_model_comes_from_the_turns_own_usage_accounting(self) -> None:
+        recorded = claude_code.claude_terminal_result(
+            _fixture_text("bypass-stream.jsonl")
+        )
+        assert recorded is not None
+        accounted = tuple(recorded[claude_code.CLAUDE_MODEL_USAGE_KEY])
+
+        provenance = self._provenance("bypass-stream.jsonl")
+
+        self.assertEqual(accounted, ("claude-haiku-4-5-20251001",))
+        self.assertEqual(provenance.serving_model, "claude-haiku-4-5-20251001")
+        self.assertIs(provenance.backend, ExecutionBackendId.CLAUDE_CODE)
+
+    def test_the_recorded_cost_and_turn_count_are_persisted_as_evidence(self) -> None:
+        recorded = claude_code.claude_terminal_result(
+            _fixture_text("bypass-stream.jsonl")
+        )
+        assert recorded is not None
+
+        provenance = self._provenance("bypass-stream.jsonl")
+
+        self.assertEqual(
+            provenance.cost_usd,
+            recorded[claude_code.CLAUDE_TOTAL_COST_KEY],
+        )
+        self.assertEqual(
+            provenance.turn_count,
+            recorded[claude_code.CLAUDE_TURN_COUNT_KEY],
+        )
+        self.assertEqual(provenance.turn_count, 5)
+
+    def test_a_recording_disagrees_with_its_own_session_initialisation_event(
+        self,
+    ) -> None:
+        """The observation this whole record exists for, from a committed capture.
+
+        `alias-resolution-stream.jsonl` reports one model on its
+        session-initialisation event and a different one in the finished turn's own
+        usage accounting. A model selection is verified and pinned from that
+        initialisation event, so if the serving model were read from there too, the
+        two could never disagree and a substitution would leave no trace anywhere.
+        """
+        initialisation_model = _session_init_event("alias-resolution-stream.jsonl")[
+            "model"
+        ]
+
+        provenance = self._provenance("alias-resolution-stream.jsonl")
+
+        self.assertEqual(initialisation_model, "claude-haiku-4-5-20251001")
+        self.assertEqual(provenance.serving_model, "claude-sonnet-5")
+        self.assertNotEqual(provenance.serving_model, initialisation_model)
+
+    def test_a_requested_model_the_turn_did_not_use_is_recorded_as_a_mismatch(
+        self,
+    ) -> None:
+        provenance = self._provenance(
+            "bypass-stream.jsonl",
+            requested_model="claude-sonnet-5",
+        )
+
+        self.assertTrue(provenance.model_mismatch)
+        self.assertEqual(provenance.requested_model, "claude-sonnet-5")
+        self.assertEqual(provenance.serving_model, "claude-haiku-4-5-20251001")
+        evidence = provenance.mismatch_evidence()
+        assert evidence is not None
+        self.assertIn(MODEL_MISMATCH_LABEL, evidence)
+        self.assertIn("claude-sonnet-5", evidence)
+        self.assertIn("claude-haiku-4-5-20251001", evidence)
+        self.assertIn("neither is reconciled", evidence)
+
+    def test_the_requested_model_the_turn_did_use_records_no_mismatch(self) -> None:
+        provenance = self._provenance(
+            "bypass-stream.jsonl",
+            requested_model="claude-haiku-4-5-20251001",
+        )
+
+        self.assertFalse(provenance.model_mismatch)
+        self.assertIsNone(provenance.mismatch_evidence())
+
+    def test_a_turn_accounted_against_several_models_keeps_every_identifier(
+        self,
+    ) -> None:
+        recorded = _fixture_json("permission-bypass.result.json")
+        usage = recorded[claude_code.CLAUDE_MODEL_USAGE_KEY]
+        accounted = next(iter(usage.values()))
+        envelope = {
+            **recorded,
+            claude_code.CLAUDE_MODEL_USAGE_KEY: {
+                "claude-haiku-4-5-20251001": accounted,
+                "claude-sonnet-5": accounted,
+            },
+        }
+
+        provenance = claude_code.claude_attempt_provenance(
+            envelope,
+            requested_model="claude-haiku-4-5-20251001",
+        )
+
+        self.assertEqual(
+            provenance.serving_model,
+            "claude-haiku-4-5-20251001, claude-sonnet-5",
+        )
+        # A turn served by more than one model was not served by the single model
+        # the Workflow Step requested, so it still reads as a mismatch.
+        self.assertTrue(provenance.model_mismatch)
+
+    def test_an_unreported_serving_model_is_left_unknown_rather_than_assumed(
+        self,
+    ) -> None:
+        recorded = _fixture_json("permission-bypass.result.json")
+        envelope = {
+            key: value
+            for key, value in recorded.items()
+            if key != claude_code.CLAUDE_MODEL_USAGE_KEY
+        }
+
+        provenance = claude_code.claude_attempt_provenance(
+            envelope,
+            requested_model="claude-haiku-4-5-20251001",
+        )
+
+        self.assertIsNone(provenance.serving_model)
+        self.assertFalse(provenance.model_mismatch)
+        self.assertEqual(provenance.requested_model, "claude-haiku-4-5-20251001")
+
+    def test_a_malformed_cost_or_turn_count_records_nothing_rather_than_failing(
+        self,
+    ) -> None:
+        recorded = _fixture_json("permission-bypass.result.json")
+
+        provenance = claude_code.claude_attempt_provenance(
+            {
+                **recorded,
+                claude_code.CLAUDE_TOTAL_COST_KEY: "not a number",
+                claude_code.CLAUDE_TURN_COUNT_KEY: None,
+            }
+        )
+
+        self.assertIsNone(provenance.cost_usd)
+        self.assertIsNone(provenance.turn_count)
+        self.assertEqual(provenance.serving_model, "claude-haiku-4-5-20251001")
+
+    def test_an_attempt_that_reached_no_terminal_result_still_names_its_backend(
+        self,
+    ) -> None:
+        provenance = claude_code.claude_attempt_provenance(
+            None,
+            requested_model="claude-sonnet-5",
+        )
+
+        self.assertIs(provenance.backend, ExecutionBackendId.CLAUDE_CODE)
+        self.assertEqual(provenance.requested_model, "claude-sonnet-5")
+        self.assertIsNone(provenance.serving_model)
+        self.assertFalse(provenance.model_mismatch)
+
+
+class ClaudeProvenanceReportingTests(unittest.TestCase):
+    """A mismatch reaches the operator live, once, wherever they are watching."""
+
+    def _invoke(
+        self,
+        stdout: str,
+        *,
+        settings: StepExecutionSettings,
+        events: list[StepActivityEvent | None] | None = None,
+    ):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            def write_log(path: Path, text: str) -> None:
+                path.write_text(text, encoding="utf-8")
+
+            request = StepAttemptRequest(
+                prompt="Implement the issue.",
+                repo_root=root,
+                schema_path=ROLE_RESULT_SCHEMA,
+                message_path=root / "attempt.last-message.json",
+                stdout_path=root / "attempt.stdout.jsonl",
+                stderr_path=root / "attempt.stderr.txt",
+                write_log=write_log,
+                execution_settings=settings,
+                activity_stage=Stage.DEVELOPMENT,
+                activity_context="0003 p1",
+                activity_callback=(
+                    None if events is None else events.append
+                ),
+            )
+            with mock.patch.object(
+                claude_code,
+                "run_streaming_claude_command",
+                return_value=CompletedProcess(["claude"], 0, stdout, ""),
+            ):
+                return ClaudeCodeExecutionBackend("claude").invoke(request)
+
+    def test_invoke_reports_the_provenance_of_a_completed_attempt(self) -> None:
+        result = self._invoke(
+            _fixture_text("bypass-stream.jsonl"),
+            settings=CLAUDE_SETTINGS,
+            events=[],
+        )
+
+        self.assertIs(result.provenance.backend, ExecutionBackendId.CLAUDE_CODE)
+        self.assertEqual(result.provenance.requested_model, CLAUDE_SETTINGS.model)
+        self.assertEqual(result.provenance.serving_model, "claude-haiku-4-5-20251001")
+        self.assertEqual(result.provenance.turn_count, 5)
+        assert result.provenance.cost_usd is not None
+        self.assertGreater(result.provenance.cost_usd, 0)
+
+    def test_a_mismatch_reaches_the_activity_feed_exactly_once(self) -> None:
+        events: list[StepActivityEvent | None] = []
+
+        result = self._invoke(
+            _fixture_text("bypass-stream.jsonl"),
+            settings=CLAUDE_SETTINGS,
+            events=events,
+        )
+
+        reported = [
+            event
+            for event in events
+            if event is not None and MODEL_MISMATCH_LABEL in (event.activity or "")
+        ]
+        self.assertEqual(len(reported), 1)
+        self.assertIs(reported[0].kind, StepActivityKind.ERROR)
+        self.assertEqual(reported[0].activity, result.provenance.mismatch_evidence())
+
+    def test_a_matching_model_reports_no_mismatch_activity_at_all(self) -> None:
+        events: list[StepActivityEvent | None] = []
+
+        result = self._invoke(
+            _fixture_text("bypass-stream.jsonl"),
+            settings=StepExecutionSettings(
+                ExecutionBackendId.CLAUDE_CODE,
+                "claude-haiku-4-5-20251001",
+                "high",
+                FastPreference.OFF,
+            ),
+            events=events,
+        )
+
+        self.assertFalse(result.provenance.model_mismatch)
+        self.assertEqual(
+            [
+                event
+                for event in events
+                if event is not None and MODEL_MISMATCH_LABEL in (event.activity or "")
+            ],
+            [],
+        )
+
+    def test_portable_plain_mode_prints_the_mismatch_as_one_line(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self._invoke(_fixture_text("bypass-stream.jsonl"), settings=CLAUDE_SETTINGS)
+
+        printed = [
+            line
+            for line in output.getvalue().splitlines()
+            if MODEL_MISMATCH_LABEL in line
+        ]
+        self.assertEqual(len(printed), 1)
+        self.assertTrue(printed[0].startswith("[development] 0003 p1:"))
+        self.assertIn("claude-sonnet-5", printed[0])
+        self.assertIn("claude-haiku-4-5-20251001", printed[0])
+
+    def test_a_denied_attempt_still_records_which_model_did_the_work(self) -> None:
+        result = self._invoke(
+            _fixture_text("permission-dontask.result.json"),
+            settings=CLAUDE_SETTINGS,
+            events=[],
+        )
+
+        recorded = _fixture_json("permission-dontask.result.json")
+        self.assertEqual([refusal.target for refusal in result.refusals], ["Bash"])
+        self.assertEqual(result.provenance.serving_model, "claude-haiku-4-5-20251001")
+        self.assertEqual(
+            result.provenance.turn_count,
+            recorded[claude_code.CLAUDE_TURN_COUNT_KEY],
+        )
+        self.assertEqual(
+            result.provenance.cost_usd,
+            recorded[claude_code.CLAUDE_TOTAL_COST_KEY],
+        )
+
+
+class ClaudeActivityFeedTests(unittest.TestCase):
+    """The Portable Activity Feed for a Claude-backed step, bounded as for Codex.
+
+    Driven through the real dashboard, from the recorded stream, so what is
+    asserted is the feed an operator watches rather than the event list behind it.
+    """
+
+    def _dashboard(self, stream: io.StringIO) -> IssueDashboard:
+        dashboard = IssueDashboard(
+            issue_number="0003",
+            issue_title="Claude-backed attempt",
+            position=1,
+            total=1,
+            stream=stream,
+        )
+        dashboard.show_workflow_progress(
+            project_workflow_progress(
+                default_portable_workflow(),
+                default_portable_component_catalog(),
+                (
+                    StepRuntimeState(
+                        step_instance_id=DEVELOPMENT_STEP_ID,
+                        issue_id="0003",
+                        status=StepRuntimeStatus.RUNNING,
+                        pass_number=1,
+                    ),
+                ),
+                (),
+                issue_id="0003",
+            )
+        )
+        return dashboard
+
+    def _recorded_activity(self) -> tuple[StepActivityEvent | None, ...]:
+        """Every neutral activity the recorded attempt reported, in order."""
+        reported: list[StepActivityEvent | None] = []
+        for payload in _fixture_events("bypass-stream.jsonl"):
+            translated = claude_code.claude_step_activity_events(payload)
+            reported.extend(translated if translated else (None,))
+        return tuple(reported)
+
+    def test_the_feed_shows_the_latest_claude_activity_on_one_bounded_line(
+        self,
+    ) -> None:
+        stream = io.StringIO()
+        dashboard = self._dashboard(stream)
+        reported = self._recorded_activity()
+
+        for event in reported:
+            dashboard.notify_activity(event)
+
+        rendered = stream.getvalue()
+        feed_lines = [line for line in rendered.splitlines() if line.startswith("AI ")]
+        displayed = [
+            event.activity for event in reported if event is not None and event.activity
+        ]
+        self.assertTrue(feed_lines)
+        # Every rendered screen carries exactly one activity line, so however long
+        # the attempt streams the feed stays one bounded row rather than growing
+        # into a transcript.
+        self.assertEqual(len(feed_lines), rendered.count("ACTIVE Development"))
+        self.assertTrue(feed_lines[-1].endswith(displayed[-1]))
+        self.assertLess(len(feed_lines), len(reported))
+
+    def test_an_event_with_nothing_to_show_refreshes_no_feed_line(self) -> None:
+        """The dense reasoning heartbeat is progress, and never feed spam."""
+        stream = io.StringIO()
+        dashboard = self._dashboard(stream)
+        heartbeat = StepActivityEvent(kind=StepActivityKind.REASONING)
+        self.assertIn(heartbeat, self._recorded_activity())
+        before = stream.getvalue()
+
+        for _ in range(20):
+            dashboard.notify_activity(heartbeat)
+
+        self.assertEqual(stream.getvalue(), before)
+
+        dashboard.notify_activity(
+            StepActivityEvent(
+                kind=StepActivityKind.MESSAGE,
+                activity="Using the Bash tool.",
+            )
+        )
+
+        self.assertGreater(len(stream.getvalue()), len(before))
+
+
+class RunnerAttemptProvenanceTests(unittest.TestCase):
+    """The role runner completes provenance for every backend it dispatches to."""
+
+    def _role_result(
+        self,
+        backend: ExecutionBackend,
+        settings: StepExecutionSettings | None,
+    ) -> RoleResult:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = _role_runner(root, backend)
+            return runner.run_role(
+                role="coder",
+                issue=_issue(root),
+                pass_number=1,
+                execution_settings=settings,
+            )
+
+    def test_a_codex_backed_attempt_records_its_backend_and_requested_model(
+        self,
+    ) -> None:
+        """Codex reports no serving model, so it is recorded as unknown, not equal."""
+        result = self._role_result(
+            _RecordingExecutionBackend(
+                ExecutionBackendId.CODEX_CLI,
+                '{"status":"PASS","summary":"done"}',
+            ),
+            CODEX_SETTINGS,
+        )
+
+        assert result.provenance is not None
+        self.assertIs(result.provenance.backend, ExecutionBackendId.CODEX_CLI)
+        self.assertEqual(result.provenance.requested_model, CODEX_SETTINGS.model)
+        self.assertIsNone(result.provenance.serving_model)
+        self.assertFalse(result.provenance.model_mismatch)
+
+    def test_a_backend_that_reported_its_own_provenance_keeps_it(self) -> None:
+        class ReportingBackend(_RecordingExecutionBackend):
+            def invoke(self, request: StepAttemptRequest) -> StepAttemptResult:
+                return StepAttemptResult(
+                    process=CompletedProcess(["backend"], 0, "", ""),
+                    message='{"status":"PASS","summary":"done"}',
+                    provenance=StepAttemptProvenance(
+                        backend=ExecutionBackendId.CLAUDE_CODE,
+                        requested_model="claude-sonnet-5",
+                        serving_model="claude-haiku-4-5-20251001",
+                        cost_usd=0.25,
+                        turn_count=3,
+                    ),
+                )
+
+        result = self._role_result(
+            ReportingBackend(ExecutionBackendId.CLAUDE_CODE, ""),
+            CLAUDE_SETTINGS,
+        )
+
+        assert result.provenance is not None
+        self.assertTrue(result.provenance.model_mismatch)
+        self.assertEqual(result.provenance.cost_usd, 0.25)
+        self.assertEqual(result.provenance.turn_count, 3)
+
+    def test_a_blocked_attempt_still_carries_its_backend_and_model(self) -> None:
+        class FailingBackend(_RecordingExecutionBackend):
+            def invoke(self, request: StepAttemptRequest) -> StepAttemptResult:
+                return StepAttemptResult(
+                    process=CompletedProcess(["backend"], 1, "", "boom\n"),
+                )
+
+        result = self._role_result(
+            FailingBackend(ExecutionBackendId.CLAUDE_CODE, ""),
+            CLAUDE_SETTINGS,
+        )
+
+        self.assertEqual(result.status, "BLOCKED")
+        assert result.provenance is not None
+        self.assertIs(result.provenance.backend, ExecutionBackendId.CLAUDE_CODE)
+        self.assertEqual(result.provenance.requested_model, CLAUDE_SETTINGS.model)
+
+    def test_an_attempt_with_no_settings_records_the_dispatched_backend_only(
+        self,
+    ) -> None:
+        result = self._role_result(
+            _RecordingExecutionBackend(
+                ExecutionBackendId.CODEX_CLI,
+                '{"status":"PASS","summary":"done"}',
+            ),
+            None,
+        )
+
+        assert result.provenance is not None
+        self.assertIs(result.provenance.backend, ExecutionBackendId.CODEX_CLI)
+        self.assertIsNone(result.provenance.requested_model)
+
+    def test_provenance_never_reaches_an_agent_prompt(self) -> None:
+        """Provenance is Dev Loop's record of the attempt, not agent input."""
+        result = RoleResult(
+            status="PASS",
+            summary="done",
+            provenance=StepAttemptProvenance(
+                backend=ExecutionBackendId.CLAUDE_CODE,
+                requested_model="claude-sonnet-5",
+                serving_model="claude-haiku-4-5-20251001",
+            ),
+        )
+
+        self.assertNotIn("provenance", codex_runner.result_to_dict(result))
+        self.assertNotIn(
+            "claude-haiku-4-5-20251001",
+            json.dumps(codex_runner.result_to_dict(result)),
         )
 
 

@@ -30,6 +30,7 @@ from .step_configuration import (
     GuidanceReviewState,
     RequiredCapability,
     StepAttemptContext,
+    StepAttemptProvenance,
     StepCapabilityProfile,
     StepGuidance,
     capability_profile_from_defaults,
@@ -843,6 +844,11 @@ class StepAttemptRecord:
     failure_reason: str | None = None
     rework_attempt_id: str | None = None
     attempt_context: StepAttemptContext | None = None
+    # Which Execution Backend and which model actually did this attempt's work,
+    # and what the turn cost. Part of the immutable attempt history so a
+    # mixed-backend run is auditable, and a requested-versus-serving model
+    # mismatch survives, from persisted state alone.
+    provenance: StepAttemptProvenance | None = None
 
 
 def step_attempt_record_to_dict(attempt: StepAttemptRecord) -> dict[str, Any]:
@@ -873,6 +879,11 @@ def step_attempt_record_to_dict(attempt: StepAttemptRecord) -> dict[str, Any]:
         "attempt_context": (
             attempt.attempt_context.to_dict()
             if attempt.attempt_context is not None
+            else None
+        ),
+        "provenance": (
+            attempt.provenance.to_dict()
+            if attempt.provenance is not None
             else None
         ),
     }
@@ -1132,6 +1143,7 @@ class PortableWorkflowExecutor:
                     ),
                     rework_attempt_id=consumed_rework_attempt_id,
                     attempt_context=attempt_context,
+                    provenance=last_result.provenance,
                 )
             )
             runtimes[current_step_id] = StepRuntimeState(

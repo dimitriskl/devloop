@@ -1072,7 +1072,10 @@ class RunIssueSignatureTests(unittest.TestCase):
         self.assertIn("Security Review", rendered)
         self.assertIn("Final Review", rendered)
         self.assertIn(
-            "ACTIVE Security Review · model gpt-5.6-sol · effort xhigh · Fast OFF",
+            # The Workflow Status Bar names the Execution Backend ahead of the
+            # model. At this terminal width the reasoning effort and the Fast
+            # preference are what the bounded frame truncates, by design.
+            "ACTIVE Security Review · backend Codex CLI · model gpt-5.6-sol",
             rendered,
         )
         self.assertIn("Security Review", runner.screen_before_role["Security Review"])
@@ -1117,6 +1120,9 @@ class RunIssueSignatureTests(unittest.TestCase):
         self.assertIn("Security Review", rendered)
         self.assertIn("Final Review", rendered)
         self.assertIn("AI › Checking safe event.", rendered)
+        # Redirected output states the active step's Execution Backend and model
+        # exactly as the interactive dashboard does, with no terminal control.
+        self.assertIn("backend Codex CLI · model gpt-5.6-", rendered)
         self.assertNotRegex(rendered, r"\x1b\[[0-?]*[ -/]*[@-~]")
         self.assertNotIn("\r", rendered)
 

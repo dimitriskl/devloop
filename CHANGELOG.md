@@ -80,6 +80,30 @@ Also in this change:
 - `RUN PAUSED` is no longer announced with the `BLOCKED` Issue status word. A
   paused run has its own label, coloured as attention on a colour-capable stream
   and identical in words without one.
+- Every Step Attempt Record now persists which Execution Backend ran the attempt,
+  the model its Step Execution Settings requested, and the model the finished
+  turn's own usage accounting reported, plus the cost and turn count a
+  Claude-backed attempt reported. Mixed-backend attempt history is therefore
+  readable from `*.loop.state.json` without opening a durable log. Only the Claude
+  Code Backend reports cost and turn count today, so the two backends' spend is
+  not yet directly comparable. Cost is evidence only; the Execution Budget stays time-based.
+- **A requested-versus-serving model mismatch is recorded rather than
+  reconciled.** A prototype observed a provider's session-initialisation event and
+  its own usage accounting naming different models, and the cause is not
+  understood, so both identifiers are kept and the disagreement is reported as
+  `MODEL MISMATCH` in the Portable Activity Feed as soon as the attempt is
+  classified and on the Workflow Status Bar for as long as the record stands. The
+  flag is derived from the two identifiers, so no code path can report a mismatch
+  as clean, and loading a state file whose recorded flag disagrees with the models
+  it names fails with that message instead of reading the attempt back as clean.
+- The Workflow Status Bar and the Workflow Progress Dashboard now name the active
+  Workflow Step's Execution Backend ahead of its model, through the existing
+  optional presentation fields rather than a preformatted string, so the Textual
+  shell, the hybrid console dashboard, the PowerShell and Bash surfaces,
+  redirected output, and Plain Mode all state the same thing. No border, region,
+  or extra line is added, and step rows are unchanged for both backends. On a
+  narrow terminal the bounded frame truncates the reasoning effort and the Fast
+  preference before the backend, the models, or a mismatch warning.
 
 ## v0.1.0 - 2026-07-17
 

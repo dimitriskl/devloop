@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..redaction import redact_persisted_evidence
 from ..statusui import Stage, WaitingIndicator
+from ..step_configuration import StepAttemptProvenance
 from ..subprocess_utils import (
     EXECUTION_BUDGET_EXPIRY_RETURNCODE,
     AttemptExecutionBudget,
@@ -52,6 +53,7 @@ from .backend import (
     StepAttemptResult,
     StepSettingsAuthorization,
     describe_refusals,
+    report_model_mismatch,
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import update_checkpoint_for_step_activity
@@ -106,6 +108,23 @@ CLAUDE_TERMINAL_REASON_KEY = "terminal_reason"
 CLAUDE_PERMISSION_DENIALS_KEY = "permission_denials"
 CLAUDE_DENIED_TOOL_NAME_KEY = "tool_name"
 UNNAMED_DENIED_TOOL = "an unnamed tool"
+# Where the provider accounts the finished turn's own token spend, keyed by the
+# model that served it. This is the only field that states which model did the
+# work, and a committed recording has it disagreeing with the model the
+# session-initialisation event reported — which is the disagreement the Step
+# Attempt Record exists to make visible. The initialisation event is deliberately
+# not read here: it is what a model selection was verified and pinned from, so
+# reporting it as the serving model would guarantee agreement with itself.
+CLAUDE_MODEL_USAGE_KEY = "modelUsage"
+# How the turn's cost and its number of turns are reported. Both are evidence
+# only; the Execution Budget is time-based and neither value bounds anything.
+CLAUDE_TOTAL_COST_KEY = "total_cost_usd"
+CLAUDE_TURN_COUNT_KEY = "num_turns"
+# How several accounted models become one serving-model identifier. A turn
+# accounted against more than one model was not served by the single requested
+# one, so every identifier is kept and the result still reads as a mismatch.
+CLAUDE_SERVING_MODEL_SEPARATOR = ", "
+MAX_SERVING_MODEL_LENGTH = 200
 # Chain of thought is elided from the durable transcript rather than persisted
 # verbatim. The event, its type and every other field stay exactly as recorded,
 # so the log remains a faithful and parseable record of what the attempt did.
@@ -520,6 +539,43 @@ def claude_permission_denials(
     return tuple(records)
 
 
+def claude_attempt_provenance(
+    terminal_result: dict[str, Any] | None,
+    *,
+    requested_model: str | None = None,
+) -> StepAttemptProvenance:
+    """Read which model served the turn, and what it cost, from the result.
+
+    The serving model comes from the turn's own usage accounting and from nowhere
+    else. A prototype recorded that accounting naming a different model from the
+    one the session-initialisation event reported, and since a model selection is
+    verified and pinned from that initialisation event, this reading is the only
+    thing that can ever reveal the disagreement. Falling back to the
+    initialisation event when the accounting says nothing would make the two
+    always agree and quietly remove the evidence.
+
+    A turn accounted against several models keeps every identifier, joined: it was
+    not served by the one model the Workflow Step requested, and reporting only
+    the first would hide that.
+
+    The identifiers are provider output on their way into a persisted attempt
+    record, so they pass the Redaction Service and are bounded, exactly as a
+    denied tool name is.
+    """
+    if terminal_result is None:
+        return StepAttemptProvenance(
+            backend=ExecutionBackendId.CLAUDE_CODE,
+            requested_model=requested_model,
+        )
+    return StepAttemptProvenance(
+        backend=ExecutionBackendId.CLAUDE_CODE,
+        requested_model=requested_model,
+        serving_model=_accounted_serving_model(terminal_result),
+        cost_usd=_reported_cost(terminal_result.get(CLAUDE_TOTAL_COST_KEY)),
+        turn_count=_reported_turn_count(terminal_result.get(CLAUDE_TURN_COUNT_KEY)),
+    )
+
+
 def claude_run_wide_blocker(
     terminal_result: dict[str, Any] | None,
     *,
@@ -846,6 +902,10 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
         attempt is not an Issue result at all — it pauses the run — so recovering
         and persisting a `.last-message.json` for it would leave an Issue outcome
         on disk that no Workflow Step ever published.
+
+        Provenance is read from the same terminal result and reported whatever the
+        attempt's outcome was, because which model did the work is exactly as
+        interesting for an attempt that ended BLOCKED as for one that succeeded.
         """
         command = build_claude_command(
             self.claude,
@@ -887,6 +947,20 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
         )
         refusals = claude_permission_denials(terminal_result)
         failure_summary = claude_failure_summary(terminal_result)
+        provenance = claude_attempt_provenance(
+            terminal_result,
+            requested_model=(
+                request.execution_settings.model
+                if request.execution_settings is not None
+                else None
+            ),
+        )
+        report_model_mismatch(
+            provenance,
+            activity_callback=request.activity_callback,
+            activity_stage=request.activity_stage,
+            activity_context=request.activity_context,
+        )
         message = (
             ""
             if run_wide_blocker is not None or process.returncode != 0
@@ -904,6 +978,7 @@ class ClaudeCodeExecutionBackend(ExecutionBackend):
             run_wide_blocker=run_wide_blocker,
             refusals=refusals,
             failure_summary=failure_summary,
+            provenance=provenance,
         )
 
     def is_retryable_transient_failure(self, *, stdout: str, stderr: str) -> bool:
@@ -1363,6 +1438,42 @@ def _reports_exhausted_rate_limit(stdout: str) -> bool:
         if status is CLAUDE_EXHAUSTED_RATE_LIMIT_STATUS:
             return True
     return False
+
+
+def _accounted_serving_model(terminal_result: dict[str, Any]) -> str | None:
+    """Every model the turn's usage accounting charged, in the recorded order."""
+    usage = terminal_result.get(CLAUDE_MODEL_USAGE_KEY)
+    if not isinstance(usage, dict):
+        return None
+    models: list[str] = []
+    for raw_model in usage:
+        model = redact_persisted_evidence(str(raw_model).strip())
+        if model and model not in models:
+            models.append(model)
+    if not models:
+        return None
+    return compact_terminal_text(
+        CLAUDE_SERVING_MODEL_SEPARATOR.join(models),
+        max_length=MAX_SERVING_MODEL_LENGTH,
+    )
+
+
+def _reported_cost(value: Any) -> float | None:
+    """The turn's reported cost, or nothing when the provider reported none.
+
+    A shape this backend does not recognise is left unrecorded rather than
+    crashing an attempt: cost is evidence, and no Step Outcome depends on it.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value >= 0 else None
+
+
+def _reported_turn_count(value: Any) -> int | None:
+    """The turn count the provider reported, or nothing when it reported none."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
 
 
 def _claude_result_text(terminal_result: dict[str, Any] | None) -> str:

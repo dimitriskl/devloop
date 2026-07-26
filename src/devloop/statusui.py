@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping, TextIO
 
+from .step_configuration import MODEL_MISMATCH_LABEL
 from .terminal_editor import display_width
 from .terminal_text import compact_terminal_text
 
@@ -55,6 +56,17 @@ _RESET = "\x1b[0m"
 _BANNER_WIDTH = 79
 # How a run-wide pause names itself, in every surface and both colour modes.
 RUN_PAUSED_LABEL = "RUN PAUSED"
+# The Workflow Status Bar's labels for the active Workflow Step's Execution
+# Backend, its models and its remaining Step Execution Settings. Named here
+# because every surface that renders the Workflow Progress Dashboard shares them.
+STATUS_BAR_BACKEND_LABEL = "backend"
+STATUS_BAR_MODEL_LABEL = "model"
+STATUS_BAR_SERVING_MODEL_LABEL = "served"
+STATUS_BAR_EFFORT_LABEL = "effort"
+STATUS_BAR_FAST_LABEL = "Fast"
+# What the status bar says for a local deterministic Workflow Step, which runs on
+# no Execution Backend and selects no model.
+STATUS_BAR_LOCAL_EXECUTION = "local execution"
 WAITING_FRAMES = ("|", "/", "-", "\\")
 UNICODE_WAITING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 WAITING_FRAME_SECONDS = 0.12
@@ -77,6 +89,16 @@ class IssueResultSummary:
 
 @dataclass(frozen=True)
 class WorkflowStepProgress:
+    """One Workflow Step instance's Step Progress, ready to render.
+
+    ``backend``, ``model``, ``reasoning_effort`` and ``fast`` are the Workflow
+    Step's active Step Execution Settings; ``serving_model`` and
+    ``model_mismatch`` come from its latest Step Attempt Record's provenance, so
+    which model actually did the work stays visible after the attempt that
+    reported it has finished. All of them are optional presentation fields rather
+    than one preformatted line, so each surface composes what it has room for.
+    """
+
     step_instance_id: str
     display_name: str
     component_id: str
@@ -85,7 +107,10 @@ class WorkflowStepProgress:
     elapsed_seconds: float
     issue_id: str | None
     scope: WorkflowProgressScope
+    backend: str | None
     model: str | None
+    serving_model: str | None
+    model_mismatch: bool
     reasoning_effort: str | None
     fast: str | None
     latest_result: str | None
@@ -189,6 +214,9 @@ def project_workflow_progress(
         if runtime is not None and runtime.status.value == "RUNNING":
             active_step_instance_id = str(step.instance_id)
         settings = step.execution_settings
+        latest_provenance = (
+            latest_attempt.provenance if latest_attempt is not None else None
+        )
         projected_status = _projected_step_status(runtime, latest_attempt)
         if (
             scope is WorkflowProgressScope.WORKFLOW
@@ -221,7 +249,19 @@ def project_workflow_progress(
                     else None
                 ),
                 scope=scope,
+                backend=(
+                    settings.backend.display_name if settings is not None else None
+                ),
                 model=settings.model if settings is not None else None,
+                serving_model=(
+                    latest_provenance.serving_model
+                    if latest_provenance is not None
+                    else None
+                ),
+                model_mismatch=(
+                    latest_provenance is not None
+                    and latest_provenance.model_mismatch
+                ),
                 reasoning_effort=(
                     settings.reasoning_effort if settings is not None else None
                 ),
@@ -331,7 +371,12 @@ def _terminal_safe_step_progress(
         display_name=_safe_progress_text(step.display_name, max_length=160),
         component_id=_safe_progress_text(step.component_id, max_length=128),
         issue_id=_safe_optional_progress_text(step.issue_id, max_length=64),
+        backend=_safe_optional_progress_text(step.backend, max_length=64),
         model=_safe_optional_progress_text(step.model, max_length=128),
+        serving_model=_safe_optional_progress_text(
+            step.serving_model,
+            max_length=128,
+        ),
         reasoning_effort=_safe_optional_progress_text(
             step.reasoning_effort,
             max_length=64,
@@ -487,6 +532,41 @@ def _inline_progress_summary(
         _color_status_word(segment, status)
         for segment, status in segments
     )
+
+
+def _active_step_provenance_segments(
+    step: WorkflowStepProgress,
+) -> tuple[str, ...]:
+    """The Workflow Status Bar's segments for the active Workflow Step.
+
+    Composed here from the optional typed Step Progress fields rather than from a
+    preformatted string handed down by a caller, so every surface that renders the
+    Workflow Progress Dashboard — the Textual shell, the Hybrid Console Dashboard,
+    PowerShell, Bash, redirected output and Plain Mode — states the same thing from
+    the same data.
+
+    The Execution Backend leads, ahead of the model, matching the order the
+    Workflow Editor shows them in. A mismatch is announced immediately after it and
+    ahead of the model it disputes, because this line is truncated from the right
+    to fit the frame: the reasoning effort and the Fast preference are what a
+    narrow terminal loses, never the warning that another model did the work.
+    """
+    if step.backend is None and step.model is None:
+        return (STATUS_BAR_LOCAL_EXECUTION,)
+    segments: list[str] = []
+    if step.backend is not None:
+        segments.append(f"{STATUS_BAR_BACKEND_LABEL} {step.backend}")
+    if step.model_mismatch:
+        segments.append(MODEL_MISMATCH_LABEL)
+    if step.model is not None:
+        segments.append(f"{STATUS_BAR_MODEL_LABEL} {step.model}")
+    if step.model_mismatch and step.serving_model is not None:
+        segments.append(f"{STATUS_BAR_SERVING_MODEL_LABEL} {step.serving_model}")
+    if step.reasoning_effort is not None:
+        segments.append(f"{STATUS_BAR_EFFORT_LABEL} {step.reasoning_effort}")
+    if step.fast is not None:
+        segments.append(f"{STATUS_BAR_FAST_LABEL} {step.fast}")
+    return tuple(segments)
 
 
 def render_workflow_progress(
@@ -670,17 +750,7 @@ def render_workflow_progress(
     active = projection.active_step
     if active is not None:
         lines.append(rule)
-        settings = (
-            separator.join(
-                (
-                    f"model {active.model}",
-                    f"effort {active.reasoning_effort}",
-                    f"Fast {active.fast}",
-                )
-            )
-            if active.model is not None
-            else "local execution"
-        )
+        settings = separator.join(_active_step_provenance_segments(active))
         lines.append(
             _fit_plain_text(
                 f"ACTIVE {active.display_name}{separator}{settings}",

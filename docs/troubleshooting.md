@@ -183,6 +183,26 @@ A brief network failure is not a pause. Transport-level failures are retried
 inside the same attempt, under that attempt's Execution Budget and the shared
 retry delay, and the attempt continues if one succeeds.
 
+## The dashboard shows `MODEL MISMATCH`
+
+The attempt did not run on the model the Workflow Step selected: the finished
+turn's own usage accounting named a different model. Nothing is broken in your
+configuration and the run continues, but the result was not produced by the model
+you chose, so treat it accordingly when you compare backends or judge quality.
+
+Both identifiers are kept on that Step Attempt Record in `*.loop.state.json`
+under `provenance` — `requested_model`, `serving_model`, and `model_mismatch` —
+alongside the reported cost and turn count, and the full attempt transcript stays
+in `.loop.logs/*stdout*`. Dev Loop deliberately does not reconcile the two: a
+prototype observed a provider's session-initialisation event and its own usage
+accounting naming different models, and until that is understood a substitution
+must stay visible.
+
+`model_mismatch` is derived from the two identifiers, so editing it in the state
+file does not clear the warning — loading a record whose flag disagrees with the
+models it names fails with that message instead. If you see this, capture the
+step, the two identifiers, and the stdout log before rerunning.
+
 ## Codex returns invalid JSON
 
 The runner marks the role `BLOCKED`. Inspect `.loop.logs/*last-message*`,

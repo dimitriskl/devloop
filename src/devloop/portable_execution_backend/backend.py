@@ -20,8 +20,10 @@ from typing import TYPE_CHECKING, Protocol
 
 from ..execution_backend_id import ExecutionBackendId, parse_execution_backend_id
 from ..statusui import Stage
-from .activity import ActivityCallback
+from ..step_configuration import StepAttemptProvenance
+from .activity import ActivityCallback, StepActivityEvent, StepActivityKind
 from .blockers import RunWideBlocker, RunWideBlockerPolicy
+from .process_stream import print_step_activity
 
 if TYPE_CHECKING:
     from ..model_catalog import ModelCatalog
@@ -33,12 +35,14 @@ __all__ = [
     "ExecutionBackendId",
     "LogWriter",
     "RefusalRecord",
+    "StepAttemptProvenance",
     "StepAttemptRequest",
     "StepAttemptResult",
     "StepSettingsAuthorization",
     "TransientFailurePredicate",
     "describe_refusals",
     "parse_execution_backend_id",
+    "report_model_mismatch",
 ]
 
 
@@ -102,6 +106,39 @@ def describe_refusals(refusals: Sequence[RefusalRecord]) -> str:
     return f"{len(refusals)} {noun} ({', '.join(targets)})"
 
 
+def report_model_mismatch(
+    provenance: StepAttemptProvenance,
+    *,
+    activity_callback: ActivityCallback | None,
+    activity_stage: Stage,
+    activity_context: str,
+) -> str | None:
+    """Announce a requested-versus-serving model mismatch live, or report none.
+
+    A mismatch means the attempt did not run on the model the Workflow Step
+    selected, so an operator has to learn it while the run is in front of them
+    rather than only by reading persisted state afterwards. It is reported through
+    the same neutral step activity every other backend signal uses, so the
+    Portable Activity Feed shows it inside the existing bounded frame and Plain
+    Mode prints it as one deterministic line.
+
+    Exactly one event per attempt, emitted where the attempt is classified: the
+    mismatch is derived once from the terminal result, so it cannot repeat and
+    cannot become event spam however long the attempt streamed.
+
+    Returns the sentence it reported, so a caller can assert what an operator saw.
+    """
+    evidence = provenance.mismatch_evidence()
+    if evidence is None:
+        return None
+    event = StepActivityEvent(kind=StepActivityKind.ERROR, activity=evidence)
+    if activity_callback is not None:
+        activity_callback(event)
+    else:
+        print_step_activity(activity_stage, activity_context, event)
+    return evidence
+
+
 @dataclass(frozen=True)
 class StepAttemptRequest:
     """Everything an Execution Backend needs for one Workflow Step attempt.
@@ -138,6 +175,11 @@ class StepAttemptResult:
     the Step Outcome summary in place of Dev Loop's paraphrase. It is empty
     whenever the provider said nothing usable, which leaves the runner's own
     exit-status summary in charge.
+
+    ``provenance`` is what this backend can state about which model actually did
+    the work and what the turn cost. A backend whose provider reports none of that
+    leaves it empty and the role runner still records the backend identity and the
+    requested model, which it knows without asking any provider.
     """
 
     process: subprocess.CompletedProcess[str]
@@ -145,6 +187,7 @@ class StepAttemptResult:
     run_wide_blocker: RunWideBlocker | None = None
     refusals: tuple[RefusalRecord, ...] = ()
     failure_summary: str = ""
+    provenance: StepAttemptProvenance = StepAttemptProvenance()
 
 
 @dataclass(frozen=True)

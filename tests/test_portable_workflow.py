@@ -11,6 +11,7 @@ from pathlib import Path
 
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue
+from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FINAL_REVIEW_STEP_ID,
@@ -18,6 +19,7 @@ from devloop.portable_workflow import (
     QA_STEP_ID,
     SECURITY_REVIEW_STEP_ID,
     REVIEWER_COMPONENT_ID,
+    FastPreference,
     IssueStatus,
     PORTABLE_WORKFLOW_SCHEMA,
     QA_RESULT_CONTRACT,
@@ -27,6 +29,7 @@ from devloop.portable_workflow import (
     PortableWorkflowExecutor,
     PortableWorkflowCheckpoint,
     StepComponentId,
+    StepExecutionSettings,
     StepOutcome,
     StepScope,
     StepRuntimeState,
@@ -40,7 +43,12 @@ from devloop.portable_workflow import (
     validate_portable_workflow_for_apply,
 )
 from devloop.state import LoopStateWriter
-from devloop.step_configuration import MAX_STEP_GUIDANCE_CHARACTERS, StepGuidance
+from devloop.step_configuration import (
+    MAX_STEP_GUIDANCE_CHARACTERS,
+    MODEL_MISMATCH_LABEL,
+    StepAttemptProvenance,
+    StepGuidance,
+)
 from devloop.statusui import project_workflow_step_progress, render_step_progress_rows
 from devloop.workflow_defaults import WorkflowDefaultStore
 
@@ -2510,6 +2518,224 @@ class PortableWorkflowExecutionTests(unittest.TestCase):
                 (incompatible_review,),
                 issue_id=issue.number,
                 catalog=catalog,
+            )
+
+
+# What the two backends of a mixed-backend Workflow report about one attempt. The
+# development step's turn is served by a model other than the one it requested,
+# which is the disagreement a prototype observed and the attempt history exists to
+# expose.
+_CLAUDE_STEP_SETTINGS = StepExecutionSettings(
+    ExecutionBackendId.CLAUDE_CODE,
+    "claude-sonnet-5",
+    "high",
+    FastPreference.OFF,
+)
+_SUBSTITUTED_SERVING_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _mixed_backend_workflow():
+    """The default Workflow with its development step moved to Claude Code."""
+    workflow = default_portable_workflow()
+    return replace(
+        workflow,
+        steps=tuple(
+            replace(step, execution_settings=_CLAUDE_STEP_SETTINGS)
+            if step.instance_id == DEVELOPMENT_STEP_ID
+            else step
+            for step in workflow.steps
+        ),
+    )
+
+
+class _ProvenanceReportingRoleRunner:
+    """A role runner standing in for both backends of a mixed-backend Workflow.
+
+    Injected at the documented role-runner seam, so no attempt reaches a provider.
+    Only the Claude-backed step reports a serving model, a cost and a turn count,
+    because only that backend's provider reports them.
+    """
+
+    def run_role(self, **arguments: object) -> RoleResult:
+        settings = arguments["execution_settings"]
+        assert isinstance(settings, StepExecutionSettings)
+        if settings.backend is ExecutionBackendId.CLAUDE_CODE:
+            provenance = StepAttemptProvenance(
+                backend=settings.backend,
+                requested_model=settings.model,
+                serving_model=_SUBSTITUTED_SERVING_MODEL,
+                cost_usd=0.0415051,
+                turn_count=5,
+            )
+        else:
+            provenance = StepAttemptProvenance(
+                backend=settings.backend,
+                requested_model=settings.model,
+            )
+        return RoleResult(status="PASS", summary="Step done.", provenance=provenance)
+
+
+class StepAttemptProvenanceRecordTests(unittest.TestCase):
+    """Backend provenance is part of the immutable attempt history.
+
+    Every assertion here reads the reloaded state rather than the in-memory run,
+    because the promise is that mixed-backend attempt history is auditable from
+    persisted state alone, without opening a durable log.
+    """
+
+    def _reloaded_attempts(self, root: Path):
+        issue_path = root / "0001.md"
+        issue_path.write_text("# Mixed-backend provenance\n", encoding="utf-8")
+        index = root / "README.md"
+        index.write_text("[Mixed-backend provenance](./0001.md)\n", encoding="utf-8")
+        issue = Issue("0001", "Mixed-backend provenance", issue_path, False)
+        catalog = default_portable_component_catalog()
+        workflow = load_portable_workflow(
+            _mixed_backend_workflow().to_dict(),
+            catalog,
+        )
+        execution = PortableWorkflowExecutor(
+            workflow,
+            catalog,
+            _ProvenanceReportingRoleRunner(),
+        ).run(issue, pass_number=1)
+        writer = LoopStateWriter(index)
+        writer.record_resolved_workflow(workflow, catalog)
+        writer.record_portable_execution_result(issue, execution)
+        reloaded = LoopStateWriter(index).step_attempt_records(issue.number)
+        return workflow, reloaded, index
+
+    def test_every_attempt_persists_its_backend_and_both_model_identifiers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workflow, attempts, _index = self._reloaded_attempts(Path(raw))
+
+            recorded = {
+                workflow.step(attempt.step_instance_id).display_name: attempt.provenance
+                for attempt in attempts
+            }
+            self.assertEqual(
+                {
+                    name: (
+                        provenance.backend,
+                        provenance.requested_model,
+                        provenance.serving_model,
+                    )
+                    for name, provenance in recorded.items()
+                },
+                {
+                    "Development": (
+                        ExecutionBackendId.CLAUDE_CODE,
+                        "claude-sonnet-5",
+                        _SUBSTITUTED_SERVING_MODEL,
+                    ),
+                    "Security Review": (
+                        ExecutionBackendId.CODEX_CLI,
+                        "gpt-5.6-sol",
+                        None,
+                    ),
+                    "Final Review": (
+                        ExecutionBackendId.CODEX_CLI,
+                        "gpt-5.6-sol",
+                        None,
+                    ),
+                    "QA": (
+                        ExecutionBackendId.CODEX_CLI,
+                        "gpt-5.6-terra",
+                        None,
+                    ),
+                },
+            )
+
+    def test_a_claude_backed_attempt_persists_its_cost_and_turn_count(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workflow, attempts, _index = self._reloaded_attempts(Path(raw))
+
+            claude_attempt = next(
+                attempt
+                for attempt in attempts
+                if attempt.step_instance_id == DEVELOPMENT_STEP_ID
+            )
+            codex_attempt = next(
+                attempt
+                for attempt in attempts
+                if attempt.step_instance_id == QA_STEP_ID
+            )
+            assert claude_attempt.provenance is not None
+            assert codex_attempt.provenance is not None
+            self.assertEqual(claude_attempt.provenance.cost_usd, 0.0415051)
+            self.assertEqual(claude_attempt.provenance.turn_count, 5)
+            # Codex reports neither, and an absent value is recorded as unknown
+            # rather than as zero, which would read as a free attempt.
+            self.assertIsNone(codex_attempt.provenance.cost_usd)
+            self.assertIsNone(codex_attempt.provenance.turn_count)
+            self.assertIsNotNone(workflow.step(DEVELOPMENT_STEP_ID).execution_settings)
+
+    def test_a_model_mismatch_survives_the_reload_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _workflow, attempts, index = self._reloaded_attempts(root)
+
+            claude_attempt = next(
+                attempt
+                for attempt in attempts
+                if attempt.step_instance_id == DEVELOPMENT_STEP_ID
+            )
+            assert claude_attempt.provenance is not None
+            self.assertTrue(claude_attempt.provenance.model_mismatch)
+            evidence = claude_attempt.provenance.mismatch_evidence()
+            assert evidence is not None
+            self.assertIn(MODEL_MISMATCH_LABEL, evidence)
+            self.assertIn("claude-sonnet-5", evidence)
+            self.assertIn(_SUBSTITUTED_SERVING_MODEL, evidence)
+            # The mismatch is stated in the persisted document too, so a reader who
+            # never loads Dev Loop can still see it.
+            document = json.loads(
+                (index.parent / "README.loop.state.json").read_text(encoding="utf-8")
+            )
+            persisted = document["step_attempt_records"][str(DEVELOPMENT_STEP_ID)][
+                "0001"
+            ][0]["provenance"]
+            self.assertTrue(persisted["model_mismatch"])
+            self.assertEqual(persisted["requested_model"], "claude-sonnet-5")
+            self.assertEqual(persisted["serving_model"], _SUBSTITUTED_SERVING_MODEL)
+            self.assertEqual(persisted["backend"], ExecutionBackendId.CLAUDE_CODE.value)
+
+    def test_a_persisted_mismatch_cannot_be_downgraded_to_clean(self) -> None:
+        """The one thing that must never load quietly is a hidden substitution."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _workflow, _attempts, index = self._reloaded_attempts(root)
+            state_path = index.parent / "README.loop.state.json"
+            document = json.loads(state_path.read_text(encoding="utf-8"))
+            document["step_attempt_records"][str(DEVELOPMENT_STEP_ID)]["0001"][0][
+                "provenance"
+            ]["model_mismatch"] = False
+            state_path.write_text(json.dumps(document), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "model mismatch"):
+                LoopStateWriter(index).step_attempt_records("0001")
+
+    def test_an_attempt_recording_no_provenance_still_loads(self) -> None:
+        """A local deterministic step, or a runner that reported none at all."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _workflow, _attempts, index = self._reloaded_attempts(root)
+            state_path = index.parent / "README.loop.state.json"
+            document = json.loads(state_path.read_text(encoding="utf-8"))
+            for issues in document["step_attempt_records"].values():
+                for records in issues.values():
+                    for record in records:
+                        record["provenance"] = None
+            state_path.write_text(json.dumps(document), encoding="utf-8")
+
+            attempts = LoopStateWriter(index).step_attempt_records("0001")
+
+            self.assertTrue(attempts)
+            self.assertEqual(
+                [attempt.provenance for attempt in attempts],
+                [None] * len(attempts),
             )
 
 

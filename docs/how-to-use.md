@@ -346,7 +346,28 @@ with that backend's model, reasoning effort, and Fast, so one backend's model is
 never grafted onto another. The graph, bindings, budgets, and guidance remain
 unchanged. The same state keeps generic Step Runtime States and an
 ordered Step Attempt Record for every execution, so duplicate reviews,
-changes-requested rework, interruption, and resume remain inspectable. Portable
+changes-requested rework, interruption, and resume remain inspectable.
+
+Every Step Attempt Record also carries a `provenance` object recording which
+Execution Backend ran that attempt, the model its Step Execution Settings
+requested, the model the finished turn's own usage accounting reported, and — for
+a Claude-backed attempt — the cost and turn count the provider reported. A
+mixed-backend attempt history is therefore readable from the state file alone,
+without opening a durable log. Only Claude-backed attempts record cost and turn
+count, so the two backends' spend is not yet directly comparable.
+Cost is evidence only: the Execution Budget is time-based and no spend limit is
+derived from it.
+
+If the requested and reported models differ, the record's `model_mismatch` is
+`true`, both identifiers are kept, and the disagreement is announced in the
+Portable Activity Feed while the run is in front of you and on the Workflow
+Status Bar as `MODEL MISMATCH`. Dev Loop deliberately does not reconcile them: a
+prototype observed a provider's session-initialisation event and its own usage
+accounting naming different models, and until that is understood a substitution
+must be visible rather than tidied away. The flag is derived from the two
+identifiers rather than stored independently, and loading a state file whose
+recorded flag disagrees with them fails with that message instead of reading the
+attempt back as clean. Portable
 workflow schemas v1 and v2 are intentionally rejected; repair or recreate an old
 local default in `/options` rather than expecting migration or compatibility
 mode. When preflight finds a superseded or malformed User Workflow Default,

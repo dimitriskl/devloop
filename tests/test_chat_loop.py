@@ -776,7 +776,10 @@ class RunPlanningChatTests(unittest.TestCase):
         self.assertIn("WORKFLOW", output.getvalue())
         self.assertIn("ISSUE STEPS", output.getvalue())
         self.assertIn(
-            "ACTIVE Analysis · model gpt-5.6-sol · effort xhigh · Fast OFF",
+            # The Execution Backend leads the active step's settings; at this
+            # width the bounded frame truncates the Fast preference after it.
+            "ACTIVE Analysis · backend Codex CLI · model gpt-5.6-sol"
+            " · effort xhigh · Fast",
             output.getvalue(),
         )
 

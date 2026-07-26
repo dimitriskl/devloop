@@ -122,8 +122,12 @@ A fresh Workflow Step attempt offered when an interrupted attempt's Execution Th
 _Avoid_: Resumed thread, automatic retry
 
 **Step Attempt Record**:
-The immutable history entry for one execution of a Workflow Step, keyed by Step Instance ID and recording its Issue when applicable, pass, backend thread, Step Outcome, typed output Artifacts, and timing.
+The immutable history entry for one execution of a Workflow Step, keyed by Step Instance ID and recording its Issue when applicable, pass, backend thread, Step Outcome, typed output Artifacts, timing, and Step Attempt Provenance.
 _Avoid_: Component-wide result, fixed development/review/QA fields
+
+**Step Attempt Provenance**:
+The record of which Execution Backend and which model actually did one attempt's work: the Execution Backend, the model its Step Execution Settings requested, the model the finished turn's own usage accounting reported, and any reported cost and turn count. A requested-versus-serving model mismatch is derived from the two model identifiers and recorded as evidence rather than reconciled.
+_Avoid_: Step Execution Settings, spend limit, preformatted status string
 
 **Step Runtime State**:
 The resumable current state of one Workflow Step instance, keyed by Step Instance ID and also by Issue ID when the step is issue-scoped.
@@ -398,7 +402,7 @@ The fixed one-row active-step summary within the Workflow Progress Dashboard, co
 _Avoid_: Component footer, free-form status message
 
 **Status Bar Model**:
-The typed presentation data supplied to the Workflow Status Bar, with optional backend-reported provider, model, and token usage fields.
+The typed presentation data supplied to the Workflow Status Bar, with optional Execution Backend, requested-model, serving-model, and model-mismatch fields.
 _Avoid_: Preformatted string, domain entity
 
 **Issue Board**:

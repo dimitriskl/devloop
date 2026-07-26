@@ -5,11 +5,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from devloop.codex_runner import RoleResult
+from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FINAL_REVIEW_STEP_ID,
     REVIEWER_COMPONENT_ID,
+    FastPreference,
     StepAttemptRecord,
+    StepExecutionSettings,
     StepInstanceId,
     StepOutcome,
     StepRuntimeState,
@@ -24,6 +27,7 @@ from devloop.statusui import (
     project_workflow_progress,
     render_workflow_progress,
 )
+from devloop.step_configuration import MODEL_MISMATCH_LABEL, StepAttemptProvenance
 from devloop.terminal_editor import display_width
 
 
@@ -154,6 +158,7 @@ class WorkflowProgressProjectionTests(unittest.TestCase):
         self.assertEqual(active.display_name, "Development")
         self.assertEqual(active.pass_number, 2)
         self.assertEqual(active.elapsed_seconds, 12)
+        self.assertEqual(active.backend, "Codex CLI")
         self.assertEqual(active.model, "gpt-5.6-luna")
         self.assertEqual(active.reasoning_effort, "high")
         self.assertEqual(active.fast, "OFF")
@@ -263,7 +268,8 @@ class WorkflowProgressProjectionTests(unittest.TestCase):
         self.assertIn("Security Review", rendered)
         self.assertIn("Final Review", rendered)
         self.assertIn(
-            "ACTIVE Development - model gpt-5.6-luna - effort high - Fast OFF",
+            "ACTIVE Development - backend Codex CLI - model gpt-5.6-luna"
+            " - effort high - Fast OFF",
             rendered,
         )
         self.assertIn(
@@ -386,6 +392,239 @@ class WorkflowProgressWrapperTests(unittest.TestCase):
         self.assertIn("devloop.interactive_runner", wrappers["bash-planner"])
         self.assertIn("devloop.interactive_runner", wrappers["powershell-planner"])
         self.assertTrue(all("statusui" not in text for text in wrappers.values()))
+
+
+CLAUDE_STEP_SETTINGS = StepExecutionSettings(
+    ExecutionBackendId.CLAUDE_CODE,
+    "claude-sonnet-5",
+    "high",
+    FastPreference.OFF,
+)
+SERVED_BY_ANOTHER_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _claude_backed_workflow():
+    """The default Workflow with its development step moved to Claude Code."""
+    workflow = default_portable_workflow()
+    return replace(
+        workflow,
+        steps=tuple(
+            replace(step, execution_settings=CLAUDE_STEP_SETTINGS)
+            if step.instance_id == DEVELOPMENT_STEP_ID
+            else step
+            for step in workflow.steps
+        ),
+    )
+
+
+def _development_attempt(provenance: StepAttemptProvenance) -> StepAttemptRecord:
+    return StepAttemptRecord(
+        attempt_id="attempt-dev-1",
+        step_instance_id=DEVELOPMENT_STEP_ID,
+        issue_id="0009",
+        pass_number=1,
+        prompt_session_id="prompt-dev-1",
+        outcome=StepOutcome.SUCCEEDED,
+        result=RoleResult(status="PASS", summary="Implementation complete."),
+        outputs={},
+        started_at="2026-07-16T09:00:00Z",
+        finished_at="2026-07-16T09:00:04Z",
+        elapsed_seconds=4,
+        provenance=provenance,
+    )
+
+
+class BackendProvenancePresentationTests(unittest.TestCase):
+    """The Workflow Status Bar and the Workflow Progress Dashboard, one surface.
+
+    Every assertion renders through the shared projection, which the Textual shell,
+    the Hybrid Console Dashboard, the PowerShell and Bash surfaces, redirected
+    output and Plain Mode all use, so a rendering asserted once holds for all of
+    them.
+    """
+
+    def _projection(
+        self,
+        *,
+        provenance: StepAttemptProvenance | None = None,
+        pass_number: int = 1,
+    ):
+        return project_workflow_progress(
+            _claude_backed_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=pass_number,
+                    attempt_id="attempt-dev-live",
+                ),
+            ),
+            () if provenance is None else (_development_attempt(provenance),),
+            issue_id="0009",
+            issue_title="Record backend provenance",
+            activity="Using the Bash tool.",
+        )
+
+    def _rendered(self, projection, *, width: int = 120, unicode: bool = False) -> str:
+        return render_workflow_progress(
+            projection,
+            width=width,
+            color=False,
+            unicode=unicode,
+            frame="/",
+        )
+
+    def test_the_status_bar_names_the_backend_ahead_of_the_model(self) -> None:
+        rendered = self._rendered(self._projection())
+
+        self.assertIn(
+            "ACTIVE Development - backend Claude Code - model claude-sonnet-5"
+            " - effort high - Fast OFF",
+            rendered,
+        )
+
+    def test_a_recorded_mismatch_is_stated_ahead_of_the_model_it_disputes(
+        self,
+    ) -> None:
+        projection = self._projection(
+            provenance=StepAttemptProvenance(
+                backend=ExecutionBackendId.CLAUDE_CODE,
+                requested_model="claude-sonnet-5",
+                serving_model=SERVED_BY_ANOTHER_MODEL,
+                cost_usd=0.0415051,
+                turn_count=5,
+            ),
+            pass_number=2,
+        )
+
+        rendered = self._rendered(projection, width=160)
+
+        self.assertIn(
+            f"ACTIVE Development - backend Claude Code - {MODEL_MISMATCH_LABEL}"
+            " - model claude-sonnet-5"
+            f" - served {SERVED_BY_ANOTHER_MODEL}"
+            " - effort high - Fast OFF",
+            rendered,
+        )
+
+    def test_a_matching_serving_model_adds_nothing_to_the_status_bar(self) -> None:
+        projection = self._projection(
+            provenance=StepAttemptProvenance(
+                backend=ExecutionBackendId.CLAUDE_CODE,
+                requested_model="claude-sonnet-5",
+                serving_model="claude-sonnet-5",
+            ),
+            pass_number=2,
+        )
+
+        rendered = self._rendered(projection)
+
+        self.assertNotIn(MODEL_MISMATCH_LABEL, rendered)
+        self.assertNotIn("served", rendered)
+        self.assertIn(
+            "ACTIVE Development - backend Claude Code - model claude-sonnet-5",
+            rendered,
+        )
+
+    def test_a_mismatch_narrows_to_the_backend_and_both_models_first(self) -> None:
+        """The bounded frame truncates the settings, never the warning."""
+        projection = self._projection(
+            provenance=StepAttemptProvenance(
+                backend=ExecutionBackendId.CLAUDE_CODE,
+                requested_model="claude-sonnet-5",
+                serving_model=SERVED_BY_ANOTHER_MODEL,
+            ),
+            pass_number=2,
+        )
+
+        narrow = self._rendered(projection, width=120)
+
+        active_line = next(
+            line for line in narrow.splitlines() if line.startswith("ACTIVE ")
+        )
+        self.assertLessEqual(display_width(active_line), 120)
+        self.assertIn(MODEL_MISMATCH_LABEL, active_line)
+        self.assertIn("claude-sonnet-5", active_line)
+        self.assertIn(SERVED_BY_ANOTHER_MODEL, active_line)
+        self.assertNotIn("Fast", active_line)
+
+    def test_a_local_deterministic_step_still_reads_as_local_execution(self) -> None:
+        workflow = _claude_backed_workflow()
+        local_step = replace(
+            workflow.step(DEVELOPMENT_STEP_ID),
+            execution_settings=None,
+        )
+        projection = project_workflow_progress(
+            replace(
+                workflow,
+                steps=tuple(
+                    local_step if step.instance_id == DEVELOPMENT_STEP_ID else step
+                    for step in workflow.steps
+                ),
+            ),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id="0009",
+        )
+
+        self.assertIn(
+            "ACTIVE Development - local execution",
+            self._rendered(projection),
+        )
+
+    def test_the_step_rows_are_unchanged_for_every_backend(self) -> None:
+        """Nothing is added where no backend or model was shown before."""
+        rendered = self._rendered(self._projection())
+
+        step_rows = [
+            line
+            for line in rendered.splitlines()
+            if line.startswith(("WORKING ", "WAITING ", "PASS ", "BLOCKED ", "FAIL "))
+        ]
+        self.assertTrue(step_rows)
+        for row in step_rows:
+            with self.subTest(row=row):
+                self.assertNotIn("Claude Code", row)
+                self.assertNotIn("Codex CLI", row)
+                self.assertNotIn("claude-sonnet-5", row)
+                self.assertNotIn("gpt-5.6", row)
+
+    def test_plain_mode_presents_the_same_information_with_no_terminal_control(
+        self,
+    ) -> None:
+        projection = self._projection(
+            provenance=StepAttemptProvenance(
+                backend=ExecutionBackendId.CLAUDE_CODE,
+                requested_model="claude-sonnet-5",
+                serving_model=SERVED_BY_ANOTHER_MODEL,
+            ),
+            pass_number=2,
+        )
+
+        full_screen = self._rendered(projection, width=160, unicode=True)
+        plain = self._rendered(projection, width=160, unicode=False)
+
+        for rendered in (full_screen, plain):
+            with self.subTest(unicode=rendered is full_screen):
+                self.assertIn("Claude Code", rendered)
+                self.assertIn("claude-sonnet-5", rendered)
+                self.assertIn(SERVED_BY_ANOTHER_MODEL, rendered)
+                self.assertIn(MODEL_MISMATCH_LABEL, rendered)
+        # Plain Mode carries no cursor addressing, no colour and no box drawing.
+        self.assertNotIn("\x1b", plain)
+        self.assertFalse(set("│╭╮╰╯┌┐└┘").intersection(plain))
+        # And it is deterministic: the same projection renders identically.
+        self.assertEqual(plain, self._rendered(projection, width=160, unicode=False))
 
 
 if __name__ == "__main__":

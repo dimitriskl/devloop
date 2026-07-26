@@ -25,12 +25,14 @@ from .backend import (
     ExecutionBackendId,
     LogWriter,
     RefusalRecord,
+    StepAttemptProvenance,
     StepAttemptRequest,
     StepAttemptResult,
     StepSettingsAuthorization,
     TransientFailurePredicate,
     describe_refusals,
     parse_execution_backend_id,
+    report_model_mismatch,
 )
 from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
 from .checkpoint import CheckpointBudget, update_checkpoint_for_step_activity
@@ -81,6 +83,7 @@ __all__ = [
     "RunWideBlockerPolicy",
     "StepActivityEvent",
     "StepActivityKind",
+    "StepAttemptProvenance",
     "StepAttemptRequest",
     "StepAttemptResult",
     "StepSettingsAuthorization",
@@ -91,6 +94,7 @@ __all__ = [
     "load_bundled_model_catalog",
     "parse_execution_backend_id",
     "registered_execution_backend_ids",
+    "report_model_mismatch",
     "resolve_execution_backend",
     "run_attempt_with_transient_retries",
     "update_checkpoint_for_step_activity",

@@ -26,6 +26,7 @@ from .portable_execution_backend import (
     RefusalRecord,
     RunWideBlocker,
     RunWideBlockerPolicy,
+    StepAttemptProvenance,
     StepAttemptRequest,
     describe_refusals,
     extract_json_object,
@@ -112,6 +113,12 @@ class RoleResult:
     fix_list: list[str] = field(default_factory=list)
     residual_risks: list[str] = field(default_factory=list)
     raw_message: str = ""
+    # Which Execution Backend and which model actually did the work. Carried
+    # beside the role result rather than inside its structured contract — like
+    # ``raw_message`` — because it is Dev Loop's own record of the attempt, not
+    # something the agent reported, and it is deliberately absent from
+    # ``result_to_dict`` so no provenance ever reaches an agent's prompt.
+    provenance: StepAttemptProvenance | None = None
 
     @classmethod
     def from_message(
@@ -119,6 +126,7 @@ class RoleResult:
         message: str,
         *,
         backend: ExecutionBackendId | None = None,
+        provenance: StepAttemptProvenance | None = None,
     ) -> "RoleResult":
         """Parse one attempt's role result, naming the backend that produced it.
 
@@ -134,6 +142,7 @@ class RoleResult:
                     f"{_backend_subject(backend)} {ROLE_SCHEMA_MISMATCH_SUMMARY}"
                 ),
                 raw_message=message,
+                provenance=provenance,
             )
 
         status = str(data.get("status", "BLOCKED")).upper()
@@ -149,6 +158,7 @@ class RoleResult:
             fix_list=list_of_strings(data.get("fix_list")),
             residual_risks=list_of_strings(data.get("residual_risks")),
             raw_message=message,
+            provenance=provenance,
         )
 
 
@@ -298,6 +308,19 @@ class CodexRunner:
         self.write_log_text(logs.stdout, process.stdout)
         self.write_log_text(logs.stderr, process.stderr)
 
+        # Provenance is completed here rather than trusted to each backend,
+        # because the backend a Workflow Step was dispatched to and the model its
+        # Step Execution Settings requested are facts the runner holds without
+        # asking any provider. Every role result below carries it, including the
+        # blocked ones: which backend and model produced a refusal is exactly what
+        # a mixed-backend attempt history has to be able to answer.
+        provenance = result.provenance.completed_with(
+            backend=backend.backend_id,
+            requested_model=(
+                execution_settings.model if execution_settings is not None else None
+            ),
+        )
+
         # Step Outcome precedence, in strict order. A Run-Wide Blocker is
         # evaluated first, ahead of every other signal including a Permission
         # Denial, because it is the only signal that says this attempt never got a
@@ -329,6 +352,7 @@ class CodexRunner:
                     log_path=logs.stdout,
                 ),
                 raw_message=result.message,
+                provenance=provenance,
             )
 
         # A backend that reported an error, or an ending other than completion,
@@ -347,6 +371,7 @@ class CodexRunner:
                     stderr_path=logs.stderr,
                 ),
                 raw_message=result.message or process.stderr,
+                provenance=provenance,
             )
 
         if process.returncode != 0:
@@ -359,9 +384,14 @@ class CodexRunner:
                     stderr_path=logs.stderr,
                 ),
                 raw_message=process.stderr,
+                provenance=provenance,
             )
 
-        return RoleResult.from_message(result.message, backend=backend.backend_id)
+        return RoleResult.from_message(
+            result.message,
+            backend=backend.backend_id,
+            provenance=provenance,
+        )
 
     def render_dry_run_prompts(
         self,

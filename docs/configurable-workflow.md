@@ -48,7 +48,12 @@ identity, and ordered Step Attempt Records.
 interface with its frozen Step Attempt request and result types, the neutral
 step-activity event that the Portable Activity Feed and Execution Budget
 checkpointing both consume, the Run-Wide Blocker domain type, and one module per
-backend. `registry.py` registers both members of `ExecutionBackendId`:
+backend. A backend's result also carries the provenance it can state about the
+attempt — the model the finished turn's usage accounting reported, its cost, and
+its turn count. `step_configuration.py` owns that record beside the Step Attempt
+Context, including the derived requested-versus-serving model mismatch that the
+role runner completes with the backend it dispatched to and the model the Step
+Execution Settings requested. `registry.py` registers both members of `ExecutionBackendId`:
 `ExecutionBackendId.CODEX_CLI` to `codex_cli.py` and
 `ExecutionBackendId.CLAUDE_CODE` to `claude_code.py`, each behind a factory
 called only when a Workflow Step actually needs that backend, so a Workflow that

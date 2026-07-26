@@ -10,11 +10,22 @@ provider executable.
 | --- | --- |
 | `bypass-stream.jsonl` | A full attempt with **no** settings isolation, so the operator's own hooks, plugins and MCP servers loaded. This is the negative half of the isolation contrast, and the widest sample of event shapes. |
 | `isolated-stream.jsonl` | The same kind of attempt **with** `--setting-sources project,local` and `--strict-mcp-config`, so no hook fired and no plugin or MCP server loaded. |
-| `alias-resolution-stream.jsonl` | A run started from a short model alias, showing the concrete pinned model identifier the CLI resolved it to. |
+| `alias-resolution-stream.jsonl` | A run started from a short model alias, showing the concrete pinned model identifier the CLI resolved it to — **and** its `system/init` model disagreeing with the model its own terminal `result` accounts the turn against. |
 | `permission-bypass.result.json` | The terminal `result` event under `bypassPermissions`: no permission denial. |
 | `permission-dontask.result.json` | The terminal `result` event under `dontask`: a Bash denial, reported with `is_error: false` and a `success` subtype. |
 | `permission-auto.result.json` | The same denial under `auto`. |
 | `permission-acceptedits.result.json` | The same denial under `acceptEdits`. |
+
+`alias-resolution-stream.jsonl` carries the evidence behind issue
+`0008-record-backend-provenance`. Its `system/init` event reports
+`claude-haiku-4-5-20251001` while its terminal `result` accounts the turn's usage
+against `claude-sonnet-5`. Because a model selection is verified and pinned from
+that same initialisation event, the serving model recorded on a Step Attempt
+Record is read from the usage accounting and never from the initialisation event:
+back-filling it would make the two agree by construction and remove the only
+evidence a provider substitution leaves. **Do not "fix" this disagreement** — it is
+recorded provider behaviour and the reason the attempt record persists both
+models.
 
 The four `permission-*.result.json` envelopes also carry the Step Outcome
 precedence contract from issue `0004-fail-honestly-on-denied-tools`: a
