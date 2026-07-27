@@ -54,4 +54,13 @@ None - can start immediately.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Independent code review passed for the full `401ddab..a84b854` change range.
+- Independent QA passed all 12 acceptance criteria: 41 focused tests, 8 Plain
+  Mode/redirected regressions, an adversarial protocol matrix, two-child
+  isolation, real planning and delivery child entrypoints, compilation, diff,
+  and boundary scans.
+- The sandbox virtual environment was unavailable, so pytest, Ruff, and mypy
+  could not run. Validation used the sandbox Python interpreter with the
+  standard-library unittest suite.
