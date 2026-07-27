@@ -65,6 +65,11 @@ class WorkflowOptionsPageDefinition:
     action_groups: tuple[str, ...]
 
 
+@dataclass
+class WorkflowOptionsMenuState:
+    active_page: WorkflowOptionsPage | None = None
+
+
 RenderSelection = Callable[[str], None]
 FallbackChoice = Callable[[], str]
 FallbackCommand = Callable[[str], str]
@@ -214,39 +219,48 @@ def read_workflow_command(
     *,
     fallback: FallbackCommand,
     actions: Sequence[MenuAction],
+    state: WorkflowOptionsMenuState | None = None,
 ) -> str:
     """Read one workflow action using navigation keys or the legacy command line."""
     from .portable_runtime import active_portable_runtime, portable_plain_mode_active
 
+    menu_state = state or WorkflowOptionsMenuState()
     portable_runtime = active_portable_runtime()
     if portable_runtime is not None:
         while True:
-            numbered_options = _numbered_workflow_options(_WORKFLOW_OPTIONS_ROOT)
-            selected = portable_runtime.choose(
-                numbered_options,
-                default_key=numbered_options[0][0],
-                cancel_key=_WORKFLOW_OPTIONS_BACK_COMMAND,
-                render=_render_workflow_options_root,
-                shortcuts={
-                    str(index): command
-                    for index, (command, _label) in enumerate(
-                        _WORKFLOW_OPTIONS_ROOT,
-                        start=1,
-                    )
-                },
-            )
-            if selected == _WORKFLOW_OPTIONS_BACK_COMMAND:
-                return ""
-            page_definition = _workflow_options_page(selected)
+            page_definition = _active_workflow_options_page(menu_state)
             if page_definition is None:
-                return selected
+                numbered_options = _numbered_workflow_options(
+                    _WORKFLOW_OPTIONS_ROOT
+                )
+                selected = portable_runtime.choose(
+                    numbered_options,
+                    default_key=numbered_options[0][0],
+                    cancel_key=_WORKFLOW_OPTIONS_BACK_COMMAND,
+                    render=_render_workflow_options_root,
+                    shortcuts={
+                        str(index): command
+                        for index, (command, _label) in enumerate(
+                            _WORKFLOW_OPTIONS_ROOT,
+                            start=1,
+                        )
+                    },
+                )
+                if selected == _WORKFLOW_OPTIONS_BACK_COMMAND:
+                    return ""
+                page_definition = _workflow_options_page(selected)
+                if page_definition is None:
+                    return selected
+                menu_state.active_page = page_definition.page
             selected = _choose_workflow_options_page(
                 portable_runtime,
                 actions,
                 page_definition,
             )
-            if selected != _WORKFLOW_OPTIONS_BACK_COMMAND:
-                return selected
+            if selected == _WORKFLOW_OPTIONS_BACK_COMMAND:
+                menu_state.active_page = None
+                continue
+            return selected
     if portable_plain_mode_active():
         return fallback(prompt)
     keys = _open_navigation_source()
@@ -254,18 +268,20 @@ def read_workflow_command(
         return fallback(prompt)
     _set_cursor_visible(False)
     try:
+        if menu_state.active_page is not None:
+            return _choose_action(keys, actions, menu_state)
         event = read_navigation_key(keys)
         direct_command = _WORKFLOW_KEY_COMMANDS.get(event.key)
         if direct_command is not None:
             return direct_command
         if event.key in {NavigationKey.ENTER, NavigationKey.F9}:
-            return _choose_action(keys, actions)
+            return _choose_action(keys, actions, menu_state)
         if event.key is NavigationKey.TEXT:
             if event.text.isdecimal():
                 return event.text
             if event.text == "/":
-                return _choose_action(keys, actions)
-            return _choose_action(keys, actions)
+                return _choose_action(keys, actions, menu_state)
+            return _choose_action(keys, actions, menu_state)
         return ""
     finally:
         keys.close()
@@ -399,6 +415,14 @@ def _workflow_options_page(
     )
 
 
+def _active_workflow_options_page(
+    state: WorkflowOptionsMenuState,
+) -> WorkflowOptionsPageDefinition | None:
+    if state.active_page is None:
+        return None
+    return _workflow_options_page(state.active_page.value)
+
+
 def _workflow_options_page_actions(
     actions: Sequence[MenuAction],
     definition: WorkflowOptionsPageDefinition,
@@ -522,9 +546,10 @@ def _set_cursor_visible(visible: bool) -> None:
 def _choose_action(
     keys: TerminalKeySource,
     actions: Sequence[MenuAction],
+    state: WorkflowOptionsMenuState,
 ) -> str:
     selected = 0
-    active_page: WorkflowOptionsPageDefinition | None = None
+    active_page = _active_workflow_options_page(state)
     while True:
         width, height = terminal_dimensions()
         if active_page is None:
@@ -598,6 +623,7 @@ def _choose_action(
                 if active_page is None:
                     return ""
                 active_page = None
+                state.active_page = None
                 selected = 0
             else:
                 command = visible_commands[selected]
@@ -605,17 +631,20 @@ def _choose_action(
                 if page is None:
                     return command
                 active_page = page
+                state.active_page = page.page
                 selected = 0
         elif event.key is NavigationKey.ESCAPE:
             if active_page is None:
                 return ""
             active_page = None
+            state.active_page = None
             selected = 0
         elif event.key is NavigationKey.TEXT:
             if event.text.casefold() == "b":
                 if active_page is None:
                     return ""
                 active_page = None
+                state.active_page = None
                 selected = 0
                 continue
             position = _number_shortcut_position(event.text, len(choices))
@@ -626,6 +655,7 @@ def _choose_action(
             if page is None:
                 return command
             active_page = page
+            state.active_page = page.page
             selected = 0
 
 

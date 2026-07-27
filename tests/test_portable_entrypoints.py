@@ -14,7 +14,7 @@ from devloop.portable_runtime import (
     portable_plain_mode_active,
     portable_runtime_session,
 )
-from devloop.terminal_menu import read_workflow_command
+from devloop.terminal_menu import WorkflowOptionsMenuState, read_workflow_command
 from devloop.workflow_editor import EditorResult, WORKFLOW_ACTIONS, run_workflow_editor
 
 
@@ -251,6 +251,84 @@ class PortableEntrypointTests(unittest.TestCase):
             bridge.respond(choice.request_id, "cancel")
             worker.join(timeout=1)
 
+        self.assertEqual(result, [EditorResult.CANCELLED])
+
+    def test_workflow_action_returns_to_its_submenu_after_it_runs(self) -> None:
+        bridge = PortableRuntimeBridge()
+        result: list[EditorResult] = []
+        output: list[str] = []
+        options_state = WorkflowOptionsMenuState()
+
+        def next_choice() -> PortableRuntimeEvent:
+            while True:
+                event = bridge.next_event(timeout=1)
+                if event.kind is PortableRuntimeEventKind.CHOICE_REQUESTED:
+                    return event
+
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+
+            def edit() -> None:
+                with portable_runtime_session(bridge):
+                    result.append(
+                        run_workflow_editor(
+                            configuration_path,
+                            read_line=lambda _prompt: self.fail(
+                                "unexpected line input"
+                            ),
+                            read_command=lambda prompt: read_workflow_command(
+                                prompt,
+                                fallback=lambda _prompt: self.fail(
+                                    "unexpected fallback input"
+                                ),
+                                actions=WORKFLOW_ACTIONS,
+                                state=options_state,
+                            ),
+                            write=output.append,
+                            terminal_width=100,
+                            terminal_height=30,
+                        )
+                    )
+
+            worker = threading.Thread(target=edit)
+            worker.start()
+            try:
+                workflow = next_choice()
+                bridge.respond(workflow.request_id, "actions")
+                options = next_choice()
+                bridge.respond(options.request_id, options.options[3][0])
+                view = next_choice()
+                advanced_key = next(
+                    key
+                    for key, label in view.options
+                    if "technical details" in label
+                )
+                bridge.respond(view.request_id, advanced_key)
+                after_action = next_choice()
+                after_action_labels = tuple(
+                    label for _key, label in after_action.options
+                )
+
+                if "B. Back to Options" in after_action_labels:
+                    bridge.respond(after_action.request_id, after_action.options[-1][0])
+                    options = next_choice()
+                    bridge.respond(options.request_id, options.cancel_key or "")
+                    workflow = next_choice()
+                    bridge.respond(workflow.request_id, "cancel")
+                else:
+                    bridge.respond(after_action.request_id, "cancel")
+                worker.join(timeout=1)
+            finally:
+                if worker.is_alive():
+                    bridge.request_stop()
+                    worker.join(timeout=1)
+
+        self.assertIn("4. Show or hide technical details", after_action_labels)
+        self.assertIn("B. Back to Options", after_action_labels)
+        self.assertTrue(
+            any("Technical details shown" in line for line in output),
+            output,
+        )
         self.assertEqual(result, [EditorResult.CANCELLED])
 
 

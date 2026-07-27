@@ -58,7 +58,12 @@ from .cli_ui import (
     render_screen_frame,
     terminal_dimensions,
 )
-from .terminal_menu import choose_menu_option, read_workflow_command, render_app_screen
+from .terminal_menu import (
+    WorkflowOptionsMenuState,
+    choose_menu_option,
+    read_workflow_command,
+    render_app_screen,
+)
 from .worktree import (
     branch_exists,
     build_worktree_add_command,
@@ -883,6 +888,7 @@ def run_options_menu(
     installed_components = component_catalog or build_portable_component_catalog(
         bundle_root
     )
+    workflow_options_state = WorkflowOptionsMenuState()
     width, height = terminal_dimensions()
     result = run_workflow_editor(
         state_path,
@@ -891,6 +897,7 @@ def run_options_menu(
             prompt,
             fallback=read_prompt,
             actions=WORKFLOW_ACTIONS,
+            state=workflow_options_state,
         ),
         write=print,
         terminal_width=width,

@@ -1095,6 +1095,7 @@ class _WorkflowEditorSession:
         self._show_advanced = False
         self._show_graph = False
         self._notice: str | None = None
+        self._application_options_open = False
 
     def run(self) -> EditorResult:
         while True:
@@ -1118,6 +1119,8 @@ class _WorkflowEditorSession:
         assert portable_runtime is not None
         if self._default_recovery_state is not WorkflowDefaultRecoveryState.NORMAL:
             return self._read_application_recovery_command()
+        if self._application_options_open:
+            return self._read_application_options_command()
         originally_selected_step_id = self._selected_step_id()
         workflow_steps = self._viewed_workflow().steps
         selected_position = next(
@@ -1149,12 +1152,21 @@ class _WorkflowEditorSession:
             },
         )
         if command == "actions":
-            return self._read_command(self._prompt()).strip()
+            self._application_options_open = True
+            return self._read_application_options_command()
         if command.startswith(_APPLICATION_STEP_PREFIX):
             if self._selected_step_id() == originally_selected_step_id:
-                return self._read_command(self._prompt()).strip()
+                self._application_options_open = True
+                return self._read_application_options_command()
             return _APPLICATION_SELECTION_COMMAND
         return command
+
+    def _read_application_options_command(self) -> str:
+        command = self._read_command(self._prompt()).strip()
+        if command:
+            return command
+        self._application_options_open = False
+        return _APPLICATION_SELECTION_COMMAND
 
     def _read_application_recovery_command(self) -> str:
         from .portable_runtime import active_portable_runtime
@@ -2758,6 +2770,8 @@ class _WorkflowEditorSession:
 
     def _toggle_advanced(self) -> None:
         self._show_advanced = not self._show_advanced
+        state = "shown" if self._show_advanced else "hidden"
+        self._message(f"Technical details {state}. Press F4 to toggle them.")
 
     def _toggle_graph(self) -> None:
         self._show_graph = not self._show_graph
