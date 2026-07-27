@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -127,6 +128,7 @@ class ResumeCandidate:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_arguments = tuple(argv if argv is not None else sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -154,7 +156,11 @@ def main(argv: list[str] | None = None) -> int:
         if ui_mode is PortableUiMode.APPLICATION:
             if active_portable_runtime() is None:
                 try:
-                    from .portable_ui.app import run_portable_application
+                    from .portable_sessions import (
+                        PortableSessionLaunch,
+                        PortableWorkflowOperation,
+                    )
+                    from .portable_ui.app import run_portable_sessions_application
                 except ModuleNotFoundError as error:
                     if error.name != "textual":
                         raise
@@ -165,7 +171,14 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 78
 
-                return run_portable_application(operation)
+                return run_portable_sessions_application(
+                    PortableSessionLaunch(
+                        session_id=str(uuid.uuid4()),
+                        checkout=Path.cwd(),
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=raw_arguments,
+                    )
+                )
             return operation()
         with portable_plain_mode_session():
             return operation()

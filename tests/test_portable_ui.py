@@ -9,6 +9,14 @@ from textual.containers import Horizontal
 from textual.widgets import OptionList, Static
 
 from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
+from devloop.portable_sessions import (
+    PortableSessionIntent,
+    PortableSessionEvent,
+    PortableSessionLaunch,
+    PortableSessionSnapshot,
+    PortableSessionStatus,
+    PortableWorkflowOperation,
+)
 from devloop.issue_pack import Issue
 from devloop.cli import choose_run_review_action
 from devloop.run_review import RunReviewAction, build_run_review, render_run_review
@@ -21,6 +29,101 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sessions_tab_is_passive_until_new_session_is_selected(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+                self.events: list[PortableSessionEvent] = []
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def complete(self, launch: PortableSessionLaunch) -> None:
+                self.events.append(
+                    PortableSessionEvent(
+                        PortableSessionSnapshot(
+                            session_id=launch.session_id,
+                            checkout=launch.checkout,
+                            status=PortableSessionStatus.COMPLETED,
+                            activity=("Planning completed",),
+                            result=0,
+                        )
+                    )
+                )
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        launch = PortableSessionLaunch(
+            session_id="session-ui",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            self.assertEqual(supervisor.intents, [])
+            self.assertEqual(
+                str(app.query_one("#portable-tabs", Static).render()),
+                "Sessions",
+            )
+            self.assertIn(
+                "No workflow worker starts automatically",
+                str(app.query_one("#portable-detail", Static).render()),
+            )
+
+            await pilot.press("f2")
+            await pilot.pause()
+
+            self.assertEqual(len(supervisor.intents), 1)
+            self.assertIn(
+                "[RUNNING]",
+                str(app.query_one("#portable-tabs", Static).render()),
+            )
+
+            supervisor.complete(launch)
+            for _ in range(20):
+                await pilot.pause()
+                if "COMPLETED" in str(
+                    app.query_one("#portable-status", Static).render()
+                ):
+                    break
+            self.assertIn(
+                "Result: 0",
+                str(app.query_one("#portable-detail", Static).render()),
+            )
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            self.assertEqual(len(supervisor.intents), 1)
+            self.assertEqual(
+                app.query_one("#portable-navigation", OptionList).option_count,
+                2,
+            )
+
     async def test_running_workflow_keeps_implementation_context_visible(self) -> None:
         bridge = PortableRuntimeBridge()
         release_operation = threading.Event()

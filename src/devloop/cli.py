@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -373,6 +374,7 @@ def main(
     *,
     workflow_snapshot: WorkflowDefinition | None = None,
 ) -> int:
+    raw_arguments = tuple(argv if argv is not None else sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -399,7 +401,11 @@ def main(
     if ui_mode is PortableUiMode.APPLICATION:
         if active_portable_runtime() is None:
             try:
-                from .portable_ui.app import run_portable_application
+                from .portable_sessions import (
+                    PortableSessionLaunch,
+                    PortableWorkflowOperation,
+                )
+                from .portable_ui.app import run_portable_sessions_application
             except ModuleNotFoundError as error:
                 if error.name != "textual":
                     raise
@@ -410,7 +416,14 @@ def main(
                 )
                 return 78
 
-            return run_portable_application(operation)
+            return run_portable_sessions_application(
+                PortableSessionLaunch(
+                    session_id=str(uuid.uuid4()),
+                    checkout=Path.cwd(),
+                    operation=PortableWorkflowOperation.DELIVERY,
+                    arguments=raw_arguments,
+                )
+            )
         return operation()
     with portable_plain_mode_session():
         return operation()

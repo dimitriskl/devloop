@@ -26,6 +26,16 @@ from ..portable_runtime import (
     portable_runtime_session,
     route_worker_output,
 )
+from ..portable_sessions import (
+    PortableSessionController,
+    PortableSessionIntent,
+    PortableSessionIntentKind,
+    PortableSessionInputKind,
+    PortableSessionLaunch,
+    PortableSessionSnapshot,
+    PortableSessionStatus,
+    PortableSessionSupervisor,
+)
 from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
 from ..subprocess_utils import terminate_active_process_trees
 from ..terminal_text import sanitize_terminal_text
@@ -42,6 +52,8 @@ SELECTION_ACTION_BAR = f"Enter Select | {DEFAULT_ACTION_BAR}"
 CAPTURED_ACTIVITY_TITLE = "Captured Activity"
 COMPLETION_REVIEW_LOG_TITLE = "Completion Review and Captured Activity"
 RUN_CONTEXT_TITLE = "Run context"
+SESSIONS_TAB_ID = "__sessions__"
+NEW_SESSION_ID = "__new_session__"
 
 
 class PortableDetail(Static):
@@ -157,6 +169,14 @@ class PortableApplicationShell(App[None]):
         padding: 0 1;
         background: #0b5d7a;
         color: #ffffff;
+        text-style: bold;
+    }
+
+    #portable-tabs {
+        height: 1;
+        padding: 0 1;
+        background: #081b2c;
+        color: #9cdcfe;
         text-style: bold;
     }
 
@@ -319,6 +339,7 @@ class PortableApplicationShell(App[None]):
         Binding("f4", "logs", "Logs", show=False),
         Binding("f5", "context", "Context", show=False),
         Binding("f9", "actions", "Actions", show=False),
+        Binding("+", "new_session", "New Session", show=False),
         Binding("alt+v", "paste_image", "Paste image", show=False),
         Binding("escape", "back", "Back", show=False),
         Binding("ctrl+c", "request_stop", "Stop and Exit", show=False, priority=True),
@@ -327,11 +348,23 @@ class PortableApplicationShell(App[None]):
     def __init__(
         self,
         bridge: PortableRuntimeBridge,
-        operation: Callable[[], int],
+        operation: Callable[[], int] | None = None,
+        *,
+        session_supervisor: PortableSessionController | None = None,
+        session_launch: PortableSessionLaunch | None = None,
     ) -> None:
         super().__init__()
+        if operation is None and (session_supervisor is None or session_launch is None):
+            raise ValueError(
+                "PortableApplicationShell requires an operation or session launch."
+            )
         self._bridge = bridge
         self._operation = operation
+        self._session_supervisor = session_supervisor
+        self._session_launch = session_launch
+        self._active_session_id: str | None = None
+        self._session_snapshots: dict[str, PortableSessionSnapshot] = {}
+        self._session_input_values: set[str] = set()
         self._active_request_id: int | None = None
         self._cancel_key: str | None = None
         self.operation_result: int | None = None
@@ -356,6 +389,7 @@ class PortableApplicationShell(App[None]):
                 id="portable-header",
                 markup=False,
             )
+            yield Static("Sessions", id="portable-tabs", markup=False)
             with Horizontal(id="portable-body"):
                 with Vertical(id="portable-left-pane"):
                     yield Static(
@@ -399,6 +433,9 @@ class PortableApplicationShell(App[None]):
         self._sync_runtime_content_size()
         self.call_after_refresh(self._sync_runtime_content_size)
         self.set_interval(0.02, self._drain_runtime_events)
+        if self._session_supervisor is not None:
+            self._show_sessions_tab()
+            return
         self.run_worker(
             self._execute_operation,
             thread=True,
@@ -425,6 +462,9 @@ class PortableApplicationShell(App[None]):
         self.call_after_refresh(self._sync_runtime_content_size)
 
     def on_unmount(self) -> None:
+        if self._session_supervisor is not None:
+            self._session_supervisor.shutdown()
+            return
         self._stop_operation()
 
     def _stop_operation(self) -> None:
@@ -443,6 +483,7 @@ class PortableApplicationShell(App[None]):
         self._bridge.set_content_size(size.width, size.height)
 
     def _execute_operation(self) -> None:
+        assert self._operation is not None
         try:
             with portable_runtime_session(self._bridge):
                 result = self._operation()
@@ -522,11 +563,170 @@ class PortableApplicationShell(App[None]):
         )
 
     def _drain_runtime_events(self) -> None:
+        if self._session_supervisor is not None:
+            self._drain_session_events()
         while True:
             event = self._bridge.try_next_event()
             if event is None:
                 return
             self._handle_runtime_event(event)
+
+    def _drain_session_events(self) -> None:
+        assert self._session_supervisor is not None
+        while True:
+            event = self._session_supervisor.try_next_event()
+            if event is None:
+                return
+            self._show_session_snapshot(event.snapshot)
+
+    def _show_sessions_tab(self) -> None:
+        self._active_session_id = None
+        self._session_input_values.clear()
+        self.query_one("#portable-input", Input).display = False
+        self.query_one("#portable-header", Static).update("Dev Loop > Sessions")
+        self.query_one("#portable-tabs", Static).update("Sessions")
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.clear_options()
+        menu.add_option(Option("+ New Session", id=NEW_SESSION_ID))
+        for snapshot in self._session_snapshots.values():
+            checkout_name = snapshot.checkout.name or str(snapshot.checkout)
+            menu.add_option(
+                Option(
+                    f"{checkout_name} [{snapshot.status.value}]",
+                    id=snapshot.session_id,
+                )
+            )
+        menu.highlighted = 0
+        menu.focus()
+        launch = self._session_launch
+        checkout = str(launch.checkout) if launch is not None else ""
+        self.query_one("#portable-detail", Static).update(
+            "Portable Sessions\n\n"
+            "No workflow worker starts automatically.\n\n"
+            f"Selected checkout: {checkout}\n\n"
+            "Choose + New Session to launch this workflow in an isolated worker."
+        )
+        self.query_one("#portable-status", Static).update("READY")
+        self.query_one("#portable-actions", Static).update(
+            "+ New Session | Enter Select | F2 Primary | Esc Stay"
+        )
+
+    def _start_selected_session(self) -> None:
+        assert self._session_supervisor is not None
+        assert self._session_launch is not None
+        if self._active_session_id is not None:
+            return
+        existing = self._session_snapshots.get(self._session_launch.session_id)
+        if existing is not None:
+            self._show_session_snapshot(existing)
+            return
+        intent = PortableSessionIntent(
+            kind=PortableSessionIntentKind.START,
+            launch=self._session_launch,
+        )
+        snapshot = self._session_supervisor.handle_intent(intent)
+        self._active_session_id = snapshot.session_id
+        self._show_session_snapshot(snapshot)
+
+    def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
+        self._session_snapshots[snapshot.session_id] = snapshot
+        if self._active_session_id not in (None, snapshot.session_id):
+            return
+        self._active_session_id = snapshot.session_id
+        checkout_name = sanitize_terminal_text(
+            snapshot.checkout.name or str(snapshot.checkout),
+            preserve_newlines=False,
+        )
+        self.query_one("#portable-tabs", Static).update(
+            f"Sessions | {checkout_name} [{snapshot.status.value}]"
+        )
+        self.query_one("#portable-header", Static).update(
+            f"Dev Loop > {checkout_name}"
+        )
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.clear_options()
+        input_widget = self.query_one("#portable-input", Input)
+        input_widget.display = False
+        self._session_input_values.clear()
+        if (
+            snapshot.input_request is not None
+            and snapshot.input_request.kind is PortableSessionInputKind.CHOICE
+        ):
+            menu.add_options(
+                [
+                    Option(
+                        sanitize_terminal_text(label, preserve_newlines=False),
+                        id=value,
+                    )
+                    for value, label in snapshot.input_request.options
+                ]
+            )
+            self._session_input_values.update(
+                value for value, _label in snapshot.input_request.options
+            )
+            menu.highlighted = next(
+                (
+                    index
+                    for index, (value, _label) in enumerate(
+                        snapshot.input_request.options
+                    )
+                    if value == snapshot.input_request.default_key
+                ),
+                0,
+            )
+        else:
+            menu.add_option(Option("Sessions", id=SESSIONS_TAB_ID))
+            menu.add_option(
+                Option(
+                    f"{checkout_name} [{snapshot.status.value}]",
+                    id=snapshot.session_id,
+                )
+            )
+            menu.highlighted = 1
+        context = snapshot.context
+        context_lines = [
+            f"Checkout: {snapshot.checkout}",
+            f"Status: {snapshot.status.value}",
+        ]
+        if context is not None:
+            context_lines.extend(
+                (
+                    f"Project: {context.project_root}",
+                    f"Branch: {context.implementation_branch}",
+                    f"Worktree: {context.implementation_worktree}",
+                )
+            )
+            if context.prd_path:
+                context_lines.append(f"PRD: {context.prd_path}")
+        if snapshot.result is not None:
+            context_lines.append(f"Result: {snapshot.result}")
+        if snapshot.diagnostics:
+            context_lines.extend(("", "Diagnostics", *snapshot.diagnostics[-10:]))
+        safe_detail = sanitize_terminal_text(
+            "\n".join(context_lines),
+            preserve_newlines=True,
+        )
+        self.query_one("#portable-detail", Static).update(safe_detail)
+        if (
+            snapshot.input_request is not None
+            and snapshot.input_request.kind is PortableSessionInputKind.TEXT
+        ):
+            input_widget.placeholder = snapshot.input_request.prompt
+            input_widget.value = ""
+            input_widget.display = True
+            input_widget.focus()
+        activity = self.query_one("#portable-activity", RichLog)
+        activity.clear()
+        for line in snapshot.activity:
+            activity.write(
+                sanitize_terminal_text(line, preserve_newlines=True)
+            )
+        self.query_one("#portable-status", Static).update(snapshot.status.value)
+        self.query_one("#portable-actions", Static).update(
+            "Esc Sessions | F4 Logs | F5 Context"
+        )
+        if snapshot.status.terminal:
+            self.operation_result = snapshot.result
 
     def _handle_runtime_event(self, event: PortableRuntimeEvent) -> None:
         if event.kind is PortableRuntimeEventKind.CHOICE_REQUESTED:
@@ -731,6 +931,19 @@ class PortableApplicationShell(App[None]):
     @on(OptionList.OptionSelected, "#portable-navigation")
     def select_option(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id
+        if self._session_supervisor is not None:
+            if option_id == NEW_SESSION_ID:
+                self._start_selected_session()
+            elif option_id == SESSIONS_TAB_ID:
+                self._show_sessions_tab()
+            elif option_id in self._session_snapshots:
+                self._show_session_snapshot(self._session_snapshots[option_id])
+            elif (
+                self._active_session_id is not None
+                and option_id in self._session_input_values
+            ):
+                self._provide_session_input(option_id)
+            return
         request_id = self._active_request_id
         if self._workflow_complete and option_id == "__exit__":
             self.exit()
@@ -742,6 +955,13 @@ class PortableApplicationShell(App[None]):
 
     @on(Input.Submitted, "#portable-input")
     def submit_input(self, event: Input.Submitted) -> None:
+        if (
+            self._session_supervisor is not None
+            and self._active_session_id is not None
+        ):
+            event.input.display = False
+            self._provide_session_input(event.value)
+            return
         request_id = self._active_request_id
         if request_id is None:
             return
@@ -749,6 +969,21 @@ class PortableApplicationShell(App[None]):
         self._respond(request_id, event.value, "Input accepted")
 
     def action_back(self) -> None:
+        if self._session_supervisor is not None:
+            current = (
+                self._session_snapshots.get(self._active_session_id)
+                if self._active_session_id is not None
+                else None
+            )
+            if current is not None and current.input_request is not None:
+                request = current.input_request
+                assert request is not None
+                if request.cancel_key is not None:
+                    self._provide_session_input(request.cancel_key)
+                    return
+            if self._active_session_id is not None:
+                self._show_sessions_tab()
+            return
         if self._workflow_complete:
             self.exit()
             return
@@ -778,6 +1013,17 @@ class PortableApplicationShell(App[None]):
         self._pending_working_state = (request_id, message)
         self._show_working_state(message)
         self._bridge.respond(request_id, value)
+
+    def _provide_session_input(self, value: str) -> None:
+        assert self._session_supervisor is not None
+        assert self._active_session_id is not None
+        self._session_supervisor.handle_intent(
+            PortableSessionIntent(
+                kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                session_id=self._active_session_id,
+                value=value,
+            )
+        )
 
     def _finish_interaction_transition(self, request_id: int) -> None:
         pending = self._pending_working_state
@@ -838,6 +1084,11 @@ class PortableApplicationShell(App[None]):
         if menu.display and menu.highlighted is not None:
             menu.action_select()
 
+    def action_new_session(self) -> None:
+        if self._session_supervisor is None:
+            return
+        self._start_selected_session()
+
     def action_view(self) -> None:
         self._respond_to_shortcut("f3")
 
@@ -892,6 +1143,9 @@ class PortableApplicationShell(App[None]):
         self._respond(request_id, "/paste", "Attaching screenshot")
 
     def action_request_stop(self) -> None:
+        if self._session_supervisor is not None:
+            self.exit()
+            return
         self._stop_operation()
         self.exit()
 
@@ -903,3 +1157,16 @@ def run_portable_application(operation: Callable[[], int]) -> int:
     with route_worker_output(bridge):
         app.run()
     return app.operation_result if app.operation_result is not None else 130
+
+
+def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
+    """Run a passive Sessions tab that explicitly launches an isolated worker."""
+    bridge = PortableRuntimeBridge()
+    supervisor = PortableSessionSupervisor()
+    app = PortableApplicationShell(
+        bridge,
+        session_supervisor=supervisor,
+        session_launch=launch,
+    )
+    app.run()
+    return app.operation_result if app.operation_result is not None else 0
