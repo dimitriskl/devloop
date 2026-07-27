@@ -119,7 +119,7 @@ class PortablePlanningSettings:
             raise PortableSessionCatalogError(
                 f"Portable planning settings are corrupt: {error}"
             ) from error
-        except (TypeError, ValueError) as error:
+        except (OverflowError, TypeError, ValueError) as error:
             raise PortableSessionCatalogError(
                 "Portable planning settings are corrupt."
             ) from error
@@ -349,7 +349,7 @@ class PortableSessionCatalog:
             raise ValueError(f"Portable session checkout does not exist: {checkout}")
         project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, checkout.as_uri()))
         settings_json = (
-            json.dumps(planning_settings.to_dict(), separators=(",", ":"))
+            _serialize_planning_settings(planning_settings)
             if planning_settings is not None
             else None
         )
@@ -571,7 +571,7 @@ class PortableSessionCatalog:
         self._update_session(
             session_id,
             "planning_settings_json = ?, updated_at = ?",
-            (json.dumps(settings.to_dict(), separators=(",", ":")), time.time()),
+            (_serialize_planning_settings(settings), time.time()),
         )
 
     def update_session_status(
@@ -1038,6 +1038,12 @@ def _required_text(value: Mapping[str, Any], key: str) -> str:
     if not isinstance(item, str) or not item:
         raise ValueError
     return item
+
+
+def _serialize_planning_settings(settings: PortablePlanningSettings) -> str:
+    settings_value = settings.to_dict()
+    PortablePlanningSettings.from_mapping(settings_value)
+    return json.dumps(settings_value, separators=(",", ":"))
 
 
 def _required_number(value: Mapping[str, Any], key: str) -> float:

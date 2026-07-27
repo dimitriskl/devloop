@@ -94,6 +94,104 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected_error):
                     PortablePlanningSettings(**settings)
 
+    def test_planning_settings_reject_float_overflow_before_write(self) -> None:
+        valid_settings = {
+            "backend": "CODEX_CLI",
+            "model": "gpt-5",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+            "timeout_seconds": 60,
+            "checkpoint_seconds": 30,
+        }
+        for field_name in ("timeout_seconds", "checkpoint_seconds"):
+            with self.subTest(field_name=field_name):
+                persisted_settings = {
+                    **valid_settings,
+                    field_name: 10**1000,
+                }
+                with self.assertRaisesRegex(
+                    PortableSessionCatalogError,
+                    "planning settings are corrupt",
+                ):
+                    PortablePlanningSettings.from_mapping(persisted_settings)
+
+    def test_create_session_rejects_float_overflow_without_writing(self) -> None:
+        for field_name in ("timeout_seconds", "checkpoint_seconds"):
+            with self.subTest(field_name=field_name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+                    settings = PortablePlanningSettings(
+                        backend="CODEX_CLI",
+                        model="gpt-5",
+                        reasoning_effort="high",
+                        fast="OFF",
+                        timeout_seconds=60,
+                        checkpoint_seconds=30,
+                    )
+                    object.__setattr__(settings, field_name, 10**1000)
+
+                    with self.assertRaisesRegex(
+                        PortableSessionCatalogError,
+                        "planning settings are corrupt",
+                    ):
+                        catalog.create_session(
+                            PortableSessionLaunch(
+                                session_id="overflowing-settings",
+                                checkout=checkout,
+                                operation=PortableWorkflowOperation.PLANNING,
+                                arguments=(),
+                            ),
+                            settings,
+                        )
+
+                    self.assertEqual(catalog.list_sessions(), ())
+
+    def test_save_planning_settings_rejects_float_overflow_without_writing(
+        self,
+    ) -> None:
+        for field_name in ("timeout_seconds", "checkpoint_seconds"):
+            with self.subTest(field_name=field_name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+                    catalog.create_session(
+                        PortableSessionLaunch(
+                            session_id="overflowing-settings",
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        )
+                    )
+                    settings = PortablePlanningSettings(
+                        backend="CODEX_CLI",
+                        model="gpt-5",
+                        reasoning_effort="high",
+                        fast="OFF",
+                        timeout_seconds=60,
+                        checkpoint_seconds=30,
+                    )
+                    object.__setattr__(settings, field_name, 10**1000)
+
+                    with self.assertRaisesRegex(
+                        PortableSessionCatalogError,
+                        "planning settings are corrupt",
+                    ):
+                        catalog.save_planning_settings(
+                            "overflowing-settings",
+                            settings,
+                        )
+
+                    self.assertIsNone(
+                        catalog.get_session(
+                            "overflowing-settings"
+                        ).planning_settings
+                    )
+
     def test_catalog_open_rejects_negative_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "catalog.sqlite3"
@@ -322,6 +420,60 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                         field_name,
                         invalid_number,
                     )
+
+    def test_catalog_open_and_read_reject_float_overflow(self) -> None:
+        for catalog_boundary in ("open", "read"):
+            for field_name in ("timeout_seconds", "checkpoint_seconds"):
+                with self.subTest(
+                    catalog_boundary=catalog_boundary,
+                    field_name=field_name,
+                ):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        checkout = root / "checkout"
+                        checkout.mkdir()
+                        database = root / "catalog.sqlite3"
+                        catalog = PortableSessionCatalog(database)
+                        catalog.create_session(
+                            PortableSessionLaunch(
+                                session_id="overflowing-settings",
+                                checkout=checkout,
+                                operation=PortableWorkflowOperation.PLANNING,
+                                arguments=(),
+                            )
+                        )
+                        persisted_settings = {
+                            "backend": "CODEX_CLI",
+                            "model": "gpt-5",
+                            "reasoning_effort": "high",
+                            "fast": "OFF",
+                            "timeout_seconds": 60,
+                            "checkpoint_seconds": 30,
+                            field_name: 10**1000,
+                        }
+                        with closing(sqlite3.connect(database)) as connection:
+                            connection.execute(
+                                """
+                                UPDATE sessions
+                                SET planning_settings_json = ?
+                                """,
+                                (
+                                    json.dumps(
+                                        persisted_settings,
+                                        separators=(",", ":"),
+                                    ),
+                                ),
+                            )
+                            connection.commit()
+
+                        with self.assertRaisesRegex(
+                            PortableSessionCatalogError,
+                            "planning settings are corrupt",
+                        ):
+                            if catalog_boundary == "open":
+                                PortableSessionCatalog(database)
+                            else:
+                                catalog.get_session("overflowing-settings")
 
     def test_catalog_open_translates_runtime_invalid_planning_settings(
         self,
