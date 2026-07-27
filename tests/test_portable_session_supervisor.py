@@ -10,7 +10,9 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
+from devloop import cli, interactive_runner
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
     PortableSessionLaunch,
@@ -22,6 +24,287 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
+    def test_planning_delivery_transfer_resumes_only_from_implementation_worktree(
+        self,
+    ) -> None:
+        waiting_worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            for sequence, kind, payload in (
+                (1, "HELLO", {}),
+                (2, "INPUT_REQUEST", {
+                    "request_kind": "TEXT",
+                    "prompt": "Hold the implementation-worktree lease",
+                    "options": [],
+                    "default_key": "",
+                    "cancel_key": None,
+                }),
+            ):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+            json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 3,
+                "kind": "COMPLETION",
+                "payload": {"exit_code": 0},
+            }), flush=True)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            implementation = root / "implementation"
+            source.mkdir()
+            subprocess.run(
+                ["git", "init"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (source / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Dev Loop Tests",
+                    "-c",
+                    "user.email=devloop-tests@example.invalid",
+                    "commit",
+                    "-m",
+                    "baseline",
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature/pointer-transfer",
+                    str(implementation),
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            source_issues = source / "prd" / "pointer-transfer" / "issues"
+            source_issues.mkdir(parents=True)
+            source_prd = source_issues.parent / "pointer-transfer.md"
+            source_index = source_issues / "README.md"
+            source_issue = source_issues / "0001-transfer.md"
+            source_prd.write_text(
+                "# Pointer Transfer\n\n"
+                "## Target Product\n\n"
+                "Product: devloop-plan + devloop\n",
+                encoding="utf-8",
+            )
+            source_index.write_text(
+                "- [Transfer pointers](./0001-transfer.md)\n",
+                encoding="utf-8",
+            )
+            source_issue.write_text(
+                "# Transfer pointers\n\n"
+                "## Target Product\n\n"
+                "Product: devloop-plan + devloop\n",
+                encoding="utf-8",
+            )
+            implementation_prd = (
+                implementation / "prd" / "pointer-transfer" / "pointer-transfer.md"
+            )
+            implementation_index = (
+                implementation / "prd" / "pointer-transfer" / "issues" / "README.md"
+            )
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "same-shell"
+            launch = PortableSessionLaunch(
+                session_id="planning-delivery-transfer",
+                checkout=source,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(source)),
+            )
+            catalog.create_session_with_lease(launch, owner_id=owner_id)
+            catalog.publish_workflow(
+                launch.session_id,
+                prd_path=source_prd,
+                issues_index_path=source_index,
+                activity_summary="Planning published in source checkout",
+            )
+            observed_launches: list[PortableSessionLaunch] = []
+
+            def launch_waiting_worker(
+                selected: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                observed_launches.append(selected)
+                return subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        waiting_worker_source,
+                        selected.session_id,
+                    ],
+                    cwd=selected.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            candidate = SimpleNamespace(
+                candidate_id="implementation-candidate",
+                checkout=implementation.resolve(),
+                prd_path=implementation_prd.resolve(),
+            )
+            same_app = PortableSessionSupervisor(
+                worker_launcher=launch_waiting_worker,
+                catalog=catalog,
+                resume_candidates_loader=lambda: (candidate,),
+                owner_id=owner_id,
+            )
+            self.assertEqual(
+                same_app.snapshot(launch.session_id).checkout,
+                source.resolve(),
+            )
+
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {
+                        "DEVLOOP_PORTABLE_SESSION_CATALOG": str(catalog.path),
+                        "DEVLOOP_PORTABLE_SESSION_ID": launch.session_id,
+                        "DEVLOOP_PORTABLE_SESSION_OWNER_ID": owner_id,
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(
+                    cli,
+                    "resolve_run_workflow_with_repair",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    cli,
+                    "execute_dependency_schedule",
+                    return_value=SimpleNamespace(completed=True),
+                ),
+                mock.patch.object(cli, "offer_merge_followup"),
+            ):
+                delivery_result = cli.main(
+                    [
+                        "--prd",
+                        str(source_prd),
+                        "--issues",
+                        str(source_index),
+                        "--all",
+                        "--create-worktree",
+                        "--worktree-path",
+                        str(implementation),
+                        "--branch-name",
+                        "feature/pointer-transfer",
+                        "--non-interactive",
+                        "--plain",
+                        "--no-self-improvement-wiki",
+                    ]
+                )
+
+            transferred = catalog.get_session(launch.session_id)
+            self.assertEqual(delivery_result, 0)
+            self.assertTrue(implementation_prd.is_file())
+            self.assertTrue(implementation_index.is_file())
+            self.assertEqual(transferred.checkout, implementation.resolve())
+            self.assertEqual(transferred.prd_path, implementation_prd.resolve())
+            self.assertEqual(
+                transferred.issues_index_path,
+                implementation_index.resolve(),
+            )
+            self.assertIsNone(catalog.get_worktree_lease(source))
+            transferred_lease = catalog.get_worktree_lease(implementation)
+            assert transferred_lease is not None
+            self.assertEqual(transferred_lease.session_id, launch.session_id)
+
+            same_app.resume_session(launch.session_id)
+            waiting = self._wait_for_status(
+                same_app,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            self.assertEqual(waiting.checkout, implementation.resolve())
+            self.assertEqual(
+                observed_launches[-1].arguments,
+                ("--prd", str(implementation_prd.resolve())),
+            )
+            self.assertIsNone(catalog.get_worktree_lease(source))
+            self.assertIsNotNone(catalog.get_worktree_lease(implementation))
+            same_app.provide_input(launch.session_id, "continue")
+            self._wait_for_status(
+                same_app,
+                launch.session_id,
+                PortableSessionStatus.READY,
+            )
+            same_app.shutdown()
+
+            restart_candidates = catalog.discover_resume_candidates(
+                interactive_runner.find_resume_candidates
+            )
+            restarted = PortableSessionSupervisor(
+                worker_launcher=launch_waiting_worker,
+                catalog=PortableSessionCatalog(catalog.path),
+                resume_candidates=restart_candidates,
+                resume_candidates_loader=lambda: restart_candidates,
+                owner_id="restarted-shell",
+            )
+            restarted.resume_session(launch.session_id)
+            restarted_waiting = self._wait_for_status(
+                restarted,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            restarted_catalog = PortableSessionCatalog(catalog.path)
+            self.assertEqual(
+                restarted_waiting.checkout,
+                implementation.resolve(),
+            )
+            self.assertEqual(
+                observed_launches[-1].arguments,
+                ("--prd", str(implementation_prd.resolve())),
+            )
+            self.assertIsNone(restarted_catalog.get_worktree_lease(source))
+            restarted_lease = restarted_catalog.get_worktree_lease(implementation)
+            assert restarted_lease is not None
+            self.assertEqual(restarted_lease.session_id, launch.session_id)
+            restarted.provide_input(launch.session_id, "continue")
+            self._wait_for_status(
+                restarted,
+                launch.session_id,
+                PortableSessionStatus.READY,
+            )
+            restarted.shutdown()
+
     def test_published_workflow_resumes_with_its_prd_in_the_same_application(
         self,
     ) -> None:

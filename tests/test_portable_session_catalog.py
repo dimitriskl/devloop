@@ -180,6 +180,139 @@ class PortableSessionCatalogTests(unittest.TestCase):
         self.assertIsNone(published.planning_thread_id)
         self.assertIsNone(published.planning_settings)
 
+    def test_delivery_transfer_rebases_published_workflow_with_the_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            implementation = root / "implementation"
+            source_issues = source / "prd" / "change" / "issues"
+            implementation_issues = implementation / "prd" / "change" / "issues"
+            source_issues.mkdir(parents=True)
+            implementation_issues.mkdir(parents=True)
+            source_prd = source / "prd" / "change" / "change.md"
+            source_index = source_issues / "README.md"
+            implementation_prd = implementation / "prd" / "change" / "change.md"
+            implementation_index = implementation_issues / "README.md"
+            for path in (
+                source_prd,
+                source_index,
+                implementation_prd,
+                implementation_index,
+            ):
+                path.write_text("# Workflow\n", encoding="utf-8")
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="session-delivery-transfer",
+                checkout=source,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(source)),
+            )
+            catalog.create_session_with_lease(launch, owner_id="shell-transfer")
+            catalog.publish_workflow(
+                launch.session_id,
+                prd_path=source_prd,
+                issues_index_path=source_index,
+                activity_summary="Published in planning checkout",
+            )
+
+            catalog.bind_session_checkout(
+                launch.session_id,
+                implementation,
+                owner_id="shell-transfer",
+                prd_path=implementation_prd,
+                issues_index_path=implementation_index,
+            )
+            transferred = PortableSessionCatalog(catalog.path).get_session(
+                launch.session_id
+            )
+            source_lease = catalog.get_worktree_lease(source)
+            implementation_lease = catalog.get_worktree_lease(implementation)
+
+        self.assertEqual(transferred.checkout, implementation.resolve())
+        self.assertEqual(transferred.prd_path, implementation_prd.resolve())
+        self.assertEqual(
+            transferred.issues_index_path,
+            implementation_index.resolve(),
+        )
+        self.assertEqual(
+            transferred.arguments,
+            ("--prd", str(implementation_prd.resolve())),
+        )
+        self.assertIsNone(source_lease)
+        assert implementation_lease is not None
+        self.assertEqual(implementation_lease.session_id, launch.session_id)
+
+    def test_failed_delivery_transfer_preserves_source_workflow_and_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            implementation = root / "implementation"
+            source.mkdir()
+            implementation.mkdir()
+            source_prd = source / "change.md"
+            source_index = source / "README.md"
+            implementation_prd = implementation / "change.md"
+            implementation_index = implementation / "README.md"
+            for path in (
+                source_prd,
+                source_index,
+                implementation_prd,
+                implementation_index,
+            ):
+                path.write_text("# Workflow\n", encoding="utf-8")
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            launch = PortableSessionLaunch(
+                session_id="session-transfer-rollback",
+                checkout=source,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(source)),
+            )
+            catalog.create_session_with_lease(launch, owner_id="shell-transfer")
+            catalog.publish_workflow(
+                launch.session_id,
+                prd_path=source_prd,
+                issues_index_path=source_index,
+                activity_summary="Published in source",
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_lease_transfer
+                    BEFORE UPDATE OF checkout ON worktree_leases
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced lease transfer failure');
+                    END
+                    """
+                )
+                connection.commit()
+
+            with self.assertRaises(PortableSessionCatalogError):
+                catalog.bind_session_checkout(
+                    launch.session_id,
+                    implementation,
+                    owner_id="shell-transfer",
+                    prd_path=implementation_prd,
+                    issues_index_path=implementation_index,
+                )
+
+            preserved = PortableSessionCatalog(database).get_session(
+                launch.session_id
+            )
+            source_lease = catalog.get_worktree_lease(source)
+            implementation_lease = catalog.get_worktree_lease(implementation)
+
+        self.assertEqual(preserved.checkout, source.resolve())
+        self.assertEqual(preserved.prd_path, source_prd.resolve())
+        self.assertEqual(preserved.issues_index_path, source_index.resolve())
+        assert source_lease is not None
+        self.assertEqual(source_lease.session_id, launch.session_id)
+        self.assertIsNone(implementation_lease)
+
     def test_catalog_redacts_and_bounds_activity_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

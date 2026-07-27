@@ -528,7 +528,18 @@ def _run_devloop_attempt(
     repo_root = worktree.repo_root
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
     issues_index_in_repo = map_path_to_worktree(issues_index, source_repo, repo_root)
-    bind_active_catalog_session_checkout(repo_root)
+    if repo_root != source_repo and not args.dry_run:
+        ensure_planning_artifacts_in_worktree(
+            prd_path=prd_path,
+            issues_index=issues_index,
+            source_repo=source_repo,
+            target_repo=repo_root,
+        )
+    bind_active_catalog_session_checkout(
+        repo_root,
+        prd_path=prd_in_repo,
+        issues_index_path=issues_index_in_repo,
+    )
     publish_devloop_run_context(
         project_root=source_repo,
         implementation_branch=(
@@ -540,13 +551,6 @@ def _run_devloop_attempt(
         implementation_worktree=repo_root,
         prd_path=prd_in_repo,
     )
-    if repo_root != source_repo and not args.dry_run:
-        ensure_planning_artifacts_in_worktree(
-            prd_path=prd_path,
-            issues_index=issues_index,
-            source_repo=source_repo,
-            target_repo=repo_root,
-        )
     issues = map_selected_issues_to_worktree(
         selected_source_issues,
         source_repo,

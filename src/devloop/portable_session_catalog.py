@@ -721,10 +721,27 @@ class PortableSessionCatalog:
         checkout: Path,
         *,
         owner_id: str | None = None,
+        prd_path: Path | None = None,
+        issues_index_path: Path | None = None,
     ) -> None:
+        if (prd_path is None) != (issues_index_path is None):
+            raise ValueError(
+                "Portable workflow transfer requires both PRD and issue-index pointers."
+            )
         if owner_id is not None:
-            self._transfer_session_lease(session_id, checkout, owner_id=owner_id)
+            self._transfer_session_lease(
+                session_id,
+                checkout,
+                owner_id=owner_id,
+                prd_path=prd_path,
+                issues_index_path=issues_index_path,
+            )
             return
+        if prd_path is not None:
+            raise ValueError(
+                "Portable workflow pointers can change only with the active "
+                "worktree lease."
+            )
         record = self.get_session(session_id)
         self.bind_or_create_session(
             PortableSessionLaunch(
@@ -741,6 +758,8 @@ class PortableSessionCatalog:
         checkout: Path,
         *,
         owner_id: str,
+        prd_path: Path | None,
+        issues_index_path: Path | None,
     ) -> None:
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
@@ -749,6 +768,23 @@ class PortableSessionCatalog:
             raise ValueError(
                 f"Portable session checkout does not exist: {canonical_checkout}"
             )
+        canonical_prd: Path | None = None
+        canonical_issues: Path | None = None
+        if prd_path is not None and issues_index_path is not None:
+            canonical_prd = prd_path.resolve()
+            canonical_issues = issues_index_path.resolve()
+            if not canonical_prd.is_file() or not canonical_issues.is_file():
+                raise ValueError(
+                    "Transferred workflow pointers must reference existing files."
+                )
+            if (
+                not canonical_prd.is_relative_to(canonical_checkout)
+                or not canonical_issues.is_relative_to(canonical_checkout)
+            ):
+                raise ValueError(
+                    "Transferred workflow pointers must belong to the selected "
+                    "checkout."
+                )
         project_id = str(
             uuid.uuid5(uuid.NAMESPACE_URL, canonical_checkout.as_uri())
         )
@@ -792,14 +828,31 @@ class PortableSessionCatalog:
                         timestamp,
                     ),
                 )
-                connection.execute(
-                    """
-                    UPDATE sessions
-                    SET project_id = ?, updated_at = ?
-                    WHERE session_id = ?
-                    """,
-                    (project_id, timestamp, session_id),
-                )
+                if canonical_prd is None or canonical_issues is None:
+                    connection.execute(
+                        """
+                        UPDATE sessions
+                        SET project_id = ?, updated_at = ?
+                        WHERE session_id = ?
+                        """,
+                        (project_id, timestamp, session_id),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE sessions
+                        SET project_id = ?, prd_path = ?, issues_index_path = ?,
+                            updated_at = ?
+                        WHERE session_id = ?
+                        """,
+                        (
+                            project_id,
+                            str(canonical_prd),
+                            str(canonical_issues),
+                            timestamp,
+                            session_id,
+                        ),
+                    )
                 connection.execute(
                     """
                     UPDATE worktree_leases
@@ -1322,8 +1375,10 @@ def bind_active_catalog_session_checkout(
     checkout: Path,
     *,
     environment: Mapping[str, str] | None = None,
+    prd_path: Path | None = None,
+    issues_index_path: Path | None = None,
 ) -> PortableCatalogSession | None:
-    """Atomically move the active session and lease to its selected checkout."""
+    """Atomically move the active session, lease, and workflow to a checkout."""
     values = os.environ if environment is None else environment
     active_session = active_portable_catalog_session(environment=values)
     if active_session is None:
@@ -1338,6 +1393,8 @@ def bind_active_catalog_session_checkout(
         record.session_id,
         checkout,
         owner_id=values.get(PORTABLE_SESSION_OWNER_ID_ENV),
+        prd_path=prd_path,
+        issues_index_path=issues_index_path,
     )
     return catalog.get_session(record.session_id)
 
