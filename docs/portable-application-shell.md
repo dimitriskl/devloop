@@ -58,6 +58,12 @@ branch, and exact checkout/worktree receiving changes. F5 opens the full paths
 and PRD. The activity region is part of the right pane and may collapse when
 nothing is running.
 
+Portable Dev Loop v3 keeps opened workflow sessions in compact in-application
+tabs. Background activity adds an unread marker, while input and approval
+requests use `[INPUT!]` without changing focus. Set
+`DEVLOOP_SESSION_ATTENTION_BELL=1` to opt into an audible terminal bell for a
+new background attention request; the default is silent.
+
 ### Layout Rules
 
 - Minimum supported application size is 80 columns by 24 rows.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import tempfile
 import threading
@@ -22,6 +23,7 @@ from devloop.portable_sessions import (
     PortableSessionInputKind,
     PortableSessionInputRequest,
     PortableSessionLaunch,
+    PortableSessionProgress,
     PortableSessionSnapshot,
     PortableSessionStatus,
     PortableSessionSupervisor,
@@ -907,6 +909,316 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 str(menu.get_option_at_index(1).prompt),
             )
 
+    async def test_switching_sessions_retains_open_tabs_and_marks_background_activity(
+        self,
+    ) -> None:
+        checkout_a = Path("alpha").resolve()
+        checkout_b = Path("beta").resolve()
+        session_a = PortableSessionSnapshot(
+            session_id="session-alpha",
+            checkout=checkout_a,
+            status=PortableSessionStatus.RUNNING,
+        )
+        session_b = PortableSessionSnapshot(
+            session_id="session-beta",
+            checkout=checkout_b,
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.events: list[PortableSessionEvent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (session_a, session_b)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                raise AssertionError(f"Unexpected intent: {intent}")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause()
+
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 2
+            await pilot.press("enter")
+            await pilot.pause()
+
+            supervisor.events.append(
+                PortableSessionEvent(
+                    PortableSessionSnapshot(
+                        session_id=session_a.session_id,
+                        checkout=checkout_a,
+                        status=PortableSessionStatus.RUNNING,
+                        activity=("Alpha advanced in the background",),
+                    )
+                )
+            )
+            for _ in range(20):
+                await pilot.pause()
+                tabs = str(app.query_one("#portable-tabs", Static).render())
+                if "Alpha advanced" not in tabs and "*" in tabs:
+                    break
+
+            detail = str(app.query_one("#portable-detail", Static).render())
+
+        self.assertIn("alpha [RUNNING] *", tabs)
+        self.assertIn("beta [RUNNING]", tabs)
+        self.assertIn(str(checkout_b), detail)
+        self.assertNotIn(str(checkout_a), detail)
+
+    async def test_background_approval_marks_attention_without_receiving_active_input(
+        self,
+    ) -> None:
+        checkout_a = Path("alpha").resolve()
+        checkout_b = Path("beta").resolve()
+        session_a = PortableSessionSnapshot(
+            session_id="session-alpha",
+            checkout=checkout_a,
+            status=PortableSessionStatus.RUNNING,
+        )
+        session_b = PortableSessionSnapshot(
+            session_id="session-beta",
+            checkout=checkout_b,
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.events: list[PortableSessionEvent] = []
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (session_a, session_b)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return PortableSessionSnapshot(
+                    session_id=intent.session_id,
+                    checkout=checkout_b,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        class RecordingShell(PortableApplicationShell):
+            def __init__(self, *args, **kwargs) -> None:
+                self.bell_count = 0
+                super().__init__(*args, **kwargs)
+
+            def bell(self) -> None:
+                self.bell_count += 1
+
+        supervisor = FakeSupervisor()
+        with mock.patch.dict(
+            os.environ,
+            {"DEVLOOP_SESSION_ATTENTION_BELL": "1"},
+        ):
+            app = RecordingShell(
+                PortableRuntimeBridge(),
+                session_supervisor=supervisor,
+                session_launch=PortableSessionLaunch(
+                    session_id="new-session",
+                    checkout=Path.cwd(),
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                ),
+            )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 2
+            await pilot.press("enter")
+            await pilot.pause()
+
+            supervisor.events.extend(
+                (
+                    PortableSessionEvent(
+                        PortableSessionSnapshot(
+                            session_id=session_a.session_id,
+                            checkout=checkout_a,
+                            status=PortableSessionStatus.WAITING_FOR_INPUT,
+                            input_request=PortableSessionInputRequest(
+                                kind=PortableSessionInputKind.APPROVAL,
+                                prompt="Approve alpha command?",
+                                options=(
+                                    ("approve", "Approve"),
+                                    ("deny", "Deny"),
+                                ),
+                                default_key="deny",
+                            ),
+                        )
+                    ),
+                    PortableSessionEvent(
+                        PortableSessionSnapshot(
+                            session_id=session_b.session_id,
+                            checkout=checkout_b,
+                            status=PortableSessionStatus.WAITING_FOR_INPUT,
+                            input_request=PortableSessionInputRequest(
+                                kind=PortableSessionInputKind.TEXT,
+                                prompt="Beta response",
+                            ),
+                        )
+                    ),
+                )
+            )
+            for _ in range(20):
+                await pilot.pause()
+                input_widget = app.query_one("#portable-input", Input)
+                if input_widget.display:
+                    break
+
+            tabs = str(app.query_one("#portable-tabs", Static).render())
+            input_widget.value = "beta only"
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertIn("alpha [WAITING_FOR_INPUT] [INPUT!]", tabs)
+        self.assertIn("beta [WAITING_FOR_INPUT]", tabs)
+        self.assertEqual(app.bell_count, 1)
+        self.assertEqual(len(supervisor.intents), 1)
+        self.assertEqual(
+            supervisor.intents[0],
+            PortableSessionIntent(
+                kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                session_id=session_b.session_id,
+                value="beta only",
+            ),
+        )
+
+    async def test_escape_hides_only_the_tab_and_reopen_uses_retained_projection(
+        self,
+    ) -> None:
+        checkout = Path("hidden-session").resolve()
+        initial = PortableSessionSnapshot(
+            session_id="session-hidden",
+            checkout=checkout,
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.events: list[PortableSessionEvent] = []
+                self.intents: list[PortableSessionIntent] = []
+                self.current = initial
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (self.current,)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                raise AssertionError(f"Unexpected intent: {intent}")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                if not self.events:
+                    return None
+                event = self.events.pop(0)
+                self.current = event.snapshot
+                return event
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            hidden_tabs = str(app.query_one("#portable-tabs", Static).render())
+            supervisor.events.append(
+                PortableSessionEvent(
+                    PortableSessionSnapshot(
+                        session_id=initial.session_id,
+                        checkout=checkout,
+                        status=PortableSessionStatus.RUNNING,
+                        activity=("Continued while hidden",),
+                    )
+                )
+            )
+            for _ in range(20):
+                await pilot.pause()
+                detail = str(app.query_one("#portable-detail", Static).render())
+                if "Continued while hidden" in detail:
+                    break
+
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            reopened_tabs = str(app.query_one("#portable-tabs", Static).render())
+            reopened_detail = str(
+                app.query_one("#portable-detail", Static).render()
+            )
+
+        self.assertEqual(hidden_tabs, "Sessions")
+        self.assertIn("hidden-session [RUNNING]", reopened_tabs)
+        self.assertIn("Latest activity: Continued while hidden", reopened_detail)
+        self.assertEqual(supervisor.intents, [])
+
     async def test_background_session_failure_is_the_application_result_on_exit(
         self,
     ) -> None:
@@ -1063,6 +1375,73 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#portable-navigation", OptionList).option_count,
                 2,
             )
+
+    async def test_sessions_tab_aggregates_each_session_monitoring_projection(
+        self,
+    ) -> None:
+        checkout = Path("monitor-worktree").resolve()
+        prd_path = checkout / "prd" / "change.md"
+        snapshot = PortableSessionSnapshot(
+            session_id="session-monitor",
+            checkout=checkout,
+            status=PortableSessionStatus.RUNNING,
+            context=PortableRunContext(
+                project_root=str(checkout.parent),
+                implementation_branch="feature/monitor",
+                implementation_worktree=str(checkout),
+                prd_path=str(prd_path),
+            ),
+            activity=("Reviewing issue 0004",),
+            prd_path=prd_path,
+            progress=PortableSessionProgress(
+                stage="review",
+                completed_issues=3,
+                total_issues=5,
+                active_issue="0004",
+            ),
+            updated_at=1_720_000_000,
+        )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (snapshot,)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                raise AssertionError(f"Unexpected intent: {intent}")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            detail = str(app.query_one("#portable-detail", Static).render())
+
+        self.assertIn(f"Project: {checkout.parent}", detail)
+        self.assertIn(f"Worktree: {checkout}", detail)
+        self.assertIn("Status: RUNNING", detail)
+        self.assertIn("Stage: review", detail)
+        self.assertIn(f"PRD: {prd_path}", detail)
+        self.assertIn("Issue progress: 3/5", detail)
+        self.assertIn("Active issue: 0004", detail)
+        self.assertIn("Latest activity: Reviewing issue 0004", detail)
+        self.assertIn("Last update:", detail)
 
     async def test_active_session_context_uses_left_pane_and_f5_context_view(
         self,

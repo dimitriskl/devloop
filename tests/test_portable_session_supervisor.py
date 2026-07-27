@@ -17,6 +17,7 @@ from devloop import cli, interactive_runner
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
     PortableSessionLaunch,
+    PortableSessionProgress,
     PortableSessionSnapshot,
     PortableSessionStatus,
     PortableSessionSupervisor,
@@ -706,6 +707,204 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             "C:/code/project-worktree",
         )
 
+    def test_status_projects_live_progress_for_sessions_monitoring(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "STATUS", {
+                "status": "RUNNING",
+                "stage": "development",
+                "completed_issues": 2,
+                "total_issues": 5,
+                "active_issue": "0003",
+            })
+            send(2, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Continue",
+            })
+            json.loads(sys.stdin.readline())
+            send(3, "COMPLETION", {"exit_code": 0})
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="session-progress",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(),
+            )
+
+            supervisor.start_session(launch)
+            waiting = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            supervisor.provide_input(launch.session_id, "yes")
+            supervisor.wait_for_terminal(launch.session_id, timeout=5)
+            supervisor.shutdown()
+
+        self.assertEqual(
+            waiting.progress,
+            PortableSessionProgress(
+                stage="development",
+                completed_issues=2,
+                total_issues=5,
+                active_issue="0003",
+            ),
+        )
+        self.assertGreater(waiting.updated_at, 0)
+
+    def test_resume_candidate_projects_persisted_progress_before_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            prd_path = checkout / "change.md"
+            candidate = SimpleNamespace(
+                candidate_id="candidate-progress",
+                checkout=checkout,
+                prd_path=prd_path,
+                completed_issues=4,
+                pending_issues=1,
+                total_issues=5,
+                active_issue="0005",
+                active_status="qa",
+                updated_at=1_720_000_000.0,
+            )
+
+            supervisor = PortableSessionSupervisor(resume_candidates=(candidate,))
+            snapshot = supervisor.snapshot(candidate.candidate_id)
+            supervisor.shutdown()
+
+        self.assertEqual(
+            snapshot.progress,
+            PortableSessionProgress(
+                stage="qa",
+                completed_issues=4,
+                total_issues=5,
+                active_issue="0005",
+            ),
+        )
+        self.assertEqual(snapshot.updated_at, candidate.updated_at)
+
+    def test_worker_activity_refreshes_authoritative_issue_progress(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "ACTIVITY", {"message": "Issue checkpoint advanced"})
+            send(2, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Continue",
+            })
+            json.loads(sys.stdin.readline())
+            send(3, "COMPLETION", {"exit_code": 0})
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            prd_path = checkout / "change.md"
+            initial = SimpleNamespace(
+                candidate_id="candidate-live-progress",
+                checkout=checkout,
+                prd_path=prd_path,
+                completed_issues=1,
+                total_issues=3,
+                active_issue="0002",
+                active_status="development",
+                updated_at=10.0,
+            )
+            advanced = SimpleNamespace(
+                candidate_id=initial.candidate_id,
+                checkout=checkout,
+                prd_path=prd_path,
+                completed_issues=2,
+                total_issues=3,
+                active_issue="0003",
+                active_status="review",
+                updated_at=20.0,
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                resume_candidates=(initial,),
+                resume_candidates_loader=lambda: (advanced,),
+            )
+
+            supervisor.resume_session(initial.candidate_id)
+            waiting = self._wait_for_status(
+                supervisor,
+                initial.candidate_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            supervisor.provide_input(initial.candidate_id, "yes")
+            supervisor.wait_for_terminal(initial.candidate_id, timeout=5)
+            supervisor.shutdown()
+
+        self.assertEqual(
+            waiting.progress,
+            PortableSessionProgress(
+                stage="review",
+                completed_issues=2,
+                total_issues=3,
+                active_issue="0003",
+            ),
+        )
+
     def test_real_worker_runs_existing_planning_entrypoint_in_child_process(
         self,
     ) -> None:
@@ -799,6 +998,102 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             supervisor.shutdown()
 
         self.assertEqual(completed.activity, ("Selected start",))
+
+    def test_two_workers_route_interleaved_input_and_isolate_one_failure(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Value for " + session_id,
+            })
+            answer = json.loads(sys.stdin.readline())["payload"]["value"]
+            if session_id == "session-failing":
+                send(2, "FAILURE", {"message": "failed after " + answer})
+            else:
+                send(2, "ACTIVITY", {"message": "continued with " + answer})
+                send(3, "COMPLETION", {"exit_code": 0})
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout_a = root / "alpha"
+            checkout_b = root / "beta"
+            checkout_a.mkdir()
+            checkout_b.mkdir()
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            failing = PortableSessionLaunch(
+                session_id="session-failing",
+                checkout=checkout_a,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            continuing = PortableSessionLaunch(
+                session_id="session-continuing",
+                checkout=checkout_b,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(),
+            )
+
+            supervisor.start_session(failing)
+            supervisor.start_session(continuing)
+            self._wait_for_status(
+                supervisor,
+                failing.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            self._wait_for_status(
+                supervisor,
+                continuing.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+
+            supervisor.provide_input(failing.session_id, "alpha-only")
+            failed = supervisor.wait_for_terminal(failing.session_id, timeout=5)
+            still_waiting = supervisor.snapshot(continuing.session_id)
+            supervisor.provide_input(continuing.session_id, "beta-only")
+            completed = supervisor.wait_for_terminal(
+                continuing.session_id,
+                timeout=5,
+            )
+            supervisor.shutdown()
+
+        self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+        self.assertIn("failed after alpha-only", failed.diagnostics)
+        self.assertEqual(
+            still_waiting.status,
+            PortableSessionStatus.WAITING_FOR_INPUT,
+        )
+        self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
+        self.assertEqual(completed.activity, ("continued with beta-only",))
 
     def test_unknown_protocol_version_fails_only_that_session(self) -> None:
         completed = self._run_invalid_worker_frame(

@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from textual import events, on
@@ -57,6 +58,8 @@ from ..version import VERSION
 
 MINIMUM_TERMINAL_COLUMNS = 80
 MINIMUM_TERMINAL_ROWS = 24
+SESSION_ATTENTION_BELL_ENV = "DEVLOOP_SESSION_ATTENTION_BELL"
+ENABLED_ENVIRONMENT_VALUES = frozenset({"1", "true", "yes", "on"})
 DEFAULT_ACTION_BAR = (
     "F1 Help | F2 Primary | F3 View | F4 Logs | F5 Context | "
     "F9 Actions | Esc Back"
@@ -375,6 +378,7 @@ class PortableApplicationShell(App[None]):
         session_supervisor: PortableSessionController | None = None,
         session_launch: PortableSessionLaunch | None = None,
         session_target_resolver: PortableSessionTargetController | None = None,
+        attention_bell: bool | None = None,
     ) -> None:
         super().__init__()
         if operation is None and (session_supervisor is None or session_launch is None):
@@ -390,6 +394,15 @@ class PortableApplicationShell(App[None]):
         )
         self._active_session_id: str | None = None
         self._session_snapshots: dict[str, PortableSessionSnapshot] = {}
+        self._open_session_ids: list[str] = []
+        self._unread_session_ids: set[str] = set()
+        self._attention_session_ids: set[str] = set()
+        self._attention_bell = (
+            os.environ.get(SESSION_ATTENTION_BELL_ENV, "").casefold()
+            in ENABLED_ENVIRONMENT_VALUES
+            if attention_bell is None
+            else attention_bell
+        )
         self._saved_projects: dict[str, Path] = {}
         self._session_input_values: set[str] = set()
         self._new_session_input: str | None = None
@@ -632,7 +645,14 @@ class PortableApplicationShell(App[None]):
                 return
             self._show_session_snapshot(event.snapshot)
 
-    def _show_sessions_tab(self) -> None:
+    def _show_sessions_tab(self, *, hide_session_id: str | None = None) -> None:
+        if hide_session_id is not None:
+            self._open_session_ids = [
+                session_id
+                for session_id in self._open_session_ids
+                if session_id != hide_session_id
+            ]
+            self._unread_session_ids.discard(hide_session_id)
         self._active_session_id = None
         self._session_input_values.clear()
         self._new_session_input = None
@@ -642,16 +662,11 @@ class PortableApplicationShell(App[None]):
         self._new_session_worktree = None
         self.query_one("#portable-input", Input).display = False
         self.query_one("#portable-header", Static).update("Dev Loop > Sessions")
-        self.query_one("#portable-tabs", Static).update("Sessions")
+        self._render_session_tabs()
         menu = self._refresh_sessions_menu()
         menu.focus()
-        launch = self._session_launch
-        checkout = str(launch.checkout) if launch is not None else ""
         self.query_one("#portable-detail", Static).update(
-            "Portable Sessions\n\n"
-            "No workflow worker starts automatically.\n\n"
-            f"Selected checkout: {checkout}\n\n"
-            "Choose + New Session to launch this workflow in an isolated worker."
+            self._render_sessions_overview()
         )
         self.query_one("#portable-status", Static).update("READY")
         self.query_one("#portable-actions", Static).update(
@@ -932,14 +947,46 @@ class PortableApplicationShell(App[None]):
         self._show_session_snapshot(snapshot)
 
     def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
+        previous = self._session_snapshots.get(snapshot.session_id)
         self._session_snapshots[snapshot.session_id] = snapshot
+        background_attention = (
+            snapshot.input_request is not None
+            and (previous is None or previous.input_request is None)
+            and self._active_session_id != snapshot.session_id
+        )
+        if snapshot.input_request is not None:
+            self._attention_session_ids.add(snapshot.session_id)
+        else:
+            self._attention_session_ids.discard(snapshot.session_id)
+        if background_attention and self._attention_bell:
+            self.bell()
         if snapshot.status.terminal:
             self.operation_result = snapshot.result
         if self._active_session_id is None:
+            if (
+                snapshot.session_id in self._open_session_ids
+                and previous is not None
+                and previous != snapshot
+            ):
+                self._unread_session_ids.add(snapshot.session_id)
+            self._render_session_tabs()
             self._refresh_sessions_menu()
+            self.query_one("#portable-detail", Static).update(
+                self._render_sessions_overview()
+            )
             return
         if self._active_session_id != snapshot.session_id:
+            if (
+                snapshot.session_id in self._open_session_ids
+                and previous is not None
+                and previous != snapshot
+            ):
+                self._unread_session_ids.add(snapshot.session_id)
+            self._render_session_tabs()
             return
+        if snapshot.session_id not in self._open_session_ids:
+            self._open_session_ids.append(snapshot.session_id)
+        self._unread_session_ids.discard(snapshot.session_id)
         context = snapshot.context
         if context is not None:
             self._update_run_context(context)
@@ -947,9 +994,7 @@ class PortableApplicationShell(App[None]):
             snapshot.checkout.name or str(snapshot.checkout),
             preserve_newlines=False,
         )
-        self.query_one("#portable-tabs", Static).update(
-            f"Sessions | {checkout_name} [{snapshot.status.value}]"
-        )
+        self._render_session_tabs()
         self.query_one("#portable-header", Static).update(
             f"Dev Loop > {checkout_name}"
         )
@@ -968,7 +1013,11 @@ class PortableApplicationShell(App[None]):
             menu.highlighted = 0
         elif (
             snapshot.input_request is not None
-            and snapshot.input_request.kind is PortableSessionInputKind.CHOICE
+            and snapshot.input_request.kind
+            in {
+                PortableSessionInputKind.CHOICE,
+                PortableSessionInputKind.APPROVAL,
+            }
         ):
             menu.add_options(
                 [
@@ -1019,6 +1068,8 @@ class PortableApplicationShell(App[None]):
             context_lines.append(f"PRD: {snapshot.prd_path}")
         if snapshot.result is not None:
             context_lines.append(f"Result: {snapshot.result}")
+        if snapshot.activity:
+            context_lines.append(f"Latest activity: {snapshot.activity[-1]}")
         if snapshot.diagnostics:
             context_lines.extend(("", "Diagnostics", *snapshot.diagnostics[-10:]))
         safe_detail = sanitize_terminal_text(
@@ -1055,6 +1106,93 @@ class PortableApplicationShell(App[None]):
             else "Esc Sessions | F4 Logs | F5 Context"
         )
         self.query_one("#portable-actions", Static).update(action_bar)
+
+    def _render_sessions_overview(self) -> str:
+        if not self._session_snapshots:
+            launch = self._session_launch
+            checkout = str(launch.checkout) if launch is not None else ""
+            return (
+                "Portable Sessions\n\n"
+                "No workflow worker starts automatically.\n\n"
+                f"Selected checkout: {checkout}\n\n"
+                "Choose + New Session to launch this workflow in an isolated worker."
+            )
+
+        sections = [
+            "Portable Sessions",
+            "",
+            "Workers start or resume only through an explicit session action.",
+        ]
+        for snapshot in self._session_snapshots.values():
+            context = snapshot.context
+            project = context.project_root if context is not None else str(
+                snapshot.checkout
+            )
+            prd = (
+                context.prd_path
+                if context is not None and context.prd_path
+                else str(snapshot.prd_path or "-")
+            )
+            progress = (
+                f"{snapshot.progress.completed_issues}/{snapshot.progress.total_issues}"
+                if snapshot.progress.total_issues
+                else "-"
+            )
+            last_update = (
+                datetime.fromtimestamp(
+                    snapshot.updated_at,
+                    tz=timezone.utc,
+                ).isoformat(timespec="seconds")
+                if snapshot.updated_at > 0
+                else "-"
+            )
+            latest_activity = (
+                snapshot.activity[-1] if snapshot.activity else "-"
+            )
+            sections.extend(
+                (
+                    "",
+                    f"{snapshot.checkout.name or snapshot.checkout}",
+                    f"Project: {project}",
+                    f"Worktree: {snapshot.checkout}",
+                    f"Status: {snapshot.status.value}",
+                    f"Stage: {snapshot.progress.stage or '-'}",
+                    f"PRD: {prd}",
+                    f"Issue progress: {progress}",
+                    f"Active issue: {snapshot.progress.active_issue or '-'}",
+                    f"Latest activity: {latest_activity}",
+                    f"Last update: {last_update}",
+                )
+            )
+        return sanitize_terminal_text(
+            "\n".join(sections),
+            preserve_newlines=True,
+        )
+
+    def _render_session_tabs(self) -> None:
+        labels = ["Sessions"]
+        for session_id in self._open_session_ids:
+            snapshot = self._session_snapshots.get(session_id)
+            if snapshot is None:
+                continue
+            checkout_name = sanitize_terminal_text(
+                snapshot.checkout.name or str(snapshot.checkout),
+                preserve_newlines=False,
+            )
+            attention = (
+                " [INPUT!]"
+                if session_id in self._attention_session_ids
+                else ""
+            )
+            unread = (
+                " *"
+                if session_id in self._unread_session_ids and not attention
+                else ""
+            )
+            labels.append(
+                f"{checkout_name} [{snapshot.status.value}]{attention}{unread}"
+            )
+        self.query_one("#portable-tabs", Static).update(" | ".join(labels))
 
     def _resume_active_session(self) -> None:
         assert self._session_supervisor is not None
@@ -1372,7 +1510,9 @@ class PortableApplicationShell(App[None]):
                     self._provide_session_input(request.cancel_key)
                     return
             if self._active_session_id is not None:
-                self._show_sessions_tab()
+                self._show_sessions_tab(
+                    hide_session_id=self._active_session_id,
+                )
             return
         if self._workflow_complete:
             self.exit()

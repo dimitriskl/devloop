@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
@@ -75,6 +76,7 @@ class PortableSessionIntent:
 class PortableSessionInputKind(str, Enum):
     CHOICE = "CHOICE"
     TEXT = "TEXT"
+    APPROVAL = "APPROVAL"
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,14 @@ class PortableSessionInputRequest:
     options: tuple[tuple[str, str], ...] = ()
     default_key: str = ""
     cancel_key: str | None = None
+
+
+@dataclass(frozen=True)
+class PortableSessionProgress:
+    stage: str = ""
+    completed_issues: int = 0
+    total_issues: int = 0
+    active_issue: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +107,8 @@ class PortableSessionSnapshot:
     result: int | None = None
     input_request: PortableSessionInputRequest | None = None
     prd_path: Path | None = None
+    progress: PortableSessionProgress = PortableSessionProgress()
+    updated_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -158,6 +170,7 @@ class PortableWorkerProcess(Protocol):
 
 WorkerLauncher = Callable[[PortableSessionLaunch], PortableWorkerProcess]
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_PROGRESS_REFRESH_INTERVAL_SECONDS = 1.0
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -171,6 +184,8 @@ class PortableCatalogSessionRecord(Protocol):
     planning_thread_id: str | None
     planning_settings: PortablePlanningSettingsRecord | None
     prd_path: Path | None
+    activity_summary: str
+    updated_at: float
     launch: PortableSessionLaunch
 
 
@@ -178,6 +193,11 @@ class PortableResumeCandidateRecord(Protocol):
     candidate_id: str
     checkout: Path
     prd_path: Path
+    completed_issues: int
+    total_issues: int
+    active_issue: str | None
+    active_status: str | None
+    updated_at: float
 
 
 class PortableSavedProjectRecord(Protocol):
@@ -250,6 +270,7 @@ class PortableSessionSupervisor:
         self._launches: dict[str, PortableSessionLaunch] = {}
         self._candidate_launches: dict[str, PortableSessionLaunch] = {}
         self._running: dict[str, _RunningSession] = {}
+        self._last_progress_refresh: dict[str, float] = {}
         self._threads: list[Thread] = []
         self._events: Queue[PortableSessionEvent] = Queue()
         self._condition = Condition(RLock())
@@ -263,7 +284,13 @@ class PortableSessionSupervisor:
                     session_id=record.session_id,
                     checkout=record.checkout,
                     status=record.status,
+                    activity=(
+                        (getattr(record, "activity_summary"),)
+                        if getattr(record, "activity_summary", "")
+                        else ()
+                    ),
                     prd_path=record.prd_path,
+                    updated_at=getattr(record, "updated_at", 0.0),
                 )
                 self._launches[record.session_id] = record.launch
         known_prd_paths = {
@@ -309,6 +336,13 @@ class PortableSessionSupervisor:
                 None,
             )
             if matching_session is not None:
+                candidate_progress = _candidate_progress(candidate)
+                matching_session = replace(
+                    matching_session,
+                    progress=candidate_progress,
+                    updated_at=getattr(candidate, "updated_at", 0.0),
+                )
+                self._snapshots[matching_session.session_id] = matching_session
                 if matching_session.status.terminal:
                     restored = replace(
                         matching_session,
@@ -339,6 +373,8 @@ class PortableSessionSupervisor:
                 checkout=candidate.checkout,
                 status=PortableSessionStatus.READY,
                 prd_path=candidate.prd_path,
+                progress=_candidate_progress(candidate),
+                updated_at=getattr(candidate, "updated_at", 0.0),
             )
             self._launches[candidate.candidate_id] = launch
             self._candidate_launches[candidate.candidate_id] = launch
@@ -436,18 +472,21 @@ class PortableSessionSupervisor:
                 raise RuntimeError(
                     "Portable worker must redirect stdin, stdout, and stderr."
                 )
-            snapshot = PortableSessionSnapshot(
-                session_id=launch.session_id,
+            previous = self._snapshots.get(
+                launch.session_id,
+                PortableSessionSnapshot(
+                    session_id=launch.session_id,
+                    checkout=launch.checkout,
+                    status=PortableSessionStatus.READY,
+                ),
+            )
+            snapshot = replace(
+                previous,
                 checkout=launch.checkout,
                 status=PortableSessionStatus.RUNNING,
-                prd_path=self._snapshots.get(
-                    launch.session_id,
-                    PortableSessionSnapshot(
-                        session_id=launch.session_id,
-                        checkout=launch.checkout,
-                        status=PortableSessionStatus.READY,
-                    ),
-                ).prd_path,
+                result=None,
+                input_request=None,
+                updated_at=time.time(),
             )
             self._snapshots[launch.session_id] = snapshot
             self._launches[launch.session_id] = launch
@@ -543,6 +582,7 @@ class PortableSessionSupervisor:
                 snapshot,
                 status=PortableSessionStatus.RUNNING,
                 input_request=None,
+                updated_at=time.time(),
             )
             self._snapshots[session_id] = updated
             self._publish(updated)
@@ -629,6 +669,7 @@ class PortableSessionSupervisor:
                     snapshot,
                     status=PortableSessionStatus.READY,
                     input_request=None,
+                    updated_at=time.time(),
                 )
                 self._snapshots[session_id] = ready
                 self._persist_snapshot(ready)
@@ -686,6 +727,7 @@ class PortableSessionSupervisor:
                 updated = replace(
                     snapshot,
                     diagnostics=(*snapshot.diagnostics, diagnostic)[-100:],
+                    updated_at=time.time(),
                 )
                 self._snapshots[session_id] = updated
                 self._publish(updated)
@@ -756,7 +798,33 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker STATUS cannot claim a terminal session status."
                     )
-                updated = replace(snapshot, status=status)
+                progress = snapshot.progress
+                if any(
+                    key in frame.payload
+                    for key in (
+                        "stage",
+                        "completed_issues",
+                        "total_issues",
+                        "active_issue",
+                    )
+                ):
+                    progress = PortableSessionProgress(
+                        stage=_payload_text(frame, "stage"),
+                        completed_issues=_payload_nonnegative_int(
+                            frame,
+                            "completed_issues",
+                        ),
+                        total_issues=_payload_nonnegative_int(
+                            frame,
+                            "total_issues",
+                        ),
+                        active_issue=_payload_optional_text(frame, "active_issue"),
+                    )
+                    if progress.completed_issues > progress.total_issues:
+                        raise PortableProtocolError(
+                            "Worker completed issue count cannot exceed its total."
+                        )
+                updated = replace(snapshot, status=status, progress=progress)
             elif kind is WorkerMessageKind.INPUT_REQUEST:
                 try:
                     request_kind = PortableSessionInputKind(
@@ -832,6 +900,15 @@ class PortableSessionSupervisor:
                         _payload_text(frame, "message"),
                     )[-100:],
                 )
+            if kind in {
+                WorkerMessageKind.CONTEXT,
+                WorkerMessageKind.ACTIVITY,
+                WorkerMessageKind.SAFE_OUTPUT,
+                WorkerMessageKind.STATUS,
+                WorkerMessageKind.INPUT_REQUEST,
+            }:
+                updated = self._refresh_authoritative_progress(updated)
+            updated = replace(updated, updated_at=time.time())
             self._snapshots[session_id] = updated
             self._persist_snapshot(updated)
             if kind in {
@@ -904,6 +981,40 @@ class PortableSessionSupervisor:
             self._snapshots.pop(candidate_id, None)
         return prd_path in self._unfinished_prd_paths
 
+    def _refresh_authoritative_progress(
+        self,
+        snapshot: PortableSessionSnapshot,
+    ) -> PortableSessionSnapshot:
+        if self._resume_candidates_loader is None or snapshot.prd_path is None:
+            return snapshot
+        now = time.monotonic()
+        last_refresh = self._last_progress_refresh.get(snapshot.session_id)
+        if (
+            last_refresh is not None
+            and now - last_refresh < _PROGRESS_REFRESH_INTERVAL_SECONDS
+        ):
+            return snapshot
+        self._last_progress_refresh[snapshot.session_id] = now
+        prd_path = snapshot.prd_path.resolve()
+        try:
+            matching = next(
+                (
+                    candidate
+                    for candidate in self._resume_candidates_loader()
+                    if candidate.prd_path.resolve() == prd_path
+                ),
+                None,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return snapshot
+        if matching is None:
+            return snapshot
+        return replace(
+            snapshot,
+            progress=_candidate_progress(matching),
+            updated_at=getattr(matching, "updated_at", snapshot.updated_at),
+        )
+
     def _fail_session(
         self,
         session_id: str,
@@ -919,6 +1030,7 @@ class PortableSessionSupervisor:
                 status=PortableSessionStatus.FAILED,
                 result=1,
                 diagnostics=(*snapshot.diagnostics, message)[-100:],
+                updated_at=time.time(),
             )
             self._snapshots[session_id] = updated
             self._persist_snapshot(updated)
@@ -1044,6 +1156,43 @@ def _payload_text(frame: PortableProtocolFrame, key: str) -> str:
     value = frame.payload.get(key, "")
     if not isinstance(value, str):
         raise PortableProtocolError(f"Worker payload {key!r} must be text.")
+    return value
+
+
+def _candidate_progress(
+    candidate: PortableResumeCandidateRecord,
+) -> PortableSessionProgress:
+    return PortableSessionProgress(
+        stage=getattr(candidate, "active_status", None) or "",
+        completed_issues=getattr(candidate, "completed_issues", 0),
+        total_issues=getattr(candidate, "total_issues", 0),
+        active_issue=getattr(candidate, "active_issue", None),
+    )
+
+
+def _payload_optional_text(
+    frame: PortableProtocolFrame,
+    key: str,
+) -> str | None:
+    value = frame.payload.get(key)
+    if value is not None and not isinstance(value, str):
+        raise PortableProtocolError(f"Worker payload {key!r} must be text or null.")
+    return value
+
+
+def _payload_nonnegative_int(
+    frame: PortableProtocolFrame,
+    key: str,
+) -> int:
+    value = frame.payload.get(key)
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+    ):
+        raise PortableProtocolError(
+            f"Worker payload {key!r} must be a non-negative integer."
+        )
     return value
 
 
