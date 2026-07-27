@@ -391,7 +391,8 @@ class PortableSessionSupervisor:
             )
             self._snapshots[launch.session_id] = snapshot
             self._launches[launch.session_id] = launch
-            self._running[launch.session_id] = _RunningSession(process)
+            running = _RunningSession(process)
+            self._running[launch.session_id] = running
             if self._catalog is not None:
                 try:
                     self._catalog.update_session_status(
@@ -422,13 +423,13 @@ class PortableSessionSupervisor:
             raise
         stdout_thread = Thread(
             target=self._read_worker_stdout,
-            args=(launch.session_id,),
+            args=(launch.session_id, running),
             daemon=True,
             name=f"portable-session-{launch.session_id}-stdout",
         )
         stderr_thread = Thread(
             target=self._read_worker_stderr,
-            args=(launch.session_id,),
+            args=(launch.session_id, running),
             daemon=True,
             name=f"portable-session-{launch.session_id}-stderr",
         )
@@ -568,8 +569,11 @@ class PortableSessionSupervisor:
         process.stdin.write(frame.to_json_line() + "\n")
         process.stdin.flush()
 
-    def _read_worker_stdout(self, session_id: str) -> None:
-        running = self._running[session_id]
+    def _read_worker_stdout(
+        self,
+        session_id: str,
+        running: _RunningSession,
+    ) -> None:
         assert running.process.stdout is not None
         try:
             for line in running.process.stdout:
@@ -579,19 +583,28 @@ class PortableSessionSupervisor:
                     expected_sequence=running.next_worker_sequence,
                 )
                 running.next_worker_sequence += 1
-                self._apply_worker_frame(session_id, frame)
+                self._apply_worker_frame(session_id, frame, running)
                 if frame.kind in {
                     WorkerMessageKind.COMPLETION.value,
                     WorkerMessageKind.FAILURE.value,
                 }:
                     return
             if not self.snapshot(session_id).status.terminal:
-                self._fail_session(session_id, "Worker exited without a terminal result.")
+                self._fail_session(
+                    session_id,
+                    "Worker exited without a terminal result.",
+                    running,
+                )
         except (PortableProtocolError, OSError) as error:
-            self._fail_session(session_id, str(error))
+            self._fail_session(session_id, str(error), running)
+        finally:
+            self._reap_worker(running)
 
-    def _read_worker_stderr(self, session_id: str) -> None:
-        running = self._running[session_id]
+    def _read_worker_stderr(
+        self,
+        session_id: str,
+        running: _RunningSession,
+    ) -> None:
         assert running.process.stderr is not None
         for line in running.process.stderr:
             diagnostic = line.rstrip("\r\n")
@@ -610,6 +623,7 @@ class PortableSessionSupervisor:
         self,
         session_id: str,
         frame: PortableProtocolFrame,
+        running: _RunningSession,
     ) -> None:
         try:
             kind = WorkerMessageKind(frame.kind)
@@ -737,6 +751,11 @@ class PortableSessionSupervisor:
                 )
             self._snapshots[session_id] = updated
             self._persist_snapshot(updated)
+            if kind in {
+                WorkerMessageKind.COMPLETION,
+                WorkerMessageKind.FAILURE,
+            }:
+                self._retire_running_session(session_id, running)
             self._publish(updated)
             self._condition.notify_all()
 
@@ -757,7 +776,12 @@ class PortableSessionSupervisor:
             }
         return prd_path in self._unfinished_prd_paths
 
-    def _fail_session(self, session_id: str, message: str) -> None:
+    def _fail_session(
+        self,
+        session_id: str,
+        message: str,
+        running: _RunningSession,
+    ) -> None:
         with self._condition:
             snapshot = self._snapshots[session_id]
             if snapshot.status.terminal:
@@ -770,11 +794,35 @@ class PortableSessionSupervisor:
             )
             self._snapshots[session_id] = updated
             self._persist_snapshot(updated)
+            self._retire_running_session(session_id, running)
             self._publish(updated)
             self._condition.notify_all()
-            running = self._running.get(session_id)
-            if running is not None and running.process.poll() is None:
+            if running.process.poll() is None:
                 running.process.terminate()
+
+    def _retire_running_session(
+        self,
+        session_id: str,
+        running: _RunningSession,
+    ) -> None:
+        if self._running.get(session_id) is running:
+            self._running.pop(session_id)
+
+    @staticmethod
+    def _reap_worker(running: _RunningSession) -> None:
+        try:
+            running.process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            running.process.terminate()
+            running.process.wait(timeout=1)
+        finally:
+            for stream in (
+                running.process.stdin,
+                running.process.stdout,
+                running.process.stderr,
+            ):
+                if stream is not None:
+                    stream.close()
 
     def _publish(self, snapshot: PortableSessionSnapshot) -> None:
         self._events.put(PortableSessionEvent(snapshot))

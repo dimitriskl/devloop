@@ -33,7 +33,7 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
-    async def test_saved_project_without_unfinished_prd_can_start_a_session(
+    async def test_saved_project_launch_does_not_inherit_another_projects_prd(
         self,
     ) -> None:
         class FakeSupervisor:
@@ -75,9 +75,21 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             session_supervisor=supervisor,
             session_launch=PortableSessionLaunch(
                 session_id="session-saved-project",
-                checkout=Path("other-project").resolve(),
+                checkout=Path("project-a").resolve(),
                 operation=PortableWorkflowOperation.PLANNING,
-                arguments=("--goal", "new change"),
+                arguments=(
+                    "--prd",
+                    str(Path("project-a/prd/change-a.md").resolve()),
+                    "--goal",
+                    "change that belongs only to project A",
+                    "--codex",
+                    "custom-codex",
+                    "--sandbox",
+                    "read-only",
+                    "--approval-policy",
+                    "on-request",
+                    "--native-editor",
+                ),
             ),
         )
 
@@ -97,7 +109,20 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
         launch = supervisor.intents[0].launch
         assert launch is not None
         self.assertEqual(launch.checkout, Path("saved-project").resolve())
-        self.assertEqual(launch.arguments[:2], ("--repo", str(launch.checkout)))
+        self.assertEqual(
+            launch.arguments,
+            (
+                "--repo",
+                str(launch.checkout),
+                "--codex",
+                "custom-codex",
+                "--sandbox",
+                "read-only",
+                "--approval-policy",
+                "on-request",
+                "--native-editor",
+            ),
+        )
 
     async def test_restored_session_requires_explicit_resume_from_sessions_tab(
         self,

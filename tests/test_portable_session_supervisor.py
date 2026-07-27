@@ -6,9 +6,11 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 from pathlib import Path
 
+from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
     PortableSessionLaunch,
     PortableSessionSnapshot,
@@ -19,6 +21,85 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
+    def test_pre_prd_clean_exit_can_resume_again_in_the_same_application(
+        self,
+    ) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "HELLO",
+                "payload": {},
+            }), flush=True)
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 2,
+                "kind": "COMPLETION",
+                "payload": {"exit_code": 0},
+            }), flush=True)
+            """
+        )
+        workers: list[subprocess.Popen[str]] = []
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            worker = subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            workers.append(worker)
+            return worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            launch = PortableSessionLaunch(
+                session_id="pre-prd-resume-twice",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(launch)
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+            )
+
+            supervisor.resume_session(launch.session_id)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.READY,
+            )
+            resumed = supervisor.resume_session(launch.session_id)
+            self.assertEqual(resumed.status, PortableSessionStatus.RUNNING)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.READY,
+            )
+            supervisor.shutdown()
+            returncodes = [worker.wait(timeout=5) for worker in workers]
+
+        self.assertEqual(len(workers), 2)
+        self.assertEqual(returncodes, [0, 0])
+
     def test_session_projects_context_activity_and_success_from_an_isolated_worker(
         self,
     ) -> None:
@@ -399,6 +480,20 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             supervisor.wait_for_terminal(launch.session_id, timeout=5)
             supervisor.shutdown()
             return supervisor.snapshot(launch.session_id)
+
+    def _wait_for_status(
+        self,
+        supervisor: PortableSessionSupervisor,
+        session_id: str,
+        expected: PortableSessionStatus,
+    ) -> PortableSessionSnapshot:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snapshot = supervisor.snapshot(session_id)
+            if snapshot.status is expected:
+                return snapshot
+            time.sleep(0.01)
+        self.fail(f"Portable session did not reach {expected.value}.")
 
 
 if __name__ == "__main__":

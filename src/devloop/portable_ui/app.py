@@ -1303,16 +1303,9 @@ def _arguments_for_checkout(
     arguments: tuple[str, ...],
     checkout: Path,
 ) -> tuple[str, ...]:
-    updated: list[str] = []
-    index = 0
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument == "--repo":
-            index += 2
-            continue
-        if argument.startswith("--repo="):
-            index += 1
-            continue
-        updated.append(argument)
-        index += 1
-    return ("--repo", str(checkout), *updated)
+    from ..portable_session_catalog import PortableLaunchSettings
+
+    return PortableLaunchSettings.from_arguments(arguments).to_arguments(
+        checkout=checkout,
+        prd_path=None,
+    )
