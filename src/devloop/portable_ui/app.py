@@ -52,7 +52,7 @@ from ..portable_session_targets import (
 )
 from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
 from ..subprocess_utils import terminate_active_process_trees
-from ..terminal_text import sanitize_terminal_text
+from ..terminal_text import compact_terminal_text, sanitize_terminal_text
 from ..version import VERSION
 
 
@@ -79,6 +79,7 @@ NEW_SESSION_CANCEL_ID = "__new_session_cancel__"
 NEW_SESSION_BACK_ID = "__new_session_back__"
 NEW_SESSION_SAVED_PREFIX = "__new_session_saved_project__:"
 NEW_SESSION_REPOSITORY_PREFIX = "__new_session_repository__:"
+SESSION_INPUT_ERROR_MAX_LENGTH = 160
 
 
 class PortableDetail(Static):
@@ -397,6 +398,7 @@ class PortableApplicationShell(App[None]):
         self._open_session_ids: list[str] = []
         self._unread_session_ids: set[str] = set()
         self._attention_session_ids: set[str] = set()
+        self._session_input_rejections: dict[str, str] = {}
         self._attention_bell = (
             os.environ.get(SESSION_ATTENTION_BELL_ENV, "").casefold()
             in ENABLED_ENVIRONMENT_VALUES
@@ -949,6 +951,11 @@ class PortableApplicationShell(App[None]):
     def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
         previous = self._session_snapshots.get(snapshot.session_id)
         self._session_snapshots[snapshot.session_id] = snapshot
+        if (
+            snapshot.input_request is not None
+            and (previous is None or previous.input_request != snapshot.input_request)
+        ):
+            self._session_input_rejections.pop(snapshot.session_id, None)
         background_attention = (
             snapshot.input_request is not None
             and (previous is None or previous.input_request is None)
@@ -1094,7 +1101,10 @@ class PortableApplicationShell(App[None]):
             activity.write(
                 sanitize_terminal_text(line, preserve_newlines=True)
             )
-        self.query_one("#portable-status", Static).update(snapshot.status.value)
+        rejection = self._session_input_rejections.get(snapshot.session_id)
+        self.query_one("#portable-status", Static).update(
+            f"INPUT NOT SENT · {rejection}" if rejection else snapshot.status.value
+        )
         action_bar = (
             "Enter Resume | Esc Sessions | F4 Logs | F5 Context"
             if snapshot.status
@@ -1547,12 +1557,47 @@ class PortableApplicationShell(App[None]):
     def _provide_session_input(self, value: str) -> None:
         assert self._session_supervisor is not None
         assert self._active_session_id is not None
-        self._session_supervisor.handle_intent(
-            PortableSessionIntent(
-                kind=PortableSessionIntentKind.PROVIDE_INPUT,
-                session_id=self._active_session_id,
-                value=value,
+        session_id = self._active_session_id
+        try:
+            self._session_supervisor.handle_intent(
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                    session_id=session_id,
+                    value=value,
+                )
             )
+            self._session_input_rejections.pop(session_id, None)
+        except ValueError as error:
+            self._show_session_input_rejection(session_id, error)
+
+    def _show_session_input_rejection(
+        self,
+        session_id: str,
+        error: ValueError,
+    ) -> None:
+        assert self._session_supervisor is not None
+        safe_error = compact_terminal_text(
+            error,
+            max_length=SESSION_INPUT_ERROR_MAX_LENGTH,
+        )
+        self._session_input_rejections[session_id] = safe_error
+        snapshots = {
+            snapshot.session_id: snapshot
+            for snapshot in self._session_supervisor.list_sessions()
+        }
+        snapshot = snapshots.get(session_id)
+        if snapshot is None:
+            self._session_snapshots = snapshots
+            self._show_sessions_tab()
+        else:
+            self._session_snapshots.update(
+                (current_session_id, current_snapshot)
+                for current_session_id, current_snapshot in snapshots.items()
+                if current_session_id != session_id
+            )
+            self._show_session_snapshot(snapshot)
+        self.query_one("#portable-status", Static).update(
+            f"INPUT NOT SENT · {safe_error}"
         )
 
     def _finish_interaction_transition(self, request_id: int) -> None:

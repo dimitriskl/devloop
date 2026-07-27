@@ -1292,6 +1292,136 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
             self.assertEqual(completed.activity, ("continued with beta-only",))
 
+    async def test_stale_input_after_session_retirement_keeps_sibling_usable(
+        self,
+    ) -> None:
+        retiring = PortableSessionSnapshot(
+            session_id="session-retiring",
+            checkout=Path("retiring").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.TEXT,
+                prompt="Retiring value",
+            ),
+        )
+        sibling = PortableSessionSnapshot(
+            session_id="session-sibling",
+            checkout=Path("sibling").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.TEXT,
+                prompt="Sibling value",
+            ),
+        )
+
+        class RaceSupervisor:
+            def __init__(self) -> None:
+                self.snapshots = {
+                    retiring.session_id: retiring,
+                    sibling.session_id: sibling,
+                }
+                self.events: list[PortableSessionEvent] = []
+                self.retirement_event_released = False
+
+            def retire_before_ui_drain(self) -> None:
+                retired = PortableSessionSnapshot(
+                    session_id=retiring.session_id,
+                    checkout=retiring.checkout,
+                    status=PortableSessionStatus.FAILED,
+                    diagnostics=("worker exited before input arrived",),
+                    result=17,
+                )
+                self.snapshots[retiring.session_id] = retired
+                self.events.append(PortableSessionEvent(retired))
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return tuple(self.snapshots.values())
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                if intent.session_id == retiring.session_id:
+                    self.retirement_event_released = True
+                    raise ValueError(
+                        "\x1b[31mPortable session is terminal and cannot accept "
+                        f"input: {retiring.session_id}\x1b[0m " + ("x" * 500)
+                    )
+                if intent.session_id != sibling.session_id:
+                    raise AssertionError(f"Unexpected intent: {intent}")
+                completed = PortableSessionSnapshot(
+                    session_id=sibling.session_id,
+                    checkout=sibling.checkout,
+                    status=PortableSessionStatus.COMPLETED,
+                    activity=(f"continued with {intent.value}",),
+                    result=0,
+                )
+                self.snapshots[sibling.session_id] = completed
+                self.events.append(PortableSessionEvent(completed))
+                return completed
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                if not self.retirement_event_released:
+                    return None
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = RaceSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+            attention_bell=False,
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            app._active_session_id = retiring.session_id
+            app._show_session_snapshot(retiring)
+            retiring_input = app.query_one("#portable-input", Input)
+            retiring_input.value = "stale value"
+
+            supervisor.retire_before_ui_drain()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            retired_detail = str(
+                app.query_one("#portable-detail", Static).render()
+            )
+            rejection_status = str(
+                app.query_one("#portable-status", Static).render()
+            )
+            self.assertTrue(app.is_running)
+            self.assertIn("Status: FAILED", retired_detail)
+            self.assertIn("INPUT NOT SENT", rejection_status)
+            self.assertIn("terminal and cannot accept input", rejection_status)
+            self.assertNotIn("\x1b", rejection_status)
+            self.assertLessEqual(len(rejection_status), 180)
+            self.assertFalse(retiring_input.display)
+
+            app._active_session_id = sibling.session_id
+            app._show_session_snapshot(supervisor.snapshots[sibling.session_id])
+            sibling_input = app.query_one("#portable-input", Input)
+            sibling_input.value = "beta-only"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            self.assertTrue(app.is_running)
+            self.assertEqual(
+                supervisor.snapshots[sibling.session_id].status,
+                PortableSessionStatus.COMPLETED,
+            )
+            self.assertEqual(
+                supervisor.snapshots[sibling.session_id].activity,
+                ("continued with beta-only",),
+            )
+
     async def test_escape_hides_only_the_tab_and_reopen_uses_retained_projection(
         self,
     ) -> None:
