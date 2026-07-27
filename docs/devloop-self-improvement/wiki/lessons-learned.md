@@ -15,34 +15,82 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 ## Validate Authenticated External Endpoints Before Use
 
 - Applies to: coder, reviewer, QA, stored integration configuration and authenticated HTTP clients
-- Lesson: Treat a stored service URL as untrusted input; validate an absolute HTTPS base URI immediately before constructing a client or attaching credentials, and do not expose unused raw endpoint fields.
-- Evidence: Issue 0001 review found that a stored Fulfillment Tools URL could receive bearer-authenticated requests without an absolute-HTTPS check, allowing credentials to be sent to an unsafe or plaintext destination.
-- Action: Reject malformed, relative, and non-HTTPS endpoints before any authenticated request, return a generic safe error, and add regressions proving no client call or credential transmission occurs.
-- Last seen: 2026-07-23
+- Lesson: Treat a stored service URL as untrusted input; absolute HTTPS syntax alone does not prove that the destination or redirect target is trusted.
+- Evidence: July 24 Issue 0001 review found that an arbitrary HTTPS host could receive a tenant bearer token until the implementation added trusted-host and public-DNS enforcement plus redirect blocking.
+- Action: Before attaching credentials, require an approved host and port, resolve only acceptable public addresses, disable or revalidate redirects, return a generic safe error, and test every rejection path for zero credential transmission.
+- Last seen: 2026-07-24
 
 ## Classify Remote Absence Only After Complete Retrieval
 
-- Applies to: coder, reviewer, QA, paginated APIs and diagnostic classification
-- Lesson: A locally filtered first page cannot prove that a remote record is missing when the source supports pagination.
-- Evidence: Issue 0001 read only the first 500 facility listings before classifying missing data, while an existing integration helper showed that the same listing source can span multiple pages.
-- Action: Use a supported targeted lookup or bounded complete pagination, include required identity variants, and test a match beyond the first page before returning a missing classification.
-- Last seen: 2026-07-23
+- Applies to: coder, reviewer, QA, paginated or schema-variable APIs and diagnostic classification
+- Lesson: Remote absence, staleness, or eligibility requires transport success plus endpoint-specific, decision-complete evidence; valid JSON, a familiar field, or a recognized but empty collection is insufficient.
+- Evidence: Successive July 24 Issue 0001 reviews found that malformed identifier types, empty order-line collections, unknown envelopes, and mixed valid/malformed rows could remain complete or silently lose source rows.
+- Action: Complete bounded retrieval, validate the envelope, required cardinality, every item, and each consumed field's documented JSON type; on source failure or any unexpected, empty-required, partial, or dropped row, mark the whole owning evidence category incomplete and non-actionable.
+- Last seen: 2026-07-24
 
 ## Use Authoritative Evidence For Diagnostic Inference
 
-- Applies to: coder, reviewer, QA, diagnostic services and multi-source classification
-- Lesson: Do not substitute adjacent inventory or balance data for required routing or decision evidence, and do not collapse missing and ambiguous identities into the same result.
-- Evidence: Issue 0001 inferred a facility from ERP warehouse and balance rows without the required process, reservation, and routing evidence; it also mapped both missing and multiple canonical identities to one generic warning.
-- Action: Map each decision to its authoritative evidence source, infer only when exactly one valid candidate remains, preserve distinct missing and ambiguous outcomes, and test every evidence path through the full service boundary.
-- Last seen: 2026-07-23
+- Applies to: coder, reviewer, QA, diagnostic services, external mutations and multi-source classification
+- Lesson: Extract decision evidence only from the owning endpoint's documented fields; passing tests built from synthetic payload assumptions do not establish compatibility with the external contract.
+- Evidence: July 24 Issue 0001 passed 62 focused tests against fields absent from the official contract; Issue 0002 then passed focused gates with synthetic mutation wrappers that did not match the documented root-array and nested-result response shapes.
+- Action: Derive endpoint-specific parsers, serializers, and representative fixtures from authoritative documentation or captured schemas; test official-shaped requests and responses through the full service boundary before accepting focused gates.
+- Last seen: 2026-07-24
+
+## Keep External Identities Separate And Coherent
+
+- Applies to: coder, reviewer, QA, external API envelopes, DTO mapping and later mutation targeting
+- Lesson: Tenant or business identifiers and remote entity identifiers are distinct; one business-key match is not unique merely because it is the first result returned.
+- Evidence: Successive July 24 Issue 0001 reviews found mixed root/payload identities and then first-match selection when the external API can return both historical and current orders with the same tenant order code.
+- Action: Give each identity a strict typed accessor, collect all exact business-key matches, select one coherent entity only through a documented deterministic rule or reject ambiguity, and test conflicting envelopes plus duplicate historical/current results.
+- Last seen: 2026-07-24
+
+## Fix Review Invariants Instead Of Counterexamples
+
+- Applies to: coder rework, reviewer fix lists and security-sensitive parsing
+- Lesson: When a later review finds a close variant of the same defect, treat the blocker as an invariant or boundary-design failure instead of adding another example-specific guard.
+- Evidence: Five July 24 Issue 0001 rework cycles passed growing focused suites, but reviews successively found unexpected objects, malformed array rows, one-field partial rows, recursive metadata matches, and conflicting identity envelopes accepted by the same permissive boundary.
+- Action: State the invariant, replace heuristic helpers with endpoint-specific contracts or typed boundaries, enumerate every producer and consumer, and test adversarial equivalence classes before requesting another review.
+- Last seen: 2026-07-24
+
+## Bound Aggregate External Fan-Out
+
+- Applies to: diagnostic endpoints, integrations and loops over externally derived facilities or items
+- Lesson: Per-page, per-item, or per-facility caps do not bound system load when one caller can multiply scopes or issue concurrent requests.
+- Evidence: July 24 Issue 0001 reviews found nested facility/article fan-out and a read-authorized trace endpoint that permitted up to 2,000 outbound operations per request without per-user/company rate or concurrency protection.
+- Action: Enforce shared operation-wide facility, request, and time budgets plus caller-and-tenant rate and concurrency limits; validate configurable bounds, fail non-actionably on exhaustion, and test large fan-out, parallel calls, and every limit boundary.
+- Last seen: 2026-07-24
 
 ## Keep Reviewer Rework Within The Execution Budget
 
 - Applies to: coder rework, reviewer fix lists, Codex execution timeouts and resumed attempts
 - Lesson: A broad review fix list needs a dependency-ordered, time-budgeted rework plan that leaves enough time for focused verification and a valid structured result.
-- Evidence: Issue 0001 review returned six fixes spanning security, pagination, inference, state modeling, tests, and repository hygiene; the following coder rework reached the 1,800-second timeout and left the issue blocked.
+- Evidence: Issue 0001 rework reached the 1,800-second timeout after a six-fix review. On July 24, two Issue 0002 coder attempts also exhausted 1,800 seconds after partial edits, while another successful attempt used 1,774 seconds.
 - Action: At rework start, inspect the current partial diff, group fixes into coherent high-severity-first slices, reserve time for gates and schema output, and make the next attempt continue verified partial edits instead of restarting.
-- Last seen: 2026-07-23
+- Last seen: 2026-07-24
+
+## Classify Mutation Outcomes From Durable Side Effects
+
+- Applies to: coder, reviewer, QA, multi-step external mutations, retries and terminal auditing
+- Lesson: Outcome and retryability must reflect every completed side effect and the integrity of its durable audit, not only the current HTTP status or exception.
+- Evidence: July 24 Issue 0002 reviews found a mismatched 2xx acknowledgement classified as retryable stale, 404/409 responses classified as stale after earlier writes, and a retry proposal still exposed when terminal audit persistence failed.
+- Action: Track completed writes independently, treat uncorrelated success or failed terminal audit as non-retryable partial or unknown, expose a fresh proposal only when no write occurred and durable terminal evidence succeeded, and test the cross-product of response, prior writes, and audit result.
+- Last seen: 2026-07-24
+
+## Reread Remote Absence Immediately Before Create
+
+- Applies to: coder, reviewer, QA, preview-confirm workflows and external create operations
+- Lesson: A preview-time zero-match result does not authorize a later create when another actor can create the same entity between preview and execution.
+- Evidence: July 24 Issue 0002 review found that canonical listing and stock creates relied on proposal-time searches, allowing a concurrent worker to create the target before the POST and produce a duplicate.
+- Action: Perform a bounded authoritative reread adjacent to each create, suppress the create on any match or ambiguous evidence, and add an interleaving regression between preview and mutation.
+- Last seen: 2026-07-24
+
+## Keep Guardrails Aligned With Conditional Behavior
+
+- Applies to: coder, reviewer, QA, mandatory pattern docs, checklists and executable branch rules
+- Lesson: A guardrail stated as an unconditional rule is a defect when implementation correctness depends on prior writes, audit success, or another branch predicate.
+- Evidence: The final July 24 Issue 0002 review found `DOTNET_PATTERNS.md` said every repair 404/409 was stale, while the implemented and checklist rule required a partial outcome after an earlier completed write.
+- Action: Express the full decision table in code, tests, pattern docs, and checklists together; grep for older absolute wording whenever a branch rule is refined.
+- Last seen: 2026-07-24
 
 ## Enforce Watchdog Deadlines Within A Bounded Grace Period
 
