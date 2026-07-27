@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
-import sys
 import tempfile
-import textwrap
 import threading
 import unittest
 from pathlib import Path
@@ -497,63 +496,75 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             source = root / "source"
             worktree = root / "implementation"
             source.mkdir()
-            worktree.mkdir()
+            subprocess.run(
+                ["git", "init"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            prd_directory = source / "prd" / "delivery-transfer"
+            issues_directory = prd_directory / "issues"
+            issues_directory.mkdir(parents=True)
+            prd = prd_directory / "delivery-transfer.md"
+            issues_index = issues_directory / "README.md"
+            issue = issues_directory / "0001-transfer.md"
+            prd.write_text(
+                "# Delivery Transfer\n\n"
+                "## Target Product\n\n"
+                "Product: devloop-plan + devloop\n",
+                encoding="utf-8",
+            )
+            issues_index.write_text(
+                "- [Transfer](./0001-transfer.md)\n",
+                encoding="utf-8",
+            )
+            issue.write_text(
+                "# Transfer\n\n"
+                "## Target Product\n\n"
+                "Product: devloop-plan + devloop\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Dev Loop Tests",
+                    "-c",
+                    "user.email=devloop-tests@example.invalid",
+                    "commit",
+                    "-m",
+                    "initial",
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature/delivery-transfer",
+                    str(worktree),
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             catalog = PortableSessionCatalog(root / "catalog.sqlite3")
             owner_id = "shell-transfer-ui"
-            worker_source = textwrap.dedent(
-                f"""
-                import json
-                import sys
-
-                session_id = sys.argv[1]
-                json.loads(sys.stdin.readline())
-                for sequence, kind, payload in (
-                    (1, "HELLO", {{}}),
-                    (2, "CONTEXT", {{
-                        "project_root": {str(source)!r},
-                        "implementation_branch": "feature/transfer",
-                        "implementation_worktree": {str(worktree)!r},
-                        "prd_path": "",
-                    }}),
-                    (3, "INPUT_REQUEST", {{
-                        "request_kind": "TEXT",
-                        "prompt": "Keep worker alive",
-                        "options": [],
-                        "default_key": "",
-                        "cancel_key": None,
-                    }}),
-                ):
-                    print(json.dumps({{
-                        "version": 1,
-                        "session_id": session_id,
-                        "sequence": sequence,
-                        "kind": kind,
-                        "payload": payload,
-                    }}), flush=True)
-                sys.stdin.readline()
-                """
-            )
-
-            def launch_worker(
-                launch: PortableSessionLaunch,
-            ) -> subprocess.Popen[str]:
-                catalog.bind_session_checkout(
-                    launch.session_id,
-                    worktree,
-                    owner_id=owner_id,
-                )
-                return subprocess.Popen(
-                    [sys.executable, "-u", "-c", worker_source, launch.session_id],
-                    cwd=worktree,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                )
-
             supervisor = PortableSessionSupervisor(
-                worker_launcher=launch_worker,
                 catalog=catalog,
                 owner_id=owner_id,
             )
@@ -563,53 +574,73 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 session_launch=PortableSessionLaunch(
                     session_id="session-transfer-ui",
                     checkout=source,
-                    operation=PortableWorkflowOperation.PLANNING,
-                    arguments=("--repo", str(source), "--goal", "transfer"),
+                    operation=PortableWorkflowOperation.DELIVERY,
+                    arguments=(
+                        "--prd",
+                        str(prd),
+                        "--issues",
+                        str(issues_index),
+                        "--all",
+                        "--create-worktree",
+                        "--worktree-path",
+                        str(worktree),
+                        "--branch-name",
+                        "feature/delivery-transfer",
+                        "--non-interactive",
+                        "--dry-run",
+                        "--no-self-improvement-wiki",
+                    ),
                 ),
             )
-            fake_git_checkout = SimpleNamespace(repo_root=worktree.resolve())
 
-            with mock.patch(
-                "devloop.worktree.find_git_checkout",
-                return_value=fake_git_checkout,
-            ):
-                async with app.run_test(size=(110, 32)) as pilot:
-                    snapshot = app._launch_new_session_at_checkout(source)
-                    assert snapshot is not None
-                    app._active_session_id = snapshot.session_id
-                    app._show_session_snapshot(snapshot)
-                    for _attempt in range(100):
-                        await pilot.pause()
-                        transferred = supervisor.snapshot(snapshot.session_id)
-                        if transferred.context is not None:
-                            break
-                    else:
-                        self.fail("Worker context did not reach the supervisor")
+            async with app.run_test(size=(110, 32)) as pilot:
+                snapshot = app._launch_new_session_at_checkout(source)
+                assert snapshot is not None
+                app._active_session_id = snapshot.session_id
+                app._show_session_snapshot(snapshot)
+                for _attempt in range(200):
+                    transferred = supervisor.snapshot(snapshot.session_id)
+                    if transferred.context is not None:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("Delivery worker context did not reach the supervisor")
+                source_lease_at_context = catalog.get_worktree_lease(source)
+                worktree_lease_at_context = catalog.get_worktree_lease(worktree)
+                completed = await asyncio.to_thread(
+                    supervisor.wait_for_terminal,
+                    snapshot.session_id,
+                    timeout=20,
+                )
+                await pilot.pause()
 
-                    app._show_session_snapshot(transferred)
-                    active_detail = str(
-                        app.query_one("#portable-detail", Static).render()
-                    )
-                    app._show_sessions_tab()
-                    menu = app.query_one("#portable-navigation", OptionList)
-                    prompts = [
-                        str(menu.get_option_at_index(index).prompt)
-                        for index in range(menu.option_count)
-                    ]
-                    source_lease = catalog.get_worktree_lease(source)
-                    worktree_lease = catalog.get_worktree_lease(worktree)
-                    cached_launch = supervisor._launches[snapshot.session_id]
+                app._show_session_snapshot(completed)
+                active_detail = str(
+                    app.query_one("#portable-detail", Static).render()
+                )
+                app._show_sessions_tab()
+                menu = app.query_one("#portable-navigation", OptionList)
+                prompts = [
+                    str(menu.get_option_at_index(index).prompt)
+                    for index in range(menu.option_count)
+                ]
+                catalog_session = catalog.get_session(snapshot.session_id)
+                cached_launch = supervisor._launches[snapshot.session_id]
 
+            self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
             self.assertEqual(transferred.checkout, worktree.resolve())
+            self.assertIsNotNone(transferred.context)
             self.assertIn(f"Checkout: {worktree.resolve()}", active_detail)
             self.assertIn(f"Worktree: {worktree.resolve()}", active_detail)
-            self.assertIsNone(source_lease)
-            self.assertIsNotNone(worktree_lease)
-            self.assertEqual(cached_launch.checkout, worktree.resolve())
+            self.assertIsNone(source_lease_at_context)
+            self.assertIsNotNone(worktree_lease_at_context)
+            assert worktree_lease_at_context is not None
             self.assertEqual(
-                cached_launch.arguments[:2],
-                ("--repo", str(worktree.resolve())),
+                worktree_lease_at_context.session_id,
+                snapshot.session_id,
             )
+            self.assertEqual(catalog_session.checkout, worktree.resolve())
+            self.assertEqual(cached_launch.checkout, worktree.resolve())
             self.assertTrue(
                 any(
                     prompt == f"{worktree.name} [SAVED PROJECT]"
@@ -618,7 +649,7 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(
                 any(
-                    prompt == f"{worktree.name} [WAITING_FOR_INPUT]"
+                    prompt == f"{worktree.name} [COMPLETED]"
                     for prompt in prompts
                 )
             )

@@ -28,6 +28,10 @@ from .portable_execution_backend import (
     BackendModelCatalogAccess,
     ExecutionBackendId,
 )
+from .portable_session_catalog import (
+    active_portable_catalog_session,
+    bind_active_catalog_session_checkout,
+)
 from .portable_sessions import PortableSessionLaunch, PortableWorkflowOperation
 from .portable_workflow import (
     ANALYSIS_STEP_ID,
@@ -112,29 +116,7 @@ ARTIFACT_FRESHNESS_SLACK_SECONDS = 5
 def _active_catalog_session() -> (
     tuple[PortableSessionCatalog, PortableCatalogSession | None, bool] | None
 ):
-    catalog_path = os.environ.get("DEVLOOP_PORTABLE_SESSION_CATALOG")
-    session_id = os.environ.get("DEVLOOP_PORTABLE_SESSION_ID")
-    if not catalog_path or not session_id:
-        return None
-    from .portable_session_catalog import PortableSessionCatalog
-
-    catalog = PortableSessionCatalog(Path(catalog_path))
-    try:
-        record = catalog.get_session(session_id)
-    except KeyError:
-        record = None
-    restore_requested = (
-        os.environ.get("DEVLOOP_PORTABLE_SESSION_RESTORE") == "1"
-    )
-    if restore_requested and record is None:
-        raise RuntimeError(
-            f"Portable Session Catalog has no resumable session {session_id!r}."
-        )
-    return (
-        catalog,
-        record,
-        restore_requested,
-    )
+    return active_portable_catalog_session()
 
 
 def _catalog_session_launch(
@@ -257,7 +239,6 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     state_path = plan_state_path()
     selection = catalog_module.load_selection(state_path)
     catalog_session = _active_catalog_session()
-    catalog_owner_id = os.environ.get("DEVLOOP_PORTABLE_SESSION_OWNER_ID")
 
     if args.prd:
         try:
@@ -274,11 +255,8 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
                     _catalog_session_launch(args, repo_root)
                 )
             else:
-                session_catalog.bind_session_checkout(
-                    session_record.session_id,
-                    repo_root,
-                    owner_id=catalog_owner_id,
-                )
+                session_record = bind_active_catalog_session_checkout(repo_root)
+                assert session_record is not None
             session_catalog.publish_workflow(
                 session_record.session_id,
                 prd_path=artifacts.prd_path,
@@ -366,12 +344,8 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if catalog_session is not None:
         assert session_catalog is not None
         assert session_record is not None
-        session_catalog.bind_session_checkout(
-            session_record.session_id,
-            repo_root,
-            owner_id=catalog_owner_id,
-        )
-        session_record = session_catalog.get_session(session_record.session_id)
+        session_record = bind_active_catalog_session_checkout(repo_root)
+        assert session_record is not None
     publish_planning_run_context(
         project_root=project_root,
         implementation_branch=current_branch(repo_root) or "unknown",

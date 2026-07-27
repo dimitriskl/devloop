@@ -26,6 +26,10 @@ from .redaction import redact_persisted_evidence
 
 CATALOG_SCHEMA_VERSION = 2
 CATALOG_FILENAME = "portable-sessions.sqlite3"
+PORTABLE_SESSION_CATALOG_ENV = "DEVLOOP_PORTABLE_SESSION_CATALOG"
+PORTABLE_SESSION_ID_ENV = "DEVLOOP_PORTABLE_SESSION_ID"
+PORTABLE_SESSION_OWNER_ID_ENV = "DEVLOOP_PORTABLE_SESSION_OWNER_ID"
+PORTABLE_SESSION_RESTORE_ENV = "DEVLOOP_PORTABLE_SESSION_RESTORE"
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _APPROVAL_POLICIES = frozenset({"never", "on-request", "untrusted", "on-failure"})
 _SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
@@ -1289,6 +1293,53 @@ class PortableSessionCatalog:
             raise PortableSessionCatalogError(
                 "Portable Session Catalog contains an invalid session record."
             ) from error
+
+
+def active_portable_catalog_session(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[PortableSessionCatalog, PortableCatalogSession | None, bool] | None:
+    """Load the catalog session projected into the current worker process."""
+    values = os.environ if environment is None else environment
+    catalog_path = values.get(PORTABLE_SESSION_CATALOG_ENV)
+    session_id = values.get(PORTABLE_SESSION_ID_ENV)
+    if not catalog_path or not session_id:
+        return None
+    catalog = PortableSessionCatalog(Path(catalog_path))
+    try:
+        record = catalog.get_session(session_id)
+    except KeyError:
+        record = None
+    restore_requested = values.get(PORTABLE_SESSION_RESTORE_ENV) == "1"
+    if restore_requested and record is None:
+        raise RuntimeError(
+            f"Portable Session Catalog has no resumable session {session_id!r}."
+        )
+    return catalog, record, restore_requested
+
+
+def bind_active_catalog_session_checkout(
+    checkout: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> PortableCatalogSession | None:
+    """Atomically move the active session and lease to its selected checkout."""
+    values = os.environ if environment is None else environment
+    active_session = active_portable_catalog_session(environment=values)
+    if active_session is None:
+        return None
+    catalog, record, _restore_requested = active_session
+    if record is None:
+        session_id = values.get(PORTABLE_SESSION_ID_ENV, "")
+        raise RuntimeError(
+            f"Portable Session Catalog has no active session {session_id!r}."
+        )
+    catalog.bind_session_checkout(
+        record.session_id,
+        checkout,
+        owner_id=values.get(PORTABLE_SESSION_OWNER_ID_ENV),
+    )
+    return catalog.get_session(record.session_id)
 
 
 def _session_from_row(row: sqlite3.Row) -> PortableCatalogSession:

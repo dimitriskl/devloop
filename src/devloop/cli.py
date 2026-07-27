@@ -29,6 +29,7 @@ from .portable_execution_backend import (
     RunWideBlocker,
 )
 from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
+from .portable_session_catalog import bind_active_catalog_session_checkout
 from .product_scope import require_portable_target
 from .portable_component_catalog import build_portable_component_catalog
 from .portable_workflow import (
@@ -527,6 +528,7 @@ def _run_devloop_attempt(
     repo_root = worktree.repo_root
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
     issues_index_in_repo = map_path_to_worktree(issues_index, source_repo, repo_root)
+    bind_active_catalog_session_checkout(repo_root)
     publish_devloop_run_context(
         project_root=source_repo,
         implementation_branch=(
