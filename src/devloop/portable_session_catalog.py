@@ -19,7 +19,7 @@ from .portable_sessions import (
     PortableSessionStatus,
     PortableWorkflowOperation,
 )
-from .portable_workflow import FastPreference
+from .portable_workflow import ExecutionBudget, FastPreference, StepExecutionSettings
 from .redaction import redact_persisted_evidence
 
 CATALOG_SCHEMA_VERSION = 1
@@ -74,26 +74,20 @@ class PortablePlanningSettings:
                 f"expected {backend.value!r}."
             )
         try:
-            FastPreference(self.fast)
+            fast = FastPreference(self.fast)
         except ValueError as error:
             supported = ", ".join(member.value for member in FastPreference)
             raise _UnsupportedPortablePlanningSetting(
                 f"Unsupported Fast preference {self.fast!r}; "
                 f"expected one of {supported}."
             ) from error
-        for field_name, value in (
-            ("timeout", self.timeout_seconds),
-            ("checkpoint deadline", self.checkpoint_seconds),
-        ):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                raise ValueError(
-                    f"Portable planning {field_name} must be a positive number."
-                )
+        StepExecutionSettings(
+            backend=backend,
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            fast=fast,
+        )
+        ExecutionBudget(self.timeout_seconds, self.checkpoint_seconds)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

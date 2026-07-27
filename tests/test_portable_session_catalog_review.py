@@ -33,6 +33,67 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
+    def test_planning_settings_reject_timeout_above_runtime_maximum_before_write(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "timeout cannot exceed 3600 seconds",
+        ):
+            PortablePlanningSettings(
+                backend="CODEX_CLI",
+                model="gpt-5",
+                reasoning_effort="high",
+                fast="OFF",
+                timeout_seconds=3601,
+                checkpoint_seconds=30,
+            )
+
+    def test_planning_settings_reject_backend_fast_mismatch_before_write(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Fast cannot be enabled for the Claude Code Backend",
+        ):
+            PortablePlanningSettings(
+                backend="CLAUDE_CODE",
+                model="claude-sonnet-5",
+                reasoning_effort="high",
+                fast="ON",
+                timeout_seconds=60,
+                checkpoint_seconds=30,
+            )
+
+    def test_planning_settings_enforce_remaining_runtime_invariants_before_write(
+        self,
+    ) -> None:
+        valid_settings = {
+            "backend": "CODEX_CLI",
+            "model": "gpt-5",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+            "timeout_seconds": 60,
+            "checkpoint_seconds": 30,
+        }
+        for field_name, invalid_value, expected_error in (
+            (
+                "checkpoint_seconds",
+                61,
+                "checkpoint deadline must fit inside the timeout",
+            ),
+            ("model", " gpt-5", "model must be a non-empty single-line value"),
+            (
+                "reasoning_effort",
+                "high\t",
+                "reasoning effort must be a non-empty single-line value",
+            ),
+        ):
+            with self.subTest(field_name=field_name):
+                settings = {**valid_settings, field_name: invalid_value}
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    PortablePlanningSettings(**settings)
+
     def test_catalog_open_rejects_negative_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "catalog.sqlite3"
@@ -174,6 +235,65 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                         field_name,
                         invalid_number,
                     )
+
+    def test_catalog_open_translates_runtime_invalid_planning_settings(
+        self,
+    ) -> None:
+        valid_settings = {
+            "backend": "CODEX_CLI",
+            "model": "gpt-5",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+            "timeout_seconds": 60,
+            "checkpoint_seconds": 30,
+        }
+        for overrides in (
+            {"timeout_seconds": 3601},
+            {"checkpoint_seconds": 61},
+            {
+                "backend": "CLAUDE_CODE",
+                "model": "claude-sonnet-5",
+                "fast": "ON",
+            },
+            {"model": " gpt-5"},
+            {"reasoning_effort": "high\t"},
+        ):
+            with self.subTest(overrides=overrides):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    database = root / "catalog.sqlite3"
+                    catalog = PortableSessionCatalog(database)
+                    catalog.create_session(
+                        PortableSessionLaunch(
+                            session_id="runtime-invalid-settings",
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        )
+                    )
+                    persisted_settings = {**valid_settings, **overrides}
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            """
+                            UPDATE sessions
+                            SET planning_settings_json = ?
+                            """,
+                            (
+                                json.dumps(
+                                    persisted_settings,
+                                    separators=(",", ":"),
+                                ),
+                            ),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        PortableSessionCatalogError,
+                        "planning settings are corrupt",
+                    ):
+                        PortableSessionCatalog(database)
 
     def _assert_non_finite_planning_number_rejected(
         self,
