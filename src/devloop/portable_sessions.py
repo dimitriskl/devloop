@@ -152,6 +152,11 @@ class PortableResumeCandidateRecord(Protocol):
     prd_path: Path
 
 
+class PortableSavedProjectRecord(Protocol):
+    project_id: str
+    checkout: Path
+
+
 class PortableSessionCatalogController(Protocol):
     path: Path
 
@@ -164,6 +169,8 @@ class PortableSessionCatalogController(Protocol):
     def get_session(self, session_id: str) -> PortableCatalogSessionRecord: ...
 
     def list_sessions(self) -> tuple[PortableCatalogSessionRecord, ...]: ...
+
+    def list_saved_projects(self) -> tuple[PortableSavedProjectRecord, ...]: ...
 
     def update_session_status(
         self,
@@ -190,6 +197,9 @@ class PortableSessionSupervisor:
         worker_launcher: WorkerLauncher | None = None,
         catalog: PortableSessionCatalogController | None = None,
         resume_candidates: Iterable[PortableResumeCandidateRecord] = (),
+        resume_candidates_loader: (
+            Callable[[], Iterable[PortableResumeCandidateRecord]] | None
+        ) = None,
     ) -> None:
         self._catalog = catalog
         self._worker_launcher = worker_launcher or (
@@ -205,6 +215,10 @@ class PortableSessionSupervisor:
         self._threads: list[Thread] = []
         self._events: Queue[PortableSessionEvent] = Queue()
         self._condition = Condition(RLock())
+        self._resume_candidates_loader = resume_candidates_loader
+        self._saved_projects = (
+            tuple(catalog.list_saved_projects()) if catalog is not None else ()
+        )
         if catalog is not None:
             for record in catalog.list_sessions():
                 self._snapshots[record.session_id] = PortableSessionSnapshot(
@@ -219,10 +233,39 @@ class PortableSessionSupervisor:
             for snapshot in self._snapshots.values()
             if snapshot.prd_path is not None
         }
-        for candidate in resume_candidates:
+        candidates = tuple(resume_candidates)
+        self._unfinished_prd_paths = {
+            candidate.prd_path.resolve() for candidate in candidates
+        }
+        for candidate in candidates:
+            candidate_path = candidate.prd_path.resolve()
+            matching_session = next(
+                (
+                    snapshot
+                    for snapshot in self._snapshots.values()
+                    if snapshot.prd_path is not None
+                    and snapshot.prd_path.resolve() == candidate_path
+                ),
+                None,
+            )
+            if matching_session is not None:
+                if matching_session.status.terminal:
+                    restored = replace(
+                        matching_session,
+                        status=PortableSessionStatus.READY,
+                        result=None,
+                    )
+                    self._snapshots[restored.session_id] = restored
+                    if self._catalog is not None:
+                        self._catalog.update_session_status(
+                            restored.session_id,
+                            PortableSessionStatus.READY,
+                            activity_summary="Unfinished project workflow",
+                        )
+                continue
             if (
                 candidate.candidate_id in self._snapshots
-                or candidate.prd_path.resolve() in known_prd_paths
+                or candidate_path in known_prd_paths
             ):
                 continue
             launch = PortableSessionLaunch(
@@ -239,7 +282,7 @@ class PortableSessionSupervisor:
             )
             self._launches[candidate.candidate_id] = launch
             self._candidate_launches[candidate.candidate_id] = launch
-            known_prd_paths.add(candidate.prd_path.resolve())
+            known_prd_paths.add(candidate_path)
 
     def start_session(
         self,
@@ -259,8 +302,6 @@ class PortableSessionSupervisor:
                     f"Portable session already exists: {launch.session_id}"
                 )
             normalized_launch = replace(launch, checkout=checkout)
-            if self._catalog is not None:
-                self._catalog.create_session(normalized_launch)
             return self._launch_session(
                 normalized_launch,
                 SupervisorMessageKind.START,
@@ -285,14 +326,18 @@ class PortableSessionSupervisor:
                     {},
                 )
             payload: dict[str, object] = {}
+            command_kind = SupervisorMessageKind.RESUME
             if self._catalog is not None:
                 record = self._catalog.get_session(session_id)
+                payload["restore_catalog_session"] = True
                 payload["planning_thread_id"] = record.planning_thread_id
                 if record.planning_settings is not None:
                     payload["planning_settings"] = record.planning_settings.to_dict()
+                if record.planning_thread_id is None:
+                    command_kind = SupervisorMessageKind.START
             return self._launch_session(
                 launch,
-                SupervisorMessageKind.RESUME,
+                command_kind,
                 payload,
             )
 
@@ -326,10 +371,15 @@ class PortableSessionSupervisor:
             self._launches[launch.session_id] = launch
             self._running[launch.session_id] = _RunningSession(process)
             if self._catalog is not None:
-                self._catalog.update_session_status(
-                    launch.session_id,
-                    PortableSessionStatus.RUNNING,
-                )
+                try:
+                    self._catalog.update_session_status(
+                        launch.session_id,
+                        PortableSessionStatus.RUNNING,
+                    )
+                except KeyError:
+                    # Fresh sessions become durable at the worker's selected
+                    # checkout boundary, not at the supervisor's launch cwd.
+                    pass
             self._publish(snapshot)
             self._write_frame(
                 launch.session_id,
@@ -416,6 +466,9 @@ class PortableSessionSupervisor:
     def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
         with self._condition:
             return tuple(self._snapshots.values())
+
+    def list_saved_projects(self) -> tuple[PortableSavedProjectRecord, ...]:
+        return self._saved_projects
 
     def try_next_event(self) -> PortableSessionEvent | None:
         try:
@@ -505,7 +558,10 @@ class PortableSessionSupervisor:
                 )
                 running.next_worker_sequence += 1
                 self._apply_worker_frame(session_id, frame)
-                if self.snapshot(session_id).status.terminal:
+                if frame.kind in {
+                    WorkerMessageKind.COMPLETION.value,
+                    WorkerMessageKind.FAILURE.value,
+                }:
                     return
             if not self.snapshot(session_id).status.terminal:
                 self._fail_session(session_id, "Worker exited without a terminal result.")
@@ -630,13 +686,21 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker completion exit_code must be an integer."
                     )
+                completion_status = (
+                    PortableSessionStatus.COMPLETED
+                    if exit_code == 0
+                    else PortableSessionStatus.FAILED
+                )
+                if (
+                    exit_code == 0
+                    and self._launches[session_id].operation
+                    is PortableWorkflowOperation.PLANNING
+                    and self._planning_session_is_unfinished(session_id)
+                ):
+                    completion_status = PortableSessionStatus.READY
                 updated = replace(
                     snapshot,
-                    status=(
-                        PortableSessionStatus.COMPLETED
-                        if exit_code == 0
-                        else PortableSessionStatus.FAILED
-                    ),
+                    status=completion_status,
                     result=exit_code,
                 )
             elif kind is WorkerMessageKind.FAILURE:
@@ -653,6 +717,23 @@ class PortableSessionSupervisor:
             self._persist_snapshot(updated)
             self._publish(updated)
             self._condition.notify_all()
+
+    def _planning_session_is_unfinished(self, session_id: str) -> bool:
+        if self._catalog is None:
+            return False
+        try:
+            record = self._catalog.get_session(session_id)
+        except KeyError:
+            return True
+        if record.prd_path is None:
+            return True
+        prd_path = record.prd_path.resolve()
+        if self._resume_candidates_loader is not None:
+            candidates = tuple(self._resume_candidates_loader())
+            self._unfinished_prd_paths = {
+                candidate.prd_path.resolve() for candidate in candidates
+            }
+        return prd_path in self._unfinished_prd_paths
 
     def _fail_session(self, session_id: str, message: str) -> None:
         with self._condition:
@@ -686,7 +767,7 @@ class PortableSessionSupervisor:
                 snapshot.status,
                 activity_summary=summary,
             )
-        except RuntimeError as error:
+        except (KeyError, RuntimeError) as error:
             current = self._snapshots[snapshot.session_id]
             self._snapshots[snapshot.session_id] = replace(
                 current,

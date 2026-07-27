@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
 
 from textual import events, on
 from textual.app import App, ComposeResult
@@ -55,6 +57,7 @@ RUN_CONTEXT_TITLE = "Run context"
 SESSIONS_TAB_ID = "__sessions__"
 NEW_SESSION_ID = "__new_session__"
 RESUME_SESSION_ID = "__resume_session__"
+SAVED_PROJECT_ID_PREFIX = "__saved_project__:"
 
 
 class PortableDetail(Static):
@@ -365,6 +368,7 @@ class PortableApplicationShell(App[None]):
         self._session_launch = session_launch
         self._active_session_id: str | None = None
         self._session_snapshots: dict[str, PortableSessionSnapshot] = {}
+        self._saved_projects: dict[str, Path] = {}
         self._session_input_values: set[str] = set()
         self._active_request_id: int | None = None
         self._cancel_key: str | None = None
@@ -440,6 +444,16 @@ class PortableApplicationShell(App[None]):
                 self._session_snapshots.update(
                     (snapshot.session_id, snapshot)
                     for snapshot in list_sessions()
+                )
+            list_saved_projects = getattr(
+                self._session_supervisor,
+                "list_saved_projects",
+                None,
+            )
+            if callable(list_saved_projects):
+                self._saved_projects.update(
+                    (project.project_id, project.checkout)
+                    for project in list_saved_projects()
                 )
             self._show_sessions_tab()
             return
@@ -619,6 +633,14 @@ class PortableApplicationShell(App[None]):
             selected_id = menu.get_option_at_index(menu.highlighted).id
         menu.clear_options()
         menu.add_option(Option("+ New Session", id=NEW_SESSION_ID))
+        for project_id, checkout in self._saved_projects.items():
+            checkout_name = checkout.name or str(checkout)
+            menu.add_option(
+                Option(
+                    f"{checkout_name} [SAVED PROJECT]",
+                    id=f"{SAVED_PROJECT_ID_PREFIX}{project_id}",
+                )
+            )
         for snapshot in self._session_snapshots.values():
             checkout_name = snapshot.checkout.name or str(snapshot.checkout)
             workflow_name = (
@@ -641,6 +663,19 @@ class PortableApplicationShell(App[None]):
             0,
         )
         return menu
+
+    def _start_saved_project(self, project_id: str) -> None:
+        assert self._session_launch is not None
+        checkout = self._saved_projects[project_id]
+        self._session_launch = replace(
+            self._session_launch,
+            checkout=checkout,
+            arguments=_arguments_for_checkout(
+                self._session_launch.arguments,
+                checkout,
+            ),
+        )
+        self._start_selected_session()
 
     def _start_selected_session(self) -> None:
         assert self._session_supervisor is not None
@@ -1002,6 +1037,13 @@ class PortableApplicationShell(App[None]):
         if self._session_supervisor is not None:
             if option_id == NEW_SESSION_ID:
                 self._start_selected_session()
+            elif (
+                isinstance(option_id, str)
+                and option_id.startswith(SAVED_PROJECT_ID_PREFIX)
+            ):
+                self._start_saved_project(
+                    option_id[len(SAVED_PROJECT_ID_PREFIX) :]
+                )
             elif option_id == RESUME_SESSION_ID:
                 self._resume_active_session()
             elif option_id == SESSIONS_TAB_ID:
@@ -1237,11 +1279,13 @@ def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
 
     bridge = PortableRuntimeBridge()
     catalog = PortableSessionCatalog()
+    def load_resume_candidates():
+        return catalog.discover_resume_candidates(find_resume_candidates)
+
     supervisor = PortableSessionSupervisor(
         catalog=catalog,
-        resume_candidates=catalog.discover_resume_candidates(
-            find_resume_candidates
-        ),
+        resume_candidates=load_resume_candidates(),
+        resume_candidates_loader=load_resume_candidates,
     )
     app = PortableApplicationShell(
         bridge,
@@ -1250,3 +1294,22 @@ def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
     )
     app.run()
     return app.operation_result if app.operation_result is not None else 0
+
+
+def _arguments_for_checkout(
+    arguments: tuple[str, ...],
+    checkout: Path,
+) -> tuple[str, ...]:
+    updated: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--repo":
+            index += 2
+            continue
+        if argument.startswith("--repo="):
+            index += 1
+            continue
+        updated.append(argument)
+        index += 1
+    return ("--repo", str(checkout), *updated)

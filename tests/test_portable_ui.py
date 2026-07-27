@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from textual.containers import Horizontal
@@ -32,6 +33,72 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saved_project_without_unfinished_prd_can_start_a_session(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return (
+                    SimpleNamespace(
+                        project_id="project-a",
+                        checkout=Path("saved-project").resolve(),
+                    ),
+                )
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="session-saved-project",
+                checkout=Path("other-project").resolve(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--goal", "new change"),
+            ),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            self.assertEqual(menu.option_count, 2)
+            self.assertIn(
+                "[SAVED PROJECT]",
+                str(menu.get_option_at_index(1).prompt),
+            )
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertEqual(len(supervisor.intents), 1)
+        launch = supervisor.intents[0].launch
+        assert launch is not None
+        self.assertEqual(launch.checkout, Path("saved-project").resolve())
+        self.assertEqual(launch.arguments[:2], ("--repo", str(launch.checkout)))
+
     async def test_restored_session_requires_explicit_resume_from_sessions_tab(
         self,
     ) -> None:

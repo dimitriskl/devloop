@@ -28,6 +28,7 @@ from .portable_execution_backend import (
     BackendModelCatalogAccess,
     ExecutionBackendId,
 )
+from .portable_sessions import PortableSessionLaunch, PortableWorkflowOperation
 from .portable_workflow import (
     ANALYSIS_STEP_ID,
     ExecutionBudget,
@@ -110,10 +111,46 @@ def _active_catalog_session():
     from .portable_session_catalog import PortableSessionCatalog
 
     catalog = PortableSessionCatalog(Path(catalog_path))
+    try:
+        record = catalog.get_session(session_id)
+    except KeyError:
+        record = None
+    restore_requested = (
+        os.environ.get("DEVLOOP_PORTABLE_SESSION_RESTORE") == "1"
+    )
+    if restore_requested and record is None:
+        raise RuntimeError(
+            f"Portable Session Catalog has no resumable session {session_id!r}."
+        )
     return (
         catalog,
-        catalog.get_session(session_id),
-        os.environ.get("DEVLOOP_PORTABLE_SESSION_RESUME") == "1",
+        record,
+        restore_requested,
+    )
+
+
+def _catalog_session_launch(
+    args: argparse.Namespace,
+    checkout: Path,
+) -> PortableSessionLaunch:
+    session_id = os.environ.get("DEVLOOP_PORTABLE_SESSION_ID")
+    if not session_id:
+        raise RuntimeError("Portable session identity is unavailable.")
+    arguments = [
+        "--codex",
+        args.codex,
+        "--sandbox",
+        args.sandbox,
+        "--approval-policy",
+        args.approval_policy,
+    ]
+    if args.native_editor:
+        arguments.append("--native-editor")
+    return PortableSessionLaunch(
+        session_id=session_id,
+        checkout=checkout,
+        operation=PortableWorkflowOperation.PLANNING,
+        arguments=tuple(arguments),
     )
 
 
@@ -175,10 +212,6 @@ def main(argv: list[str] | None = None) -> int:
         if ui_mode is PortableUiMode.APPLICATION:
             if active_portable_runtime() is None:
                 try:
-                    from .portable_sessions import (
-                        PortableSessionLaunch,
-                        PortableWorkflowOperation,
-                    )
                     from .portable_ui.app import run_portable_sessions_application
                 except ModuleNotFoundError as error:
                     if error.name != "textual":
@@ -215,6 +248,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     bundle = BundleContext.from_file(Path(__file__).resolve())
     state_path = plan_state_path()
     selection = catalog_module.load_selection(state_path)
+    catalog_session = _active_catalog_session()
 
     if args.prd:
         try:
@@ -224,10 +258,17 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error(str(exc))
 
         branch = current_branch(repo_root) or "unknown"
-        catalog_session = _active_catalog_session()
         if catalog_session is not None:
             session_catalog, session_record, _resume_catalog_session = catalog_session
-            session_catalog.bind_session_checkout(session_record.session_id, repo_root)
+            if session_record is None:
+                session_record = session_catalog.bind_or_create_session(
+                    _catalog_session_launch(args, repo_root)
+                )
+            else:
+                session_catalog.bind_session_checkout(
+                    session_record.session_id,
+                    repo_root,
+                )
             session_catalog.publish_workflow(
                 session_record.session_id,
                 prd_path=artifacts.prd_path,
@@ -256,13 +297,26 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             plain=args.plain,
         )
 
-    repo_root = choose_target_repo(args.repo)
+    resume_catalog_session = (
+        catalog_session is not None and catalog_session[2]
+    )
+    session_catalog = catalog_session[0] if catalog_session is not None else None
+    session_record = catalog_session[1] if catalog_session is not None else None
+    if resume_catalog_session:
+        assert session_record is not None
+        repo_root = session_record.checkout
+    else:
+        repo_root = choose_target_repo(args.repo)
+        if session_catalog is not None:
+            session_record = session_catalog.bind_or_create_session(
+                _catalog_session_launch(args, repo_root)
+            )
     publish_planning_run_context(
         project_root=repo_root,
         implementation_branch=current_branch(repo_root) or "unknown",
         implementation_worktree=repo_root,
     )
-    if not args.goal:
+    if not args.goal and not resume_catalog_session:
         startup_result = choose_startup_artifacts(
             repo_root,
             bundle_root=bundle.root,
@@ -290,13 +344,8 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
                 plain=args.plain,
             )
     project_root = repo_root
-    repo_root = apply_branch_strategy(repo_root)
-    catalog_session = _active_catalog_session()
-    session_catalog = catalog_session[0] if catalog_session is not None else None
-    session_record = catalog_session[1] if catalog_session is not None else None
-    resume_catalog_session = (
-        catalog_session[2] if catalog_session is not None else False
-    )
+    if not resume_catalog_session:
+        repo_root = apply_branch_strategy(repo_root)
     if catalog_session is not None:
         assert session_catalog is not None
         assert session_record is not None
@@ -326,24 +375,21 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if resume_catalog_session:
         assert session_record is not None
         saved_settings = session_record.planning_settings
-        if session_record.planning_thread_id is None:
-            raise RuntimeError(
-                "The saved pre-PRD session has no planning thread identity."
-            )
-        if saved_settings is None:
+        if session_record.planning_thread_id is not None and saved_settings is None:
             raise RuntimeError(
                 "The saved pre-PRD session has no planning settings snapshot."
             )
-        resume_settings_override = StepExecutionSettings(
-            backend=ExecutionBackendId(saved_settings.backend),
-            model=saved_settings.model,
-            reasoning_effort=saved_settings.reasoning_effort,
-            fast=FastPreference(saved_settings.fast),
-        )
-        resume_budget_override = ExecutionBudget(
-            timeout_seconds=saved_settings.timeout_seconds,
-            checkpoint_seconds=saved_settings.checkpoint_seconds,
-        )
+        if saved_settings is not None:
+            resume_settings_override = StepExecutionSettings(
+                backend=ExecutionBackendId(saved_settings.backend),
+                model=saved_settings.model,
+                reasoning_effort=saved_settings.reasoning_effort,
+                fast=FastPreference(saved_settings.fast),
+            )
+            resume_budget_override = ExecutionBudget(
+                timeout_seconds=saved_settings.timeout_seconds,
+                checkpoint_seconds=saved_settings.checkpoint_seconds,
+            )
         resume_thread_id = session_record.planning_thread_id
     workflow_snapshot = preflight_analysis_workflow(
         bundle_root=bundle.root,
@@ -380,7 +426,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if catalog_session is not None:
         assert session_catalog is not None
         assert session_record is not None
-        if not resume_catalog_session:
+        if session_record.planning_settings is None:
             from .portable_session_catalog import PortablePlanningSettings
 
             session_catalog.save_planning_settings(

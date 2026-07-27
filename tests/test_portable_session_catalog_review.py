@@ -1,0 +1,610 @@
+from __future__ import annotations
+
+import sqlite3
+import tempfile
+import threading
+import time
+import unittest
+from contextlib import closing
+from pathlib import Path
+from queue import Queue
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from devloop import catalog as planner_catalog
+from devloop import interactive_runner
+from devloop.portable_protocol import (
+    PORTABLE_PROTOCOL_VERSION,
+    PortableProtocolFrame,
+    WorkerMessageKind,
+)
+from devloop.portable_session_catalog import (
+    PortableSessionCatalog,
+    PortableSessionCatalogError,
+)
+from devloop.portable_sessions import (
+    PortableSessionLaunch,
+    PortableSessionStatus,
+    PortableSessionSupervisor,
+    PortableWorkflowOperation,
+)
+
+
+class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
+    def test_catalog_writes_do_not_require_sqlite_unixepoch_subsec(self) -> None:
+        real_connect = sqlite3.connect
+
+        def connect_without_unixepoch(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+
+            def unsupported_unixepoch(*_arguments):
+                raise sqlite3.OperationalError("no such function: unixepoch")
+
+            connection.create_function("unixepoch", -1, unsupported_unixepoch)
+            return connection
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            with patch(
+                "devloop.portable_session_catalog.sqlite3.connect",
+                side_effect=connect_without_unixepoch,
+            ):
+                catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+                session = catalog.create_session(
+                    PortableSessionLaunch(
+                        session_id="timestamp-compatible",
+                        checkout=checkout,
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    )
+                )
+
+        self.assertGreater(session.created_at, 0)
+        self.assertGreaterEqual(session.updated_at, session.created_at)
+
+    def test_catalog_persists_only_allowlisted_launch_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="bounded-launch",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(
+                        "--repo",
+                        str(checkout),
+                        "--goal",
+                        "password=must-never-persist",
+                        "--codex",
+                        "C:/tools/codex.exe",
+                        "--sandbox",
+                        "read-only",
+                        "--approval-policy",
+                        "on-request",
+                        "--native-editor",
+                    ),
+                )
+            )
+            restored = PortableSessionCatalog(database).get_session("bounded-launch")
+            database_bytes = database.read_bytes()
+
+        self.assertNotIn(b"must-never-persist", database_bytes)
+        self.assertNotIn(b"--goal", database_bytes)
+        self.assertEqual(
+            restored.arguments,
+            (
+                "--repo",
+                str(checkout.resolve()),
+                "--codex",
+                "C:/tools/codex.exe",
+                "--sandbox",
+                "read-only",
+                "--approval-policy",
+                "on-request",
+                "--native-editor",
+            ),
+        )
+
+    def test_thread_identity_must_be_a_bounded_uuid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="thread-validation",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+
+            for invalid in (
+                "",
+                "not-a-thread",
+                "Bearer secret-value",
+                "a" * 500,
+            ):
+                with self.subTest(invalid=invalid[:20]):
+                    with self.assertRaisesRegex(ValueError, "UUID"):
+                        catalog.save_planning_thread("thread-validation", invalid)
+
+    def test_catalog_open_rejects_an_invalid_persisted_thread_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="corrupt-thread",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    "UPDATE sessions SET planning_thread_id = ?",
+                    ("x" * 36,),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "integrity check failed|invalid session record",
+            ):
+                PortableSessionCatalog(database)
+
+    def test_catalog_open_rejects_extra_columns_and_missing_foreign_keys(self) -> None:
+        for mutation in ("extra-column", "missing-foreign-key"):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    database = root / "catalog.sqlite3"
+                    catalog = PortableSessionCatalog(database)
+                    catalog.create_session(
+                        PortableSessionLaunch(
+                            session_id="schema-check",
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        )
+                    )
+                    with closing(sqlite3.connect(database)) as connection:
+                        if mutation == "extra-column":
+                            connection.execute(
+                                "ALTER TABLE sessions ADD COLUMN unexpected TEXT"
+                            )
+                        else:
+                            connection.executescript(
+                                """
+                                PRAGMA foreign_keys = OFF;
+                                ALTER TABLE sessions RENAME TO old_sessions;
+                                CREATE TABLE sessions (
+                                    session_id TEXT PRIMARY KEY,
+                                    project_id TEXT NOT NULL,
+                                    status TEXT NOT NULL,
+                                    operation TEXT NOT NULL,
+                                    arguments_json TEXT NOT NULL,
+                                    planning_thread_id TEXT,
+                                    planning_settings_json TEXT,
+                                    prd_path TEXT,
+                                    issues_index_path TEXT,
+                                    activity_summary TEXT NOT NULL DEFAULT '',
+                                    created_at REAL NOT NULL,
+                                    updated_at REAL NOT NULL
+                                );
+                                INSERT INTO sessions SELECT * FROM old_sessions;
+                                DROP TABLE old_sessions;
+                                """
+                            )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        PortableSessionCatalogError,
+                        "schema is incompatible",
+                    ):
+                        PortableSessionCatalog(database)
+
+    def test_catalog_open_rejects_oversized_persisted_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="bounded-record",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("PRAGMA ignore_check_constraints = ON")
+                connection.execute(
+                    "UPDATE sessions SET activity_summary = ?",
+                    ("x" * 501,),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "integrity check failed|invalid session record",
+            ):
+                PortableSessionCatalog(database)
+
+    def test_pre_first_thread_session_restarts_with_start_not_resume(self) -> None:
+        class FakeWorker:
+            def __init__(self) -> None:
+                self.stdin = _WritableLines()
+                self.stdout = _ReadableLines()
+                self.stderr = _ReadableLines()
+                self._returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self._returncode
+
+            def terminate(self) -> None:
+                self._returncode = 1
+                self.stdout.close()
+                self.stderr.close()
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                return self._returncode or 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="pre-thread",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--approval-policy", "on-request"),
+            )
+            catalog.create_session(launch)
+            worker = FakeWorker()
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: worker,
+                catalog=PortableSessionCatalog(catalog.path),
+            )
+
+            supervisor.resume_session(launch.session_id)
+            command = worker.stdin.lines[0]
+            worker.stdout.close()
+            worker.stderr.close()
+            supervisor.shutdown()
+
+        self.assertIn('"kind":"START"', command)
+        self.assertNotIn('"kind":"RESUME"', command)
+        self.assertIn('"--approval-policy","on-request"', command)
+
+    def test_selected_checkout_binding_creates_project_and_session_atomically(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "selected"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_selected_session
+                    BEFORE INSERT ON sessions
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced bind failure');
+                    END
+                    """
+                )
+                connection.commit()
+
+            with self.assertRaises(PortableSessionCatalogError):
+                catalog.bind_or_create_session(
+                    PortableSessionLaunch(
+                        session_id="atomic-bind",
+                        checkout=checkout,
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    )
+                )
+
+            reopened = PortableSessionCatalog(database)
+            self.assertEqual(reopened.list_saved_projects(), ())
+            self.assertEqual(reopened.list_sessions(), ())
+
+    def test_restored_session_selects_its_checkout_before_global_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout_a = root / "repo-a"
+            checkout_b = root / "repo-b"
+            checkout_a.mkdir()
+            checkout_b.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="restore-a",
+                    checkout=checkout_a,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--goal", "continue"])
+            contexts = []
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "DEVLOOP_PORTABLE_SESSION_CATALOG": str(catalog.path),
+                        "DEVLOOP_PORTABLE_SESSION_ID": "restore-a",
+                        "DEVLOOP_PORTABLE_SESSION_RESTORE": "1",
+                    },
+                    clear=False,
+                ),
+                patch.object(
+                    interactive_runner.BundleContext,
+                    "from_file",
+                    return_value=SimpleNamespace(root=root),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "plan_state_path",
+                    return_value=root / "planner.json",
+                ),
+                patch.object(
+                    interactive_runner.catalog_module,
+                    "load_selection",
+                    return_value=planner_catalog.Selection.defaults(),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "choose_target_repo",
+                    side_effect=AssertionError(
+                        f"must not prompt for global default {checkout_b}"
+                    ),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "apply_branch_strategy",
+                    side_effect=AssertionError("must not prompt for a branch"),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "publish_planning_run_context",
+                    side_effect=lambda **value: contexts.append(value),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "current_branch",
+                    return_value="feature-a",
+                ),
+                patch.object(
+                    interactive_runner,
+                    "snapshot_artifacts",
+                    return_value={},
+                ),
+                patch.object(
+                    interactive_runner,
+                    "build_portable_component_catalog",
+                    return_value=object(),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "BackendModelCatalogAccess",
+                    return_value=object(),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "preflight_analysis_workflow",
+                    return_value=None,
+                ),
+                patch.object(
+                    interactive_runner,
+                    "load_last_target_repo",
+                    return_value=checkout_b,
+                ),
+            ):
+                result = interactive_runner._run_planning(parser, args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(contexts[0]["project_root"], checkout_a.resolve())
+        self.assertEqual(contexts[0]["implementation_worktree"], checkout_a.resolve())
+
+    def test_authoritative_unfinished_candidate_reopens_completed_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            prd = checkout / "change.md"
+            issues = checkout / "README.md"
+            prd.write_text("# Change\n", encoding="utf-8")
+            issues.write_text("# Issues\n", encoding="utf-8")
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="unfinished-summary",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            catalog.publish_workflow(
+                "unfinished-summary",
+                prd_path=prd,
+                issues_index_path=issues,
+                activity_summary="handoff quit",
+            )
+            catalog.update_session_status(
+                "unfinished-summary",
+                PortableSessionStatus.COMPLETED,
+            )
+            candidate = SimpleNamespace(
+                candidate_id="candidate-id",
+                checkout=checkout.resolve(),
+                prd_path=prd.resolve(),
+            )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: self.fail("must remain passive"),
+                catalog=PortableSessionCatalog(catalog.path),
+                resume_candidates=(candidate,),
+            )
+
+            self.assertEqual(
+                supervisor.list_sessions()[0].status,
+                PortableSessionStatus.READY,
+            )
+            self.assertEqual(
+                catalog.get_session("unfinished-summary").status,
+                PortableSessionStatus.READY,
+            )
+
+    def test_zero_exit_before_prd_keeps_planning_session_resumable(self) -> None:
+        class FakeWorker:
+            def __init__(self) -> None:
+                self.stdin = _WritableLines()
+                self.stdout = _QueueReadableLines()
+                self.stderr = _QueueReadableLines()
+                self._returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self._returncode
+
+            def terminate(self) -> None:
+                self._returncode = 1
+                self.stdout.close()
+                self.stderr.close()
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                return self._returncode or 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="planning-abort",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session(launch)
+            worker = FakeWorker()
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: worker,
+                catalog=catalog,
+            )
+            supervisor.resume_session(launch.session_id)
+            worker.stdout.put(
+                PortableProtocolFrame(
+                    version=PORTABLE_PROTOCOL_VERSION,
+                    session_id=launch.session_id,
+                    sequence=1,
+                    kind=WorkerMessageKind.HELLO.value,
+                    payload={},
+                ).to_json_line()
+                + "\n"
+            )
+            worker.stdout.put(
+                PortableProtocolFrame(
+                    version=PORTABLE_PROTOCOL_VERSION,
+                    session_id=launch.session_id,
+                    sequence=2,
+                    kind=WorkerMessageKind.COMPLETION.value,
+                    payload={"exit_code": 0},
+                ).to_json_line()
+                + "\n"
+            )
+            deadline = time.monotonic() + 1
+            while (
+                supervisor.snapshot(launch.session_id).status
+                is PortableSessionStatus.RUNNING
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            snapshot = supervisor.snapshot(launch.session_id)
+            worker.stdout.close()
+            worker.stderr.close()
+            supervisor.shutdown()
+            catalog_status = catalog.get_session(launch.session_id).status
+
+        self.assertEqual(snapshot.status, PortableSessionStatus.READY)
+        self.assertEqual(catalog_status, PortableSessionStatus.READY)
+
+
+class _WritableLines:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def write(self, value: str) -> int:
+        self.lines.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _ReadableLines:
+    def __init__(self) -> None:
+        self._closed = threading.Event()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        self._closed.wait(1)
+        raise StopIteration
+
+    def close(self) -> None:
+        self._closed.set()
+
+
+class _QueueReadableLines:
+    _END = object()
+
+    def __init__(self) -> None:
+        self._lines: Queue[object] = Queue()
+
+    def put(self, value: str) -> None:
+        self._lines.put(value)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        value = self._lines.get(timeout=1)
+        if value is self._END:
+            raise StopIteration
+        assert isinstance(value, str)
+        return value
+
+    def close(self) -> None:
+        self._lines.put(self._END)
+
+
+if __name__ == "__main__":
+    unittest.main()

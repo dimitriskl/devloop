@@ -170,6 +170,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     sys.stdout = _ProtocolOutputStream(bridge, is_error=False)
     try:
         bridge.send_hello()
+        if start.payload.get("restore_catalog_session") is True:
+            os.environ["DEVLOOP_PORTABLE_SESSION_RESTORE"] = "1"
         if start.kind == SupervisorMessageKind.RESUME.value:
             os.environ["DEVLOOP_PORTABLE_SESSION_RESUME"] = "1"
         operation = PortableWorkflowOperation(start.payload.get("operation"))
