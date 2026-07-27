@@ -998,6 +998,83 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(checkout_b), detail)
         self.assertNotIn(str(checkout_a), detail)
 
+    async def test_switching_to_session_without_context_clears_left_pane_and_f5(
+        self,
+    ) -> None:
+        checkout_a = Path("context-alpha").resolve()
+        checkout_b = Path("context-beta").resolve()
+        context_a = PortableRunContext(
+            project_root=str(checkout_a.parent),
+            implementation_branch="feature/context-alpha",
+            implementation_worktree=str(checkout_a),
+            prd_path=str(checkout_a / "prd" / "alpha.md"),
+        )
+        session_a = PortableSessionSnapshot(
+            session_id="session-context-alpha",
+            checkout=checkout_a,
+            status=PortableSessionStatus.RUNNING,
+            context=context_a,
+        )
+        session_b = PortableSessionSnapshot(
+            session_id="session-context-beta",
+            checkout=checkout_b,
+            status=PortableSessionStatus.RUNNING,
+            context=None,
+        )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (session_a, session_b)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                raise AssertionError(f"Unexpected intent: {intent}")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            sessions_menu = app.query_one("#portable-navigation", OptionList)
+            sessions_menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+            context_view = app.query_one("#portable-run-context", Static)
+            self.assertTrue(context_view.display)
+            self.assertIn(context_a.project_root, str(context_view.render()))
+
+            active_menu = app.query_one("#portable-navigation", OptionList)
+            active_menu.highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause()
+            sessions_menu = app.query_one("#portable-navigation", OptionList)
+            sessions_menu.highlighted = 2
+            await pilot.press("enter")
+            await pilot.pause()
+
+            self.assertFalse(context_view.display)
+            self.assertNotIn(context_a.project_root, str(context_view.render()))
+            await pilot.press("f5")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, PortableTextOverlay)
+
     async def test_background_approval_marks_attention_without_receiving_active_input(
         self,
     ) -> None:

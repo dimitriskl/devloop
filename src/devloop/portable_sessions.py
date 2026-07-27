@@ -590,8 +590,16 @@ class PortableSessionSupervisor:
                 SupervisorMessageKind.USER_INPUT,
                 {"value": value},
             )
+            try:
+                self._write_frame(session_id, frame)
+            except (OSError, ValueError) as error:
+                message = (
+                    "Portable session worker input channel closed before input "
+                    f"could be sent: {session_id}."
+                )
+                self._fail_session(session_id, message, running)
+                raise ValueError(message) from error
             running.next_supervisor_sequence += 1
-            self._write_frame(session_id, frame)
             updated = replace(
                 snapshot,
                 status=PortableSessionStatus.RUNNING,

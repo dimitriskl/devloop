@@ -656,6 +656,7 @@ class PortableApplicationShell(App[None]):
             ]
             self._unread_session_ids.discard(hide_session_id)
         self._active_session_id = None
+        self._update_run_context(None)
         self._session_input_values.clear()
         self._new_session_input = None
         self._new_session_flow_active = False
@@ -995,8 +996,7 @@ class PortableApplicationShell(App[None]):
             self._open_session_ids.append(snapshot.session_id)
         self._unread_session_ids.discard(snapshot.session_id)
         context = snapshot.context
-        if context is not None:
-            self._update_run_context(context)
+        self._update_run_context(context)
         checkout_name = sanitize_terminal_text(
             snapshot.checkout.name or str(snapshot.checkout),
             preserve_newlines=False,
@@ -1251,7 +1251,15 @@ class PortableApplicationShell(App[None]):
                 del self._captured_output[:-500]
                 self._publish_activity(rendered)
 
-    def _update_run_context(self, context: PortableRunContext) -> None:
+    def _update_run_context(self, context: PortableRunContext | None) -> None:
+        context_title = self.query_one("#portable-run-context-title", Static)
+        context_view = self.query_one("#portable-run-context", Static)
+        if context is None:
+            self._run_context = None
+            context_title.display = False
+            context_view.display = False
+            context_view.update("")
+            return
         self._run_context = PortableRunContext(
             project_root=sanitize_terminal_text(
                 context.project_root,
@@ -1270,8 +1278,6 @@ class PortableApplicationShell(App[None]):
                 preserve_newlines=False,
             ),
         )
-        context_title = self.query_one("#portable-run-context-title", Static)
-        context_view = self.query_one("#portable-run-context", Static)
         context_title.display = True
         context_view.display = True
         context_view.update(self._render_compact_run_context())

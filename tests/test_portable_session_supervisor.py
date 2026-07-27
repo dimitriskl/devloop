@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -1103,6 +1104,109 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             supervisor.provide_input(session_id, "stale input")
         with self.assertRaisesRegex(ValueError, "Unknown portable session"):
             supervisor.provide_input("unknown-session", "input")
+
+    def test_provide_input_reconciles_a_broken_worker_pipe_atomically(self) -> None:
+        class BlockingOutput:
+            def __init__(self) -> None:
+                self._lines: queue.Queue[str | None] = queue.Queue()
+
+            def __iter__(self) -> BlockingOutput:
+                return self
+
+            def __next__(self) -> str:
+                line = self._lines.get(timeout=5)
+                if line is None:
+                    raise StopIteration
+                return line
+
+            def send(self, line: str) -> None:
+                self._lines.put(line)
+
+            def close(self) -> None:
+                self._lines.put(None)
+
+        class BrokenPipeInput:
+            def __init__(self, process: FakeWorkerProcess) -> None:
+                self._process = process
+                self.lines: list[str] = []
+                self.flush_count = 0
+
+            def write(self, value: str) -> int:
+                self.lines.append(value)
+                return len(value)
+
+            def flush(self) -> None:
+                self.flush_count += 1
+                if self.flush_count == 2:
+                    self._process.return_code = 17
+                    raise BrokenPipeError("worker closed stdin")
+
+            def close(self) -> None:
+                return None
+
+        class FakeWorkerProcess:
+            def __init__(self) -> None:
+                self.return_code: int | None = None
+                self.stdout = BlockingOutput()
+                self.stderr = BlockingOutput()
+                self.stdin = BrokenPipeInput(self)
+
+            def poll(self) -> int | None:
+                return self.return_code
+
+            def terminate(self) -> None:
+                self.return_code = -15
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.return_code is None:
+                    raise subprocess.TimeoutExpired("fake-worker", timeout)
+                return self.return_code
+
+        process = FakeWorkerProcess()
+        supervisor = PortableSessionSupervisor(worker_launcher=lambda _launch: process)
+        launch = PortableSessionLaunch(
+            session_id="session-broken-input-pipe",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        supervisor.start_session(launch)
+        process.stdout.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": launch.session_id,
+                    "sequence": 1,
+                    "kind": "INPUT_REQUEST",
+                    "payload": {
+                        "request_kind": "TEXT",
+                        "prompt": "Value before worker exit",
+                    },
+                }
+            )
+            + "\n"
+        )
+        self._wait_for_status(
+            supervisor,
+            launch.session_id,
+            PortableSessionStatus.WAITING_FOR_INPUT,
+        )
+        running = supervisor._running[launch.session_id]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "worker input channel closed before input could be sent",
+        ):
+            supervisor.provide_input(launch.session_id, "too late")
+
+        failed = supervisor.snapshot(launch.session_id)
+        self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+        self.assertIsNone(failed.input_request)
+        self.assertEqual(running.next_supervisor_sequence, 2)
+        self.assertNotIn(launch.session_id, supervisor._running)
+        process.stdout.close()
+        process.stderr.close()
+        supervisor.shutdown()
 
     def test_two_workers_route_interleaved_input_and_isolate_one_failure(self) -> None:
         worker_source = textwrap.dedent(
