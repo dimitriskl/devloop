@@ -38,10 +38,12 @@ from devloop.portable_workflow import (
     FINAL_REVIEW_STEP_ID,
     IMPLEMENTATION_RESULT_CONTRACT,
     QA_COMPONENT_ID,
+    REVIEW_DEFAULT_GUIDANCE,
     QA_STEP_ID,
     REVIEW_RESULT_CONTRACT,
     REVIEWER_COMPONENT_ID,
     SECURITY_REVIEW_STEP_ID,
+    SECURITY_REVIEW_DEFAULT_GUIDANCE,
     FastPreference,
     IssueStatus,
     PortableRoleAdapter,
@@ -309,6 +311,10 @@ class WorkflowDraftCapabilityTests(unittest.TestCase):
             draft.workflow.step(added_step_id).capability_profile,
             catalog.resolve(REVIEWER_COMPONENT_ID).default_capability_profile(),
         )
+        self.assertEqual(
+            draft.workflow.step(added_step_id).guidance,
+            REVIEW_DEFAULT_GUIDANCE,
+        )
 
     def test_required_capability_is_enabled_locked_and_explains_the_contract(
         self,
@@ -367,7 +373,19 @@ class WorkflowDraftCapabilityTests(unittest.TestCase):
                 reset_step.execution_budget,
                 component.execution_budget_defaults,
             )
-            self.assertIsNone(reset_step.guidance)
+            self.assertEqual(reset_step.guidance, component.default_guidance)
+
+    def test_reset_typed_builtin_instance_uses_its_current_component_guidance(self) -> None:
+        catalog = default_portable_component_catalog()
+        draft = WorkflowDraft(default_portable_workflow(), catalog)
+        draft.change_type(QA_STEP_ID, REVIEWER_COMPONENT_ID)
+        draft.set_guidance(QA_STEP_ID, "Temporary QA review focus.")
+
+        draft.reset_step(QA_STEP_ID)
+
+        reset_step = draft.workflow.step(QA_STEP_ID)
+        self.assertEqual(reset_step.component_id, REVIEWER_COMPONENT_ID)
+        self.assertEqual(reset_step.guidance, REVIEW_DEFAULT_GUIDANCE)
 
     def test_copied_guidance_is_typed_needs_review_and_each_resolution_unblocks_apply(
         self,
@@ -759,7 +777,16 @@ class WorkflowEditorFlowTests(unittest.TestCase):
 
             result = run_workflow_editor(
                 path,
-                read_line=FakeEditor(["3", "duplicate", "apply"]).read_line,
+                read_line=FakeEditor(
+                    [
+                        "3",
+                        "duplicate",
+                        "apply",
+                        "guidance",
+                        "keep",
+                        "apply",
+                    ]
+                ).read_line,
                 write=output.append,
                 terminal_width=120,
             )
@@ -774,6 +801,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         primary_ids = [step.instance_id for step in stored.primary_path()]
         source_position = primary_ids.index(SECURITY_REVIEW_STEP_ID)
         self.assertIs(result, EditorResult.APPLIED)
+        assert copied.guidance is not None
+        self.assertIs(copied.guidance.review_state, GuidanceReviewState.READY)
         self.assertEqual(primary_ids[source_position + 1], copied.instance_id)
         self.assertIn(
             "Warning: Security Review 2 output 'review' has no consumer",
@@ -943,6 +972,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertEqual(changed.instance_id, QA_STEP_ID)
         self.assertEqual(changed.display_name, "QA")
         self.assertEqual(changed.component_id, REVIEWER_COMPONENT_ID)
+        self.assertEqual(changed.guidance, REVIEW_DEFAULT_GUIDANCE)
         self.assertEqual(stored.primary_path()[-1].instance_id, QA_STEP_ID)
         self.assertEqual(
             changed.input_bindings["implementation"].producer_step_id,
@@ -2012,6 +2042,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             catalog = default_portable_component_catalog()
             draft = WorkflowDraft(default_portable_workflow(), catalog)
             duplicate = draft.duplicate(SECURITY_REVIEW_STEP_ID)
+            draft.keep_guidance(duplicate.step_instance_id)
             WorkflowDefaultStore(configuration_path, catalog).replace(draft.workflow)
             workflow = WorkflowDefaultStore(configuration_path, catalog).load()
             calls: list[tuple[str, str]] = []
@@ -2332,7 +2363,10 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             stored = WorkflowDefaultStore(path, catalog).load()
 
         self.assertEqual(stored.step(SECURITY_REVIEW_STEP_ID).display_name, "Code Review")
-        self.assertIsNone(stored.step(SECURITY_REVIEW_STEP_ID).guidance)
+        self.assertEqual(
+            stored.step(SECURITY_REVIEW_STEP_ID).guidance,
+            SECURITY_REVIEW_DEFAULT_GUIDANCE,
+        )
         self.assertEqual(
             stored.step(SECURITY_REVIEW_STEP_ID).capability_profile,
             catalog.resolve(REVIEWER_COMPONENT_ID).default_capability_profile(),

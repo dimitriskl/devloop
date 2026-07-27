@@ -397,6 +397,134 @@ QA_DEFAULT_CAPABILITIES = (
     _agent_reference("agents/codex/qa-automation-engineer.md"),
 )
 
+ANALYSIS_DEFAULT_GUIDANCE = StepGuidance(
+    """Produce an implementation-ready plan grounded in repository evidence.
+
+- Clarify the goal, scope, non-goals, terminology, constraints, and success measures.
+- Inspect existing architecture and proven seams before proposing new design.
+- Identify affected components, trust boundaries, dependencies, migration needs, and
+  rollout or recovery concerns.
+- Convert requirements into small vertical issues with observable acceptance criteria
+  and proportionate validation.
+- Separate confirmed facts, reasoned inferences, assumptions, and unresolved decisions.
+
+Do not implement production changes during this step."""
+)
+
+DEVELOPMENT_DEFAULT_GUIDANCE = StepGuidance(
+    """Implement only the current issue and its acceptance criteria.
+
+- Read the PRD, issue, repository instructions, and relevant existing code before editing.
+- Preserve established mechanisms and extend proven seams unless the issue explicitly
+  requires a design change.
+- Work test-first in small vertical increments and keep functions and modules focused.
+- Trace affected producers, consumers, persistence, cleanup, and failure paths.
+- Handle invalid input and partial failure explicitly; avoid hidden side effects and
+  unrelated cleanup.
+- Run focused tests, builds, lint, and type checks appropriate to the touched area.
+
+Report the files changed, commands actually run, evidence obtained, and residual risks."""
+)
+
+REVIEW_DEFAULT_GUIDANCE = StepGuidance(
+    """Perform an independent, read-only review of the implementation.
+
+- Check correctness, security, data safety, architecture fit, compatibility, regression
+  risk, and test quality against the issue and PRD.
+- Trace changed entry points through adjacent producers, consumers, persistence,
+  cleanup, and failure paths; do not review the diff in isolation.
+- Report only actionable, evidence-backed findings with severity, file and line,
+  runtime consequence, smallest safe fix, and required regression test.
+- Distinguish confirmed defects from residual risks and avoid speculative style findings.
+
+Do not modify files. PASS only when no actionable defect remains."""
+)
+
+SECURITY_REVIEW_DEFAULT_GUIDANCE = StepGuidance(
+    """Perform a security-focused, read-only review of the implementation and its
+affected trust boundaries.
+
+Prioritize:
+- Authentication, authorization, tenant isolation, and privilege escalation.
+- Input validation and injection risks: SQL, command, template, path traversal, SSRF,
+  unsafe deserialization, and stored content.
+- Secret, token, credential, personal-data, and sensitive-log exposure.
+- Unsafe external requests, redirects, webhooks, file operations, and destructive actions.
+- Race conditions, replay, idempotency, stale-state execution, and partial-failure safety.
+- Dependency, configuration, default-permission, and environment-specific risks.
+- Whether tests cover denied access, malformed input, boundary values, hostile payloads,
+  and failure paths.
+
+Trace changed entry points through their producers, consumers, persistence, and cleanup
+paths. Do not limit review to the diff when adjacent code determines security.
+
+Report only evidence-backed findings. For each finding include severity, exploit or
+failure scenario, affected file and line, violated security invariant, and the smallest
+safe fix with required regression tests. Distinguish confirmed vulnerabilities from
+residual risks. Do not modify files. PASS only when no actionable security defect remains."""
+)
+
+FINAL_REVIEW_DEFAULT_GUIDANCE = StepGuidance(
+    """Perform the final independent, read-only release review.
+
+- Verify the implementation satisfies every acceptance criterion and preserves explicit
+  scope and non-goals.
+- Check correctness, architecture fit, public contracts, data integrity, concurrency,
+  compatibility, failure recovery, observability, documentation, and regression risk.
+- Trace the complete affected flow, including adjacent producers, consumers, persistence,
+  transfer, archive, cleanup, and operator paths where applicable.
+- Confirm tests exercise meaningful behavior and would fail for the defects they claim
+  to prevent.
+- Report only actionable, evidence-backed findings with severity, file and line, runtime
+  consequence, smallest safe fix, and required regression test.
+
+Do not modify files. PASS only when the change is coherent, verified, and ready for QA."""
+)
+
+QA_DEFAULT_GUIDANCE = StepGuidance(
+    """Validate the accepted implementation against every issue acceptance criterion.
+
+- Inspect the implementation, changed tests, and accepted review result before testing.
+- Run focused automated tests, builds, lint, type checks, and integration gates that are
+  practical and authorized for the touched area.
+- Cover the happy path, boundaries, invalid input, denied access, failures, retries,
+  idempotency, and likely regressions where relevant.
+- Distinguish source inspection and mocked evidence from runtime or real-integration proof.
+- Record exact commands and outcomes; do not claim a gate ran when it was skipped,
+  unavailable, or blocked.
+- Return a precise rework checklist for any uncovered criterion or failed verification.
+
+Do not modify production files. PASS only when coverage and verification are sufficient."""
+)
+
+BUILTIN_STEP_GUIDANCE: Mapping[
+    StepInstanceId,
+    tuple[StepComponentId, StepGuidance],
+] = {
+    ANALYSIS_STEP_ID: (ANALYSIS_COMPONENT_ID, ANALYSIS_DEFAULT_GUIDANCE),
+    DEVELOPMENT_STEP_ID: (DEVELOPMENT_COMPONENT_ID, DEVELOPMENT_DEFAULT_GUIDANCE),
+    SECURITY_REVIEW_STEP_ID: (
+        REVIEWER_COMPONENT_ID,
+        SECURITY_REVIEW_DEFAULT_GUIDANCE,
+    ),
+    FINAL_REVIEW_STEP_ID: (REVIEWER_COMPONENT_ID, FINAL_REVIEW_DEFAULT_GUIDANCE),
+    QA_STEP_ID: (QA_COMPONENT_ID, QA_DEFAULT_GUIDANCE),
+}
+
+
+def default_guidance_for_step(
+    step_id: StepInstanceId,
+    component: PortableStepComponent,
+) -> StepGuidance | None:
+    """Resolve an instance-specific built-in default or the component fallback."""
+    builtin_default = BUILTIN_STEP_GUIDANCE.get(step_id)
+    if (
+        builtin_default is not None
+        and builtin_default[0] == component.component_id
+    ):
+        return builtin_default[1]
+    return component.default_guidance
+
 
 class RoleRunner(Protocol):
     def run_role(self, **arguments: Any) -> RoleResult: ...
@@ -473,6 +601,7 @@ class PortableStepComponent:
     )
     required_capabilities: tuple[RequiredCapability, ...] = ()
     default_capabilities: tuple[CapabilityReference, ...] = ()
+    default_guidance: StepGuidance | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -492,6 +621,15 @@ class PortableStepComponent:
         if not isinstance(self.execution_budget_defaults, ExecutionBudget):
             raise ValueError(
                 "Step Components require an Execution Budget default."
+            )
+        if self.default_guidance is not None and not isinstance(
+            self.default_guidance,
+            StepGuidance,
+        ):
+            raise ValueError("Step Component default guidance is invalid.")
+        if self.adapter is None and self.default_guidance is not None:
+            raise ValueError(
+                "Local deterministic Step Components cannot declare default guidance."
             )
         if self.adapter is None:
             if self.execution_defaults is not None:
@@ -615,6 +753,7 @@ def default_portable_component_catalog() -> PortableStepComponentCatalog:
                 execution_budget_defaults=default_execution_budget("coder"),
                 required_capabilities=DEVELOPMENT_REQUIRED_CAPABILITIES,
                 default_capabilities=DEVELOPMENT_DEFAULT_CAPABILITIES,
+                default_guidance=DEVELOPMENT_DEFAULT_GUIDANCE,
             ),
             PortableStepComponent(
                 component_id=REVIEWER_COMPONENT_ID,
@@ -627,6 +766,7 @@ def default_portable_component_catalog() -> PortableStepComponentCatalog:
                 execution_budget_defaults=default_execution_budget("reviewer"),
                 required_capabilities=REVIEW_REQUIRED_CAPABILITIES,
                 default_capabilities=REVIEW_DEFAULT_CAPABILITIES,
+                default_guidance=REVIEW_DEFAULT_GUIDANCE,
             ),
             PortableStepComponent(
                 component_id=QA_COMPONENT_ID,
@@ -642,6 +782,7 @@ def default_portable_component_catalog() -> PortableStepComponentCatalog:
                 execution_budget_defaults=default_execution_budget("qa"),
                 required_capabilities=QA_REQUIRED_CAPABILITIES,
                 default_capabilities=QA_DEFAULT_CAPABILITIES,
+                default_guidance=QA_DEFAULT_GUIDANCE,
             ),
             PortableStepComponent(
                 component_id=ANALYSIS_COMPONENT_ID,
@@ -651,6 +792,7 @@ def default_portable_component_catalog() -> PortableStepComponentCatalog:
                 adapter=analysis_adapter,
                 execution_budget_defaults=default_execution_budget("analysis"),
                 default_capabilities=ANALYSIS_DEFAULT_CAPABILITIES,
+                default_guidance=ANALYSIS_DEFAULT_GUIDANCE,
             ),
         )
     )
@@ -2065,6 +2207,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 capability_profile=component_catalog.resolve(
                     ANALYSIS_COMPONENT_ID
                 ).default_capability_profile(),
+                guidance=ANALYSIS_DEFAULT_GUIDANCE,
                 transitions={
                     StepOutcome.SUCCEEDED: DEVELOPMENT_STEP_ID,
                     StepOutcome.BLOCKED: None,
@@ -2081,6 +2224,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 capability_profile=component_catalog.resolve(
                     DEVELOPMENT_COMPONENT_ID
                 ).default_capability_profile(),
+                guidance=DEVELOPMENT_DEFAULT_GUIDANCE,
                 transitions={
                     StepOutcome.SUCCEEDED: SECURITY_REVIEW_STEP_ID,
                     StepOutcome.BLOCKED: None,
@@ -2097,6 +2241,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 capability_profile=component_catalog.resolve(
                     REVIEWER_COMPONENT_ID
                 ).default_capability_profile(),
+                guidance=SECURITY_REVIEW_DEFAULT_GUIDANCE,
                 transitions={
                     StepOutcome.SUCCEEDED: FINAL_REVIEW_STEP_ID,
                     StepOutcome.CHANGES_REQUESTED: DEVELOPMENT_STEP_ID,
@@ -2120,6 +2265,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 capability_profile=component_catalog.resolve(
                     REVIEWER_COMPONENT_ID
                 ).default_capability_profile(),
+                guidance=FINAL_REVIEW_DEFAULT_GUIDANCE,
                 transitions={
                     StepOutcome.SUCCEEDED: QA_STEP_ID,
                     StepOutcome.CHANGES_REQUESTED: DEVELOPMENT_STEP_ID,
@@ -2143,6 +2289,7 @@ def default_portable_workflow() -> WorkflowDefinition:
                 capability_profile=component_catalog.resolve(
                     QA_COMPONENT_ID
                 ).default_capability_profile(),
+                guidance=QA_DEFAULT_GUIDANCE,
                 transitions={
                     StepOutcome.SUCCEEDED: None,
                     StepOutcome.CHANGES_REQUESTED: DEVELOPMENT_STEP_ID,

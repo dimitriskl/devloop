@@ -43,6 +43,7 @@ from .portable_workflow import (
     WorkflowStep,
     canonical_workflow_hash,
     compatible_port_bindings,
+    default_guidance_for_step,
     default_portable_component_catalog,
     default_portable_workflow,
     load_portable_workflow,
@@ -602,6 +603,7 @@ class WorkflowDraft:
             raise ValueError(
                 f"Step {source.display_name!r} already uses Type {component_id}."
             )
+        source_component = self._catalog.resolve(source.component_id)
         component = self._catalog.resolve(component_id)
         is_primary_path_step = any(
             step.instance_id == step_id for step in self._workflow.primary_path()
@@ -621,6 +623,14 @@ class WorkflowDraft:
             transitions[StepOutcome.SUCCEEDED] = source.transitions.get(
                 StepOutcome.SUCCEEDED
             )
+        source_default_guidance = default_guidance_for_step(
+            step_id,
+            source_component,
+        )
+        if source.guidance is None or source.guidance == source_default_guidance:
+            changed_guidance = component.default_guidance
+        else:
+            changed_guidance = source.guidance.marked_for_review()
         self._replace_step(
             replace(
                 source,
@@ -630,11 +640,7 @@ class WorkflowDraft:
                 execution_settings=component.default_execution_settings,
                 execution_budget=component.execution_budget_defaults,
                 capability_profile=component.default_capability_profile(),
-                guidance=(
-                    source.guidance.marked_for_review()
-                    if source.guidance is not None
-                    else None
-                ),
+                guidance=changed_guidance,
             )
         )
 
@@ -664,6 +670,7 @@ class WorkflowDraft:
             execution_settings=component.default_execution_settings,
             execution_budget=component.execution_budget_defaults,
             capability_profile=component.default_capability_profile(),
+            guidance=component.default_guidance,
         )
         edited = self._rewire_primary_path(
             (
@@ -798,6 +805,7 @@ class WorkflowDraft:
             execution_settings=component.default_execution_settings,
             execution_budget=component.execution_budget_defaults,
             capability_profile=component.default_capability_profile(),
+            guidance=component.default_guidance,
         )
         source_replacement = replace(
             source,
@@ -970,7 +978,7 @@ class WorkflowDraft:
                 execution_settings=component.default_execution_settings,
                 execution_budget=component.execution_budget_defaults,
                 capability_profile=component.default_capability_profile(),
-                guidance=None,
+                guidance=default_guidance_for_step(step_id, component),
             )
         )
 

@@ -18,6 +18,11 @@ Each Workflow Step is a UUIDv4-keyed instance with a unique display name, an
 open Step Component ID, component-owned scope and ports, explicit Outcome
 Transitions, typed Port Bindings, Step Execution Settings when applicable, an
 independent Execution Budget, capabilities, and optional bounded Step Guidance.
+Every agent-backed built-in Step starts with role-specific guidance. Analysis,
+Development, Security Review, Final Review, and QA have distinct built-in
+defaults; the two reviewer instances intentionally do not share the same text.
+New component instances use their component's reusable guidance default, while
+resetting a built-in instance restores its instance-specific default.
 
 Step Execution Settings are persisted under the step's `execution_settings` key
 and carry a required `backend` naming one member of the closed

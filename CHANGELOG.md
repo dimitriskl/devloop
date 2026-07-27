@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The built-in Analysis, Development, Security Review, Final Review, and QA
+  Workflow Steps now start with distinct role-specific Step Guidance. New
+  component instances receive their component guidance default, while resetting
+  either built-in reviewer restores its instance-specific security or final-gate
+  guidance.
 - Applying Workflow preferences while inspecting an unfinished Current Run now
   replaces all non-structural preferences on matching steps, including switches
   between Codex CLI and Claude Code. Existing issue cursors and attempt history

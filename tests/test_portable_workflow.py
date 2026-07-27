@@ -13,10 +13,16 @@ from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue
 from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
+    ANALYSIS_DEFAULT_GUIDANCE,
+    ANALYSIS_STEP_ID,
+    DEVELOPMENT_DEFAULT_GUIDANCE,
     DEVELOPMENT_STEP_ID,
+    FINAL_REVIEW_DEFAULT_GUIDANCE,
     FINAL_REVIEW_STEP_ID,
     IMPLEMENTATION_RESULT_CONTRACT,
     QA_STEP_ID,
+    QA_DEFAULT_GUIDANCE,
+    SECURITY_REVIEW_DEFAULT_GUIDANCE,
     SECURITY_REVIEW_STEP_ID,
     REVIEWER_COMPONENT_ID,
     FastPreference,
@@ -302,6 +308,28 @@ class PortableWorkflowDefinitionTests(unittest.TestCase):
         )
         self.assertEqual(len(review_steps), 2)
         self.assertNotEqual(review_steps[0].instance_id, review_steps[1].instance_id)
+
+    def test_default_workflow_gives_every_step_custom_ready_guidance(self) -> None:
+        workflow = default_portable_workflow()
+        expected = {
+            ANALYSIS_STEP_ID: ANALYSIS_DEFAULT_GUIDANCE,
+            DEVELOPMENT_STEP_ID: DEVELOPMENT_DEFAULT_GUIDANCE,
+            SECURITY_REVIEW_STEP_ID: SECURITY_REVIEW_DEFAULT_GUIDANCE,
+            FINAL_REVIEW_STEP_ID: FINAL_REVIEW_DEFAULT_GUIDANCE,
+            QA_STEP_ID: QA_DEFAULT_GUIDANCE,
+        }
+
+        self.assertEqual(
+            {
+                step.instance_id: step.guidance
+                for step in workflow.primary_path()
+            },
+            expected,
+        )
+        self.assertEqual(
+            len({guidance.text for guidance in expected.values()}),
+            len(expected),
+        )
 
     def test_duplicate_component_instances_round_trip_distinct_capability_profiles(
         self,

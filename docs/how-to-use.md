@@ -429,7 +429,11 @@ GitHub. Duplicate component types can therefore use different profiles.
 Required capabilities are locked with the component-contract reason. Use
 `guidance` to add bounded multiline Step Guidance; secrets are redacted before
 Apply and the displayed precedence keeps contracts, permissions, execution
-policy, safety, and output requirements authoritative. GitHub installs accept
+policy, safety, and output requirements authoritative. The built-in Analysis,
+Development, Security Review, Final Review, and QA steps start with distinct
+guidance suited to their role. A new component instance receives its component
+guidance default; resetting a built-in step restores its instance-specific
+default. GitHub installs accept
 repository URLs with an optional `#subpath`, then copy approved skill folders
 and agent Markdown files into the bundle without overwriting existing names.
 
