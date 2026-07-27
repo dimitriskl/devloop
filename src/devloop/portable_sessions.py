@@ -197,6 +197,7 @@ class PortableResumeCandidateRecord(Protocol):
     total_issues: int
     active_issue: str | None
     active_status: str | None
+    active_stage: str | None
     updated_at: float
 
 
@@ -271,6 +272,7 @@ class PortableSessionSupervisor:
         self._candidate_launches: dict[str, PortableSessionLaunch] = {}
         self._running: dict[str, _RunningSession] = {}
         self._last_progress_refresh: dict[str, float] = {}
+        self._live_stage_session_ids: set[str] = set()
         self._threads: list[Thread] = []
         self._events: Queue[PortableSessionEvent] = Queue()
         self._condition = Condition(RLock())
@@ -831,21 +833,33 @@ class PortableSessionSupervisor:
                     )
                 ):
                     progress = PortableSessionProgress(
-                        stage=_payload_text(frame, "stage"),
-                        completed_issues=_payload_nonnegative_int(
-                            frame,
-                            "completed_issues",
+                        stage=(
+                            _payload_text(frame, "stage")
+                            if "stage" in frame.payload
+                            else progress.stage
                         ),
-                        total_issues=_payload_nonnegative_int(
-                            frame,
-                            "total_issues",
+                        completed_issues=(
+                            _payload_nonnegative_int(frame, "completed_issues")
+                            if "completed_issues" in frame.payload
+                            else progress.completed_issues
                         ),
-                        active_issue=_payload_optional_text(frame, "active_issue"),
+                        total_issues=(
+                            _payload_nonnegative_int(frame, "total_issues")
+                            if "total_issues" in frame.payload
+                            else progress.total_issues
+                        ),
+                        active_issue=(
+                            _payload_optional_text(frame, "active_issue")
+                            if "active_issue" in frame.payload
+                            else progress.active_issue
+                        ),
                     )
                     if progress.completed_issues > progress.total_issues:
                         raise PortableProtocolError(
                             "Worker completed issue count cannot exceed its total."
                         )
+                if "stage" in frame.payload:
+                    self._live_stage_session_ids.add(session_id)
                 updated = replace(snapshot, status=status, progress=progress)
             elif kind is WorkerMessageKind.INPUT_REQUEST:
                 try:
@@ -1033,9 +1047,18 @@ class PortableSessionSupervisor:
             return snapshot
         if matching is None:
             return snapshot
+        candidate_progress = _candidate_progress(matching)
+        if (
+            snapshot.session_id in self._live_stage_session_ids
+            and snapshot.progress.stage
+        ):
+            candidate_progress = replace(
+                candidate_progress,
+                stage=snapshot.progress.stage,
+            )
         return replace(
             snapshot,
-            progress=_candidate_progress(matching),
+            progress=candidate_progress,
             updated_at=getattr(matching, "updated_at", snapshot.updated_at),
         )
 
@@ -1188,7 +1211,7 @@ def _candidate_progress(
     candidate: PortableResumeCandidateRecord,
 ) -> PortableSessionProgress:
     return PortableSessionProgress(
-        stage=getattr(candidate, "active_status", None) or "",
+        stage=getattr(candidate, "active_stage", None) or "",
         completed_issues=getattr(candidate, "completed_issues", 0),
         total_issues=getattr(candidate, "total_issues", 0),
         active_issue=getattr(candidate, "active_issue", None),

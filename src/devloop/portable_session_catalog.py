@@ -484,6 +484,7 @@ class PortableResumeCandidate:
     total_issues: int
     active_issue: str | None
     active_status: str | None
+    active_stage: str | None
     updated_at: float
 
 
@@ -499,6 +500,7 @@ class PortableResumeCandidateSource(Protocol):
     total_issues: int
     active_issue: str | None
     active_status: str | None
+    active_stage: str | None
     updated_at: float
 
 
@@ -1141,6 +1143,7 @@ class PortableSessionCatalog:
                         total_issues=candidate.total_issues,
                         active_issue=candidate.active_issue,
                         active_status=candidate.active_status,
+                        active_stage=getattr(candidate, "active_stage", None),
                         updated_at=candidate.updated_at,
                     )
                 )

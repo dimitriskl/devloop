@@ -170,6 +170,7 @@ class ResumeCandidate:
     total_issues: int
     active_issue: str | None
     active_status: str | None
+    active_stage: str | None
     updated_at: float
 
 
@@ -1906,7 +1907,7 @@ def find_resume_candidates(repo_root: Path) -> list[ResumeCandidate]:
         pending = [issue for issue in issues if not issue.completed]
         if not pending:
             continue
-        active_issue, active_status = resume_activity(artifacts)
+        active_issue, active_status, active_stage = resume_progress(artifacts)
         paths = [artifacts.prd_path, artifacts.issues_index]
         paths.extend(issue.path for issue in issues)
         state_path = find_status_state_path(artifacts)
@@ -1920,6 +1921,7 @@ def find_resume_candidates(repo_root: Path) -> list[ResumeCandidate]:
                 total_issues=len(issues),
                 active_issue=active_issue,
                 active_status=active_status,
+                active_stage=active_stage,
                 updated_at=max(path.stat().st_mtime for path in paths),
             )
         )
@@ -1934,16 +1936,23 @@ def find_resume_candidates(repo_root: Path) -> list[ResumeCandidate]:
 
 
 def resume_activity(artifacts: PlanningArtifacts) -> tuple[str | None, str | None]:
+    active_issue, active_status, _active_stage = resume_progress(artifacts)
+    return active_issue, active_status
+
+
+def resume_progress(
+    artifacts: PlanningArtifacts,
+) -> tuple[str | None, str | None, str | None]:
     state_path = find_status_state_path(artifacts)
     if state_path is None:
-        return None, None
+        return None, None, None
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None, None
+        return None, None, None
     issues = state.get("issues")
     if not isinstance(issues, dict):
-        return None, None
+        return None, None, None
     priorities = (IssueStatus.IN_PROGRESS, IssueStatus.BLOCKED)
     for expected_status in priorities:
         for number, details in issues.items():
@@ -1951,8 +1960,35 @@ def resume_activity(artifacts: PlanningArtifacts) -> tuple[str | None, str | Non
                 continue
             status = str(details.get("status", ""))
             if parse_issue_status(status) is expected_status:
-                return str(number), status
-    return None, None
+                return (
+                    str(number),
+                    status,
+                    _active_workflow_stage(state, details),
+                )
+    return None, None, None
+
+
+def _active_workflow_stage(
+    state: dict[str, object],
+    issue_state: dict[str, object],
+) -> str | None:
+    current_step_id = issue_state.get("current_step_instance_id")
+    if not isinstance(current_step_id, str) or not current_step_id:
+        return None
+    workflow = state.get("resolved_workflow")
+    if not isinstance(workflow, dict):
+        return None
+    steps = workflow.get("steps")
+    if not isinstance(steps, list):
+        return None
+    for step in steps:
+        if not isinstance(step, dict) or step.get("instance_id") != current_step_id:
+            continue
+        display_name = step.get("display_name")
+        if isinstance(display_name, str) and display_name.strip():
+            return display_name.strip()
+        return None
+    return None
 
 
 def snapshot_artifacts(repo_root: Path) -> dict[Path, float]:

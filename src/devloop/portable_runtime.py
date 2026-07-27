@@ -161,6 +161,14 @@ class PortableRuntimeBridge:
             )
         )
 
+    def update_session_status(
+        self,
+        *,
+        stage: str,
+        active_issue: str | None = None,
+    ) -> None:
+        """Publish session progress when this bridge is backed by a worker."""
+
     def write_output(self, content: str, *, is_error: bool) -> None:
         if not content:
             return
@@ -284,6 +292,19 @@ def publish_active_run_context(context: PortableRunContext) -> None:
     bridge = active_portable_runtime()
     if bridge is not None:
         bridge.update_run_context(context)
+
+
+def publish_active_session_status(
+    *,
+    stage: str,
+    active_issue: str | None = None,
+) -> None:
+    bridge = active_portable_runtime()
+    if bridge is not None:
+        bridge.update_session_status(
+            stage=stage,
+            active_issue=active_issue,
+        )
 
 
 def portable_plain_mode_active() -> bool:

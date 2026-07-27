@@ -1876,6 +1876,17 @@ def begin_role_output(
     pass_number: int,
     role: str,
 ) -> None:
+    from .portable_runtime import publish_active_session_status
+
+    display_stage = (
+        stage.value.title()
+        if role in {"coder", "reviewer", "qa"}
+        else role
+    )
+    publish_active_session_status(
+        stage=f"{display_stage} · pass {pass_number}",
+        active_issue=issue_number,
+    )
     if dashboard.enabled or dashboard.has_workflow_progress:
         dashboard.begin_role(stage, pass_number)
     if dashboard.enabled:

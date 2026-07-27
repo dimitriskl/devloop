@@ -1210,6 +1210,113 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_active_choice_values_cannot_collide_with_session_or_navigation_ids(
+        self,
+    ) -> None:
+        checkout_a = Path("choice-owner").resolve()
+        checkout_b = Path("choice-sibling").resolve()
+        adversarial_values = (
+            "session-beta",
+            "__new_session__",
+            "__sessions__",
+            "__new_session_back__",
+            "+ New Session",
+            "Back",
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.current_owner = self.waiting_snapshot(adversarial_values[0])
+                self.sibling = PortableSessionSnapshot(
+                    session_id="session-beta",
+                    checkout=checkout_b,
+                    status=PortableSessionStatus.RUNNING,
+                )
+                self.events: list[PortableSessionEvent] = []
+                self.intents: list[PortableSessionIntent] = []
+
+            def waiting_snapshot(self, value: str) -> PortableSessionSnapshot:
+                return PortableSessionSnapshot(
+                    session_id="session-alpha",
+                    checkout=checkout_a,
+                    status=PortableSessionStatus.WAITING_FOR_INPUT,
+                    input_request=PortableSessionInputRequest(
+                        kind=PortableSessionInputKind.CHOICE,
+                        prompt="Choose the exact worker value",
+                        options=((value, f"Send {value}"),),
+                        default_key=value,
+                    ),
+                )
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (self.current_owner, self.sibling)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return PortableSessionSnapshot(
+                    session_id=intent.session_id,
+                    checkout=checkout_a,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+            for value in adversarial_values:
+                supervisor.current_owner = supervisor.waiting_snapshot(value)
+                supervisor.events.append(
+                    PortableSessionEvent(supervisor.current_owner)
+                )
+                for _ in range(20):
+                    await pilot.pause()
+                    menu = app.query_one("#portable-navigation", OptionList)
+                    if (
+                        menu.option_count == 1
+                        and str(menu.get_option_at_index(0).prompt)
+                        == f"Send {value}"
+                    ):
+                        break
+                menu.highlighted = 0
+                await pilot.press("enter")
+                await pilot.pause()
+
+        self.assertEqual(
+            supervisor.intents,
+            [
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                    session_id="session-alpha",
+                    value=value,
+                )
+                for value in adversarial_values
+            ],
+        )
+
     async def test_crashed_waiting_session_clears_input_while_sibling_completes(
         self,
     ) -> None:

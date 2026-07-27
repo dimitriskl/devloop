@@ -735,12 +735,16 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 "total_issues": 5,
                 "active_issue": "0003",
             })
-            send(2, "INPUT_REQUEST", {
+            send(2, "STATUS", {
+                "status": "RUNNING",
+                "stage": "Security Review · pass 2",
+            })
+            send(3, "INPUT_REQUEST", {
                 "request_kind": "TEXT",
                 "prompt": "Continue",
             })
             json.loads(sys.stdin.readline())
-            send(3, "COMPLETION", {"exit_code": 0})
+            send(4, "COMPLETION", {"exit_code": 0})
             """
         )
 
@@ -779,7 +783,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         self.assertEqual(
             waiting.progress,
             PortableSessionProgress(
-                stage="development",
+                stage="Security Review · pass 2",
                 completed_issues=2,
                 total_issues=5,
                 active_issue="0003",
@@ -787,33 +791,73 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         )
         self.assertGreater(waiting.updated_at, 0)
 
-    def test_resume_candidate_projects_persisted_progress_before_resume(self) -> None:
+    def test_real_resume_candidate_keeps_issue_status_separate_from_workflow_stage(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout = Path(directory)
-            prd_path = checkout / "change.md"
-            candidate = SimpleNamespace(
-                candidate_id="candidate-progress",
-                checkout=checkout,
-                prd_path=prd_path,
-                completed_issues=4,
-                pending_issues=1,
-                total_issues=5,
-                active_issue="0005",
-                active_status="qa",
-                updated_at=1_720_000_000.0,
+            feature = checkout / "prd" / "candidate-progress"
+            issues = feature / "issues"
+            issues.mkdir(parents=True)
+            prd_path = feature / "candidate-progress.md"
+            issues_index = issues / "README.md"
+            issue_path = issues / "0001-progress.md"
+            prd_path.write_text("# Candidate progress\n", encoding="utf-8")
+            issues_index.write_text(
+                "[Issue 0001](./0001-progress.md)\n",
+                encoding="utf-8",
             )
+            issue_path.write_text("# Issue\n\nCompleted: [ ]\n", encoding="utf-8")
+            step_id = "e7f9d3a2-1b64-48c5-9d20-6a7b8c9d0e02"
+            issues_index.with_name("README.loop.state.json").write_text(
+                json.dumps(
+                    {
+                        "issues": {
+                            "0001": {
+                                "status": "IN_PROGRESS",
+                                "current_step_instance_id": step_id,
+                            }
+                        },
+                        "resolved_workflow": {
+                            "steps": [
+                                {
+                                    "instance_id": step_id,
+                                    "display_name": "Security Review",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            catalog = PortableSessionCatalog(checkout / "portable-sessions.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="catalog-registration",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            candidate = catalog.discover_resume_candidates(
+                interactive_runner.find_resume_candidates
+            )[0]
 
-            supervisor = PortableSessionSupervisor(resume_candidates=(candidate,))
+            supervisor = PortableSessionSupervisor(
+                catalog=catalog,
+                resume_candidates=(candidate,),
+            )
             snapshot = supervisor.snapshot(candidate.candidate_id)
             supervisor.shutdown()
 
+        self.assertEqual(candidate.active_status, "IN_PROGRESS")
         self.assertEqual(
             snapshot.progress,
             PortableSessionProgress(
-                stage="qa",
-                completed_issues=4,
-                total_issues=5,
-                active_issue="0005",
+                stage="Security Review",
+                completed_issues=0,
+                total_issues=1,
+                active_issue="0001",
             ),
         )
         self.assertEqual(snapshot.updated_at, candidate.updated_at)
@@ -869,7 +913,8 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 completed_issues=1,
                 total_issues=3,
                 active_issue="0002",
-                active_status="development",
+                active_status="IN_PROGRESS",
+                active_stage="Development",
                 updated_at=10.0,
             )
             advanced = SimpleNamespace(
@@ -879,7 +924,8 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 completed_issues=2,
                 total_issues=3,
                 active_issue="0003",
-                active_status="review",
+                active_status="IN_PROGRESS",
+                active_stage="Security Review",
                 updated_at=20.0,
             )
             supervisor = PortableSessionSupervisor(
@@ -901,7 +947,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         self.assertEqual(
             waiting.progress,
             PortableSessionProgress(
-                stage="review",
+                stage="Security Review",
                 completed_issues=2,
                 total_issues=3,
                 active_issue="0003",
@@ -931,6 +977,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         self.assertTrue(
             any("usage:" in message.casefold() for message in completed.activity)
         )
+        self.assertEqual(completed.progress.stage, "analysis")
 
     def test_session_routes_input_only_after_worker_requests_it(self) -> None:
         worker_source = textwrap.dedent(

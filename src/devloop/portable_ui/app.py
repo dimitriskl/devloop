@@ -79,6 +79,7 @@ NEW_SESSION_CANCEL_ID = "__new_session_cancel__"
 NEW_SESSION_BACK_ID = "__new_session_back__"
 NEW_SESSION_SAVED_PREFIX = "__new_session_saved_project__:"
 NEW_SESSION_REPOSITORY_PREFIX = "__new_session_repository__:"
+SESSION_INPUT_OPTION_ID_PREFIX = "__session_input_option__:"
 SESSION_INPUT_ERROR_MAX_LENGTH = 160
 
 
@@ -406,7 +407,7 @@ class PortableApplicationShell(App[None]):
             else attention_bell
         )
         self._saved_projects: dict[str, Path] = {}
-        self._session_input_values: set[str] = set()
+        self._session_input_options: dict[str, tuple[str, str]] = {}
         self._new_session_input: str | None = None
         self._new_session_flow_active = False
         self._new_session_view: str | None = None
@@ -657,7 +658,7 @@ class PortableApplicationShell(App[None]):
             self._unread_session_ids.discard(hide_session_id)
         self._active_session_id = None
         self._update_run_context(None)
-        self._session_input_values.clear()
+        self._session_input_options.clear()
         self._new_session_input = None
         self._new_session_flow_active = False
         self._new_session_view = None
@@ -1009,7 +1010,7 @@ class PortableApplicationShell(App[None]):
         menu.clear_options()
         input_widget = self.query_one("#portable-input", Input)
         input_widget.display = False
-        self._session_input_values.clear()
+        self._session_input_options.clear()
         if snapshot.status in {
             PortableSessionStatus.READY,
             PortableSessionStatus.PAUSED,
@@ -1026,18 +1027,20 @@ class PortableApplicationShell(App[None]):
                 PortableSessionInputKind.APPROVAL,
             }
         ):
-            menu.add_options(
-                [
+            rendered_options = []
+            for index, (value, label) in enumerate(snapshot.input_request.options):
+                option_id = f"{SESSION_INPUT_OPTION_ID_PREFIX}{index}"
+                rendered_options.append(
                     Option(
                         sanitize_terminal_text(label, preserve_newlines=False),
-                        id=value,
+                        id=option_id,
                     )
-                    for value, label in snapshot.input_request.options
-                ]
-            )
-            self._session_input_values.update(
-                value for value, _label in snapshot.input_request.options
-            )
+                )
+                self._session_input_options[option_id] = (
+                    snapshot.session_id,
+                    value,
+                )
+            menu.add_options(rendered_options)
             menu.highlighted = next(
                 (
                     index
@@ -1425,7 +1428,11 @@ class PortableApplicationShell(App[None]):
     def select_option(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id
         if self._session_supervisor is not None:
-            if option_id == NEW_SESSION_ID:
+            session_input = self._session_input_options.get(option_id or "")
+            if session_input is not None:
+                session_id, value = session_input
+                self._provide_session_input(value, session_id=session_id)
+            elif option_id == NEW_SESSION_ID:
                 self._show_new_session_menu()
             elif option_id == NEW_SESSION_SAVED_ID:
                 self._show_saved_worktree_menu(for_repository=False)
@@ -1472,11 +1479,6 @@ class PortableApplicationShell(App[None]):
             elif option_id in self._session_snapshots:
                 self._active_session_id = option_id
                 self._show_session_snapshot(self._session_snapshots[option_id])
-            elif (
-                self._active_session_id is not None
-                and option_id in self._session_input_values
-            ):
-                self._provide_session_input(option_id)
             return
         request_id = self._active_request_id
         if self._workflow_complete and option_id == "__exit__":
@@ -1560,21 +1562,26 @@ class PortableApplicationShell(App[None]):
         self._show_working_state(message)
         self._bridge.respond(request_id, value)
 
-    def _provide_session_input(self, value: str) -> None:
+    def _provide_session_input(
+        self,
+        value: str,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         assert self._session_supervisor is not None
-        assert self._active_session_id is not None
-        session_id = self._active_session_id
+        owning_session_id = session_id or self._active_session_id
+        assert owning_session_id is not None
         try:
             self._session_supervisor.handle_intent(
                 PortableSessionIntent(
                     kind=PortableSessionIntentKind.PROVIDE_INPUT,
-                    session_id=session_id,
+                    session_id=owning_session_id,
                     value=value,
                 )
             )
-            self._session_input_rejections.pop(session_id, None)
+            self._session_input_rejections.pop(owning_session_id, None)
         except ValueError as error:
-            self._show_session_input_rejection(session_id, error)
+            self._show_session_input_rejection(owning_session_id, error)
 
     def _show_session_input_rejection(
         self,

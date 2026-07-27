@@ -8,11 +8,57 @@ from collections.abc import Mapping
 from typing import Any
 from unittest import mock
 
+from devloop import cli
 from devloop.portable_protocol import PortableProtocolFrame
+from devloop.portable_runtime import portable_runtime_session
 from devloop.portable_worker import PortableWorkerRuntimeBridge
+from devloop.statusui import Stage
 
 
 class PortableWorkerRuntimeBridgeTests(unittest.TestCase):
+    def test_delivery_role_transition_emits_stage_issue_and_pass_status(self) -> None:
+        event_stream = io.StringIO()
+        bridge = PortableWorkerRuntimeBridge(
+            "session-delivery",
+            command_stream=io.StringIO(),
+            event_stream=event_stream,
+        )
+
+        class RecordingDashboard:
+            enabled = True
+            has_workflow_progress = True
+
+            def begin_role(self, stage: Stage, pass_number: int) -> None:
+                self.started = (stage, pass_number)
+
+        dashboard = RecordingDashboard()
+        with portable_runtime_session(bridge):
+            cli.begin_role_output(
+                dashboard,  # type: ignore[arg-type]
+                Stage.REVIEW,
+                "issue 0004 / pass 3",
+                "0004",
+                3,
+                "Security Review",
+            )
+
+        frame = json.loads(event_stream.getvalue())
+        self.assertEqual(
+            frame,
+            {
+                "version": 1,
+                "session_id": "session-delivery",
+                "sequence": 1,
+                "kind": "STATUS",
+                "payload": {
+                    "status": "RUNNING",
+                    "stage": "Security Review · pass 3",
+                    "active_issue": "0004",
+                },
+            },
+        )
+        self.assertEqual(dashboard.started, (Stage.REVIEW, 3))
+
     def test_concurrent_events_are_written_in_allocated_sequence_order(self) -> None:
         event_stream = io.StringIO()
         bridge = PortableWorkerRuntimeBridge(

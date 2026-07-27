@@ -1866,6 +1866,7 @@ class ResumePlanningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             artifacts = self.make_prd_pair(root, "active-v2", completed=(False,))
+            security_review_step_id = "e7f9d3a2-1b64-48c5-9d20-6a7b8c9d0e02"
             state_path = artifacts.issues_index.with_name("README.loop.state.json")
             state_path.write_text(
                 json.dumps(
@@ -1873,11 +1874,17 @@ class ResumePlanningTests(unittest.TestCase):
                         "issues": {
                             "0001": {
                                 "status": "IN_PROGRESS",
-                                "current_step_instance_id": (
-                                    "e7f9d3a2-1b64-48c5-9d20-6a7b8c9d0e02"
-                                ),
+                                "current_step_instance_id": security_review_step_id,
                             }
-                        }
+                        },
+                        "resolved_workflow": {
+                            "steps": [
+                                {
+                                    "instance_id": security_review_step_id,
+                                    "display_name": "Security Review",
+                                }
+                            ]
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -1887,6 +1894,7 @@ class ResumePlanningTests(unittest.TestCase):
 
         self.assertEqual(candidate.active_issue, "0001")
         self.assertEqual(candidate.active_status, "IN_PROGRESS")
+        self.assertEqual(candidate.active_stage, "Security Review")
 
     def test_status_display_recognizes_canonical_portable_issue_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

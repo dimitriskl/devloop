@@ -99,6 +99,20 @@ class PortableWorkerRuntimeBridge:
     def update_run_context(self, context: PortableRunContext) -> None:
         self._send(WorkerMessageKind.CONTEXT, asdict(context))
 
+    def update_session_status(
+        self,
+        *,
+        stage: str,
+        active_issue: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "status": "RUNNING",
+            "stage": stage,
+        }
+        if active_issue is not None:
+            payload["active_issue"] = active_issue
+        self._send(WorkerMessageKind.STATUS, payload)
+
     def write_output(self, content: str, *, is_error: bool) -> None:
         if content:
             self._send(
@@ -181,6 +195,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             raise PortableProtocolError("START arguments must be a list of strings.")
         with portable_runtime_session(bridge):
+            bridge.update_session_status(
+                stage=(
+                    "analysis"
+                    if (
+                        operation is PortableWorkflowOperation.PLANNING
+                        and not any(
+                            argument == "--prd" or argument.startswith("--prd=")
+                            for argument in arguments
+                        )
+                    )
+                    else "delivery"
+                )
+            )
             result = _run_operation(operation, arguments)
     except SystemExit as error:
         result = error.code if isinstance(error.code, int) else 1
