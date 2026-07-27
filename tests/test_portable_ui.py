@@ -6,12 +6,14 @@ from pathlib import Path
 from unittest import mock
 
 from textual.containers import Horizontal
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 
 from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
 from devloop.portable_sessions import (
     PortableSessionIntent,
     PortableSessionEvent,
+    PortableSessionInputKind,
+    PortableSessionInputRequest,
     PortableSessionLaunch,
     PortableSessionSnapshot,
     PortableSessionStatus,
@@ -147,6 +149,68 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 str(menu.get_option_at_index(1).prompt),
             )
 
+    async def test_background_session_failure_is_the_application_result_on_exit(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.events: list[PortableSessionEvent] = []
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        launch = PortableSessionLaunch(
+            session_id="session-background-failure",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            supervisor.events.append(
+                PortableSessionEvent(
+                    PortableSessionSnapshot(
+                        session_id=launch.session_id,
+                        checkout=launch.checkout,
+                        status=PortableSessionStatus.FAILED,
+                        result=7,
+                    )
+                )
+            )
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+        self.assertEqual(app.operation_result, 7)
+
     async def test_sessions_tab_is_passive_until_new_session_is_selected(
         self,
     ) -> None:
@@ -241,6 +305,119 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#portable-navigation", OptionList).option_count,
                 2,
             )
+
+    async def test_active_session_context_uses_left_pane_and_f5_context_view(
+        self,
+    ) -> None:
+        run_context = PortableRunContext(
+            project_root=r"E:\LocalCode\PortableProject",
+            implementation_branch="devloop/portable-session",
+            implementation_worktree=r"E:\Worktrees\PortableProject-session-dev",
+            prd_path=r"E:\LocalCode\PortableProject\prd\portable-session.md",
+        )
+
+        class FakeSupervisor:
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                    context=run_context,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        launch = PortableSessionLaunch(
+            session_id="session-context",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+
+            compact_context = str(
+                app.query_one("#portable-run-context", Static).render()
+            )
+            self.assertIn(run_context.project_root, compact_context)
+            self.assertIn(run_context.implementation_branch, compact_context)
+            self.assertIn(run_context.implementation_worktree, compact_context)
+
+            await pilot.press("f5")
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, PortableTextOverlay)
+            full_context = str(
+                app.screen.query_one(".portable-overlay-content", Static).render()
+            )
+            self.assertIn(run_context.prd_path, full_context)
+
+    async def test_worker_input_prompt_is_sanitized_before_placeholder_assignment(
+        self,
+    ) -> None:
+        hostile_prompt = (
+            "\x1b[2JChoose "
+            "\x1b]0;hostile terminal title\x07"
+            "safely\x00\x08"
+        )
+
+        class FakeSupervisor:
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.WAITING_FOR_INPUT,
+                    input_request=PortableSessionInputRequest(
+                        kind=PortableSessionInputKind.TEXT,
+                        prompt=hostile_prompt,
+                    ),
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        launch = PortableSessionLaunch(
+            session_id="session-hostile-prompt",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+
+            input_widget = app.query_one("#portable-input", Input)
+            self.assertEqual(input_widget.placeholder, "Choose safely")
+            self.assertNotIn("\x1b", input_widget.placeholder)
+            self.assertNotIn("\x00", input_widget.placeholder)
 
     async def test_running_workflow_keeps_implementation_context_visible(self) -> None:
         bridge = PortableRuntimeBridge()

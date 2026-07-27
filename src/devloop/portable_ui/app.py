@@ -650,11 +650,16 @@ class PortableApplicationShell(App[None]):
 
     def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
         self._session_snapshots[snapshot.session_id] = snapshot
+        if snapshot.status.terminal:
+            self.operation_result = snapshot.result
         if self._active_session_id is None:
             self._refresh_sessions_menu()
             return
         if self._active_session_id != snapshot.session_id:
             return
+        context = snapshot.context
+        if context is not None:
+            self._update_run_context(context)
         checkout_name = sanitize_terminal_text(
             snapshot.checkout.name or str(snapshot.checkout),
             preserve_newlines=False,
@@ -705,7 +710,6 @@ class PortableApplicationShell(App[None]):
                 )
             )
             menu.highlighted = 1
-        context = snapshot.context
         context_lines = [
             f"Checkout: {snapshot.checkout}",
             f"Status: {snapshot.status.value}",
@@ -733,7 +737,10 @@ class PortableApplicationShell(App[None]):
             snapshot.input_request is not None
             and snapshot.input_request.kind is PortableSessionInputKind.TEXT
         ):
-            input_widget.placeholder = snapshot.input_request.prompt
+            input_widget.placeholder = sanitize_terminal_text(
+                snapshot.input_request.prompt,
+                preserve_newlines=False,
+            )
             input_widget.value = ""
             input_widget.display = True
             input_widget.focus()
@@ -747,9 +754,6 @@ class PortableApplicationShell(App[None]):
         self.query_one("#portable-actions", Static).update(
             "Esc Sessions | F4 Logs | F5 Context"
         )
-        if snapshot.status.terminal:
-            self.operation_result = snapshot.result
-
     def _handle_runtime_event(self, event: PortableRuntimeEvent) -> None:
         if event.kind is PortableRuntimeEventKind.CHOICE_REQUESTED:
             self._show_choice(event)
