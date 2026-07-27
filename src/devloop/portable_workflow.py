@@ -39,18 +39,20 @@ from .terminal_text import has_unsafe_terminal_controls
 
 
 PORTABLE_WORKFLOW_SCHEMA = "devloop.portable-workflow/v3"
-# Every earlier schema is rejected outright: there is no migration, no
-# compatibility reader, and no dual-write path.
+PORTABLE_WORKFLOW_SCHEMA_V1 = "devloop.portable-workflow/v1"
+PORTABLE_WORKFLOW_SCHEMA_V2 = "devloop.portable-workflow/v2"
 SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS = (
-    "devloop.portable-workflow/v1",
-    "devloop.portable-workflow/v2",
+    PORTABLE_WORKFLOW_SCHEMA_V1,
+    PORTABLE_WORKFLOW_SCHEMA_V2,
 )
 PORTABLE_WORKFLOW_FIELDS = frozenset({"schema", "start_step_id", "steps"})
 REWORK_INPUT_KEY = "__rework__"
 STEP_EXECUTION_SETTINGS_KEY = "execution_settings"
+LEGACY_CODEX_SETTINGS_KEY = "codex_settings"
 STEP_EXECUTION_SETTINGS_FIELDS = frozenset(
     {"backend", "model", "reasoning_effort", "fast"}
 )
+LEGACY_CODEX_SETTINGS_FIELDS = STEP_EXECUTION_SETTINGS_FIELDS - {"backend"}
 EXECUTION_BUDGET_FIELDS = frozenset(
     {"timeout_seconds", "checkpoint_seconds"}
 )
@@ -61,8 +63,8 @@ DEFAULT_EXECUTION_BACKEND = ExecutionBackendId.CODEX_CLI
 class SupersededWorkflowSchemaError(ValueError):
     """A portable workflow document declares a schema Dev Loop no longer reads.
 
-    Callers add the remedy that fits their document: a saved Workflow Default is
-    recreated in `/options`, while an unfinished Workflow Run cannot be resumed.
+    Callers either apply an explicit compatibility path or add the remedy that
+    fits their document.
     """
 
     def __init__(self, found_schema: Any) -> None:
@@ -70,8 +72,7 @@ class SupersededWorkflowSchemaError(ValueError):
         super().__init__(
             f"Portable workflow schema {found_schema!r} is superseded by "
             f"{PORTABLE_WORKFLOW_SCHEMA!r}, which records an Execution Backend "
-            "for every agent-backed Workflow Step. Dev Loop does not migrate "
-            "earlier schema versions."
+            "for every agent-backed Workflow Step."
         )
 
 
@@ -780,7 +781,7 @@ def refresh_resumable_execution_preferences(
     workflow: WorkflowDefinition,
     preferred_workflow: WorkflowDefinition,
 ) -> WorkflowDefinition:
-    """Refresh settings that are safe to adopt before a resumed attempt starts."""
+    """Apply matching-step preferences without changing the snapshotted graph."""
     preferred_steps = {
         step.instance_id: step
         for step in preferred_workflow.steps
@@ -798,24 +799,14 @@ def _refresh_step_execution_preferences(
 ) -> WorkflowStep:
     if preferred_step is None or preferred_step.component_id != step.component_id:
         return step
-    refreshed = replace(step, capability_profile=preferred_step.capability_profile)
-    if _selects_another_execution_backend(step, preferred_step):
-        # A resumed Workflow Run keeps the Execution Backend its Run Snapshot
-        # recorded, so results stay comparable across passes. Adopting another
-        # backend's model and reasoning effort would also be incoherent.
-        return refreshed
-    return replace(refreshed, execution_settings=preferred_step.execution_settings)
-
-
-def _selects_another_execution_backend(
-    step: WorkflowStep,
-    preferred_step: WorkflowStep,
-) -> bool:
-    snapshotted = step.execution_settings
-    preferred = preferred_step.execution_settings
-    if snapshotted is None or preferred is None:
-        return False
-    return preferred.backend is not snapshotted.backend
+    return replace(
+        step,
+        display_name=preferred_step.display_name,
+        execution_budget=preferred_step.execution_budget,
+        capability_profile=preferred_step.capability_profile,
+        execution_settings=preferred_step.execution_settings,
+        guidance=preferred_step.guidance,
+    )
 
 
 @dataclass(frozen=True)
@@ -1365,6 +1356,60 @@ def canonical_workflow_document_hash(document: Mapping[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def migrate_portable_workflow_v2_document(
+    document: Mapping[str, Any],
+    catalog: PortableStepComponentCatalog,
+) -> dict[str, Any]:
+    """Upgrade the Codex-only v2 workflow document to the typed v3 backend."""
+    if document.get("schema") != PORTABLE_WORKFLOW_SCHEMA_V2:
+        raise ValueError(
+            f"Expected workflow schema {PORTABLE_WORKFLOW_SCHEMA_V2!r} for migration."
+        )
+    raw_steps = document.get("steps")
+    if not isinstance(raw_steps, list):
+        raise ValueError("Portable workflow steps must be a list for migration.")
+
+    migrated_steps: list[dict[str, Any]] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, Mapping):
+            raise ValueError("Each portable workflow step must be an object.")
+        migrated_step = dict(raw_step)
+        component = catalog.resolve(StepComponentId(raw_step.get("component_id")))
+        if (
+            LEGACY_CODEX_SETTINGS_KEY in migrated_step
+            and STEP_EXECUTION_SETTINGS_KEY in migrated_step
+        ):
+            raise ValueError(
+                "Schema v2 Workflow Steps cannot contain both Codex Settings and "
+                "Step Execution Settings."
+            )
+        raw_settings = migrated_step.pop(LEGACY_CODEX_SETTINGS_KEY, None)
+        if raw_settings is None and component.is_agent_backed:
+            raise ValueError(
+                "A schema v2 agent-backed Workflow Step requires Codex Settings."
+            )
+        if raw_settings is not None:
+            if not isinstance(raw_settings, Mapping):
+                raise ValueError("Schema v2 Codex Settings must be an object.")
+            unknown_fields = set(raw_settings) - LEGACY_CODEX_SETTINGS_FIELDS
+            if unknown_fields:
+                raise ValueError(
+                    "Unsupported schema v2 Codex Settings fields: "
+                    f"{sorted(unknown_fields)}"
+                )
+            migrated_step[STEP_EXECUTION_SETTINGS_KEY] = {
+                "backend": DEFAULT_EXECUTION_BACKEND.value,
+                **raw_settings,
+            }
+        migrated_steps.append(migrated_step)
+
+    return {
+        **document,
+        "schema": PORTABLE_WORKFLOW_SCHEMA,
+        "steps": migrated_steps,
+    }
 
 
 def load_portable_workflow(

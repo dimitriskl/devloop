@@ -1036,6 +1036,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
             selection,
             state_path,
             current_workflow=current_workflow,
+            current_run_issues_index=artifacts.issues_index,
             component_catalog=mock.ANY,
             catalog_access=mock.ANY,
         )
@@ -1578,7 +1579,7 @@ class PlanStateTests(unittest.TestCase):
         self.assertIn("New display name:", render.call_args.args[0])
         read_prompt.assert_called_once_with("> ")
 
-    def test_active_options_edits_future_runs_without_mutating_the_run_snapshot(self) -> None:
+    def test_active_options_applies_preferences_to_unfinished_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             issues_index = root / "feature-issues.md"
@@ -1596,7 +1597,6 @@ class PlanStateTests(unittest.TestCase):
                 "current_pass": 3,
             }
             writer.flush()
-            before = writer.state_path.read_bytes()
             current_workflow = interactive_runner.load_current_run_workflow(
                 issues_index
             )
@@ -1615,16 +1615,26 @@ class PlanStateTests(unittest.TestCase):
                     interactive_runner.catalog_module.Selection.defaults(),
                     state_path,
                     current_workflow=current_workflow,
+                    current_run_issues_index=issues_index,
                 )
 
             stored = WorkflowDefaultStore(state_path, catalog).load()
-            after = writer.state_path.read_bytes()
+            refreshed = LoopStateWriter(issues_index)
 
         self.assertIn("Current Run hash", output.getvalue())
-        self.assertEqual(before, after)
         self.assertEqual(
             stored.step(SECURITY_REVIEW_STEP_ID).display_name,
             "Next Run Review",
+        )
+        self.assertEqual(
+            refreshed.resolved_workflow(catalog)
+            .step(SECURITY_REVIEW_STEP_ID)
+            .display_name,
+            "Next Run Review",
+        )
+        self.assertEqual(
+            refreshed.state["issues"]["0001"]["current_step_instance_id"],
+            str(SECURITY_REVIEW_STEP_ID),
         )
 
     def test_cancel_discards_staged_capability_and_workflow_changes(self) -> None:

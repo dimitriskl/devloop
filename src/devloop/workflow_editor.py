@@ -1116,6 +1116,8 @@ class _WorkflowEditorSession:
 
         portable_runtime = active_portable_runtime()
         assert portable_runtime is not None
+        if self._default_recovery_state is not WorkflowDefaultRecoveryState.NORMAL:
+            return self._read_application_recovery_command()
         originally_selected_step_id = self._selected_step_id()
         workflow_steps = self._viewed_workflow().steps
         selected_position = next(
@@ -1153,6 +1155,49 @@ class _WorkflowEditorSession:
                 return self._read_command(self._prompt()).strip()
             return _APPLICATION_SELECTION_COMMAND
         return command
+
+    def _read_application_recovery_command(self) -> str:
+        from .portable_runtime import active_portable_runtime
+
+        portable_runtime = active_portable_runtime()
+        assert portable_runtime is not None
+        if self._default_recovery_state is WorkflowDefaultRecoveryState.RESET_REQUIRED:
+            options = (
+                ("reset-workflow", "Reset to the built-in Workflow Default"),
+                ("cancel", "Cancel without changing the stored configuration"),
+            )
+            default_key = "reset-workflow"
+        else:
+            options = (
+                ("apply", "Apply the prepared Workflow Default"),
+                ("cancel", "Cancel without changing the stored configuration"),
+            )
+            default_key = "apply"
+        return portable_runtime.choose(
+            options,
+            default_key=default_key,
+            cancel_key="cancel",
+            render=lambda _command: self._render_application_recovery_detail(),
+            shortcuts={"f2": "apply"}
+            if self._default_recovery_state is WorkflowDefaultRecoveryState.APPLY_READY
+            else None,
+        )
+
+    def _render_application_recovery_detail(self) -> None:
+        from .portable_runtime import active_portable_runtime
+
+        portable_runtime = active_portable_runtime()
+        assert portable_runtime is not None
+        portable_runtime.show_screen(
+            render_workflow_default_recovery(
+                self._default_recovery_error or "The stored default is invalid.",
+                reset_applied=(
+                    self._default_recovery_state
+                    is WorkflowDefaultRecoveryState.APPLY_READY
+                ),
+                terminal_width=self._terminal_width,
+            )
+        )
 
     def _preview_application_step(self, command: str) -> None:
         raw_position = command.removeprefix(_APPLICATION_STEP_PREFIX)
@@ -1224,8 +1269,8 @@ class _WorkflowEditorSession:
             lines.extend(
                 (
                     "",
-                    "Resume: capabilities refresh; model, effort, Fast only if the "
-                    "Execution Backend matches.",
+                    "Apply: matching steps in unfinished runs adopt all preferences, "
+                    "including the Execution Backend.",
                 )
             )
         if self._notice:
@@ -2766,9 +2811,9 @@ class _WorkflowEditorSession:
             self._message(f"Cannot apply workflow: {error}")
             return None
         self._message(
-            "Workflow default applied. Resume: capabilities refresh; model, "
-            "effort, Fast only if the Execution Backend matches. Structural "
-            "changes apply to new runs."
+            "Workflow default applied. Matching steps in unfinished runs adopt "
+            "all preferences, including the Execution Backend. Running attempts "
+            "are unchanged. Structural changes apply to new runs."
         )
         return EditorResult.APPLIED
 
@@ -2985,8 +3030,8 @@ def render_workflow_editor(
         )
         if scope is EditorScope.FUTURE_RUNS:
             header.append(
-                "Resume: capabilities refresh; model, effort, Fast only if the "
-                "Execution Backend matches"
+                "Apply: unfinished runs adopt all matching-step preferences, "
+                "including the Execution Backend"
             )
     if notice:
         header.append(f"Status: {notice}")

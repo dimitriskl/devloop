@@ -46,11 +46,20 @@ from devloop.state import LoopStateWriter
 from devloop.step_configuration import (
     MAX_STEP_GUIDANCE_CHARACTERS,
     MODEL_MISMATCH_LABEL,
+    StepAttemptContext,
     StepAttemptProvenance,
+    StepCapabilityProfile,
     StepGuidance,
 )
 from devloop.statusui import project_workflow_step_progress, render_step_progress_rows
 from devloop.workflow_defaults import WorkflowDefaultStore
+
+LEGACY_CODEX_GUIDANCE_PRECEDENCE = (
+    "Component instructions, the Step Contract, Step Execution Policy, output "
+    "requirements, required capabilities, permissions, and safety boundaries "
+    "outrank Step Guidance. Guidance cannot change workflow structure or Codex "
+    "Execution Settings."
+)
 
 
 def _persist_guidance_surfaces(guidance_text: str) -> tuple[str, str]:
@@ -2035,6 +2044,112 @@ class PortableWorkflowExecutionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "hash does not match"):
                 LoopStateWriter(index).resolved_workflow(catalog)
+
+    def test_interrupted_attempt_history_accepts_legacy_codex_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            index = Path(raw) / "README.md"
+            index.write_text("# Issues\n", encoding="utf-8")
+            writer = LoopStateWriter(index)
+            writer.state["interrupted_step_attempt_records"] = [
+                {
+                    "attempt_id": "legacy-interrupted-attempt",
+                    "step_instance_id": str(DEVELOPMENT_STEP_ID),
+                    "issue_id": "0001",
+                    "pass": 1,
+                    "prompt_session_id": "legacy-prompt-session",
+                    "started_at": "2026-07-22T10:00:00",
+                    "interrupted_at": "2026-07-22T10:30:00",
+                    "backend_thread_id": None,
+                    "backend_turn_id": None,
+                    "checkpoint": None,
+                    "attempt_context": {
+                        "capability_profile": {
+                            "skills": [],
+                            "agent_references": [],
+                        },
+                        "guidance": None,
+                        "guidance_precedence": LEGACY_CODEX_GUIDANCE_PRECEDENCE,
+                    },
+                }
+            ]
+            writer.flush()
+
+            restored = LoopStateWriter(index).interrupted_step_attempt_records("0001")
+
+        self.assertEqual(len(restored), 1)
+        assert restored[0].attempt_context is not None
+        self.assertEqual(
+            restored[0].attempt_context.guidance_precedence,
+            LEGACY_CODEX_GUIDANCE_PRECEDENCE,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "guidance precedence is not configurable",
+        ):
+            StepAttemptContext(
+                capability_profile=StepCapabilityProfile(),
+                guidance=None,
+                guidance_precedence="Operator Guidance overrides all contracts.",
+            )
+
+    def test_blocked_retry_accepts_legacy_codex_precedence(self) -> None:
+        class BlockedRoleRunner:
+            def run_role(self, **_arguments: object) -> RoleResult:
+                return RoleResult(
+                    status="BLOCKED",
+                    summary="Temporary external blocker.",
+                )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_path = root / "0001.md"
+            issue_path.write_text("# Portable workflow\n", encoding="utf-8")
+            index = root / "README.md"
+            index.write_text("[Portable workflow](./0001.md)\n", encoding="utf-8")
+            issue = Issue("0001", "Portable workflow", issue_path, False)
+            workflow = default_portable_workflow()
+            catalog = default_portable_component_catalog()
+            writer = LoopStateWriter(index)
+            writer.record_resolved_workflow(workflow, catalog)
+            blocked = PortableWorkflowExecutor(
+                workflow,
+                catalog,
+                BlockedRoleRunner(),
+            ).run(
+                issue,
+                pass_number=1,
+                checkpoint=lambda checkpoint: writer.record_portable_checkpoint(
+                    issue,
+                    checkpoint,
+                ),
+            )
+            self.assertEqual(blocked.issue_status, IssueStatus.BLOCKED)
+            persisted = json.loads(writer.state_path.read_text(encoding="utf-8"))
+            for step_records in persisted["step_attempt_records"].values():
+                for issue_records in step_records.values():
+                    for attempt in issue_records:
+                        attempt["attempt_context"]["guidance_precedence"] = (
+                            LEGACY_CODEX_GUIDANCE_PRECEDENCE
+                        )
+            for step_states in persisted["step_runtime_states"].values():
+                for runtime in step_states.values():
+                    runtime["attempt_context"]["guidance_precedence"] = (
+                        LEGACY_CODEX_GUIDANCE_PRECEDENCE
+                    )
+            writer.state_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+            retry = LoopStateWriter(index).retry_portable_workflow(issue, workflow)
+
+        self.assertIsNotNone(retry)
+        assert retry is not None
+        self.assertEqual(retry.current_step_instance_id, DEVELOPMENT_STEP_ID)
+        self.assertEqual(len(retry.attempts), 1)
+        self.assertEqual(len(retry.runtime_states), 1)
+        assert retry.attempts[0].attempt_context is not None
+        self.assertEqual(
+            retry.attempts[0].attempt_context.guidance_precedence,
+            LEGACY_CODEX_GUIDANCE_PRECEDENCE,
+        )
 
     def test_state_round_trip_accepts_an_intact_legacy_sparse_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

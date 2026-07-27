@@ -25,10 +25,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     args = parser.parse_args()
-    wheels = tuple(args.dist.glob("devloop_codexcli-0.1.0-*.whl"))
-    sdists = tuple(args.dist.glob("devloop_codexcli-0.1.0.tar.gz"))
+    wheels = tuple(args.dist.glob("devloop_codexcli-0.2.1-*.whl"))
+    sdists = tuple(args.dist.glob("devloop_codexcli-0.2.1.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
-        raise SystemExit("Expected exactly one v0.1.0 wheel and one v0.1.0 sdist.")
+        raise SystemExit("Expected exactly one v0.2.1 wheel and one v0.2.1 sdist.")
     expected = {wheels[0], sdists[0]}
     release_archives = {
         *args.dist.glob("devloop_codexcli-*.whl"),
@@ -40,8 +40,8 @@ def main() -> int:
     wheel = wheels[0]
     metadata = _read_wheel(wheel, ".dist-info/METADATA")
     entry_points = _read_wheel(wheel, ".dist-info/entry_points.txt")
-    if "Version: 0.1.0" not in metadata:
-        raise SystemExit("Wheel metadata does not identify v0.1.0.")
+    if "Version: 0.2.1" not in metadata:
+        raise SystemExit("Wheel metadata does not identify v0.2.1.")
     forbidden_metadata = ("devloop-plan", "install more from GitHub")
     if any(token in metadata for token in forbidden_metadata):
         raise SystemExit("Wheel metadata contains legacy bundle instructions.")

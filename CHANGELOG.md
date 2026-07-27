@@ -2,27 +2,44 @@
 
 ## Unreleased
 
+- Applying Workflow preferences while inspecting an unfinished Current Run now
+  replaces all non-structural preferences on matching steps, including switches
+  between Codex CLI and Claude Code. Existing issue cursors and attempt history
+  are preserved, running attempts are unchanged, and subsequent attempts use the
+  applied backend and settings.
+
+## v0.2.1 - 2026-07-27
+
 ### Breaking: portable workflow schema `devloop.portable-workflow/v3`
 
 Every agent-backed Workflow Step now persists an Execution Backend alongside its
 model, reasoning effort, and Fast preference. The per-step settings type is
 Step Execution Settings, persisted under the step's `execution_settings` key, and
-the portable workflow schema is `devloop.portable-workflow/v3`. Schemas v1 and v2
-are both rejected explicitly; there is no migration, compatibility reader, or
-dual-write path. Finish in-flight work before upgrading.
+the portable workflow schema is `devloop.portable-workflow/v3`. Schema v1 is
+rejected explicitly. Saved v2 Workflow Defaults must be recreated, while resolved
+v2 Workflow Runs are migrated safely in place after their stored workflow hash is
+verified.
 
 - **A saved Workflow Default created before this change must be recreated.**
   Open `/options`, choose `reset-workflow`, then `apply`, and reapply your
   per-step choices.
-- **An unfinished Workflow Run created before this change cannot be resumed.**
-  Its PRD-local `*.loop.state.json` holds a v2 resolved workflow. Finish the run
-  with the previous version, or delete that loop-state file to start the PRD
-  again from its first Workflow Step. Repository changes are untouched.
+- **An unfinished Workflow Run created before this change is migrated on resume.**
+  Its PRD-local `*.loop.state.json` keeps the current Issue, Workflow Step, pass,
+  attempt history, and budgets while each legacy Codex setting gains the explicit
+  Codex CLI Execution Backend required by v3. Hash mismatches or incomplete legacy
+  settings fail closed without changing the state file.
 
 Both are reported as actionable messages naming the remedy, not stack traces.
 
 Also in this change:
 
+- Ctrl+C now stops the active portable operation, releases blocked interaction
+  waits, terminates owned backend process trees, and exits the full-screen
+  application with status 130.
+- Historical Step Attempt Records using the former Codex-specific
+  guidance-precedence wording remain readable when an unfinished run resumes.
+  Their recorded evidence is preserved, while unknown precedence values still
+  fail closed.
 - Enabling Fast is now rejected with a clear message when the selected model
   advertises no Fast support, instead of being accepted and ignored.
 - The `/options` Selection Preview shows each Workflow Step's Execution Backend

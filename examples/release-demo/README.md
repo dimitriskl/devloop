@@ -1,4 +1,4 @@
-# Real CodexCLI v0.1.0 Demonstration
+# Real CodexCLI v0.2.1 Demonstration
 
 This sample contains no credentials and uses no fake or simulated backend. The
 scripts create a disposable Git repository under `.release-demo/`, run doctor,

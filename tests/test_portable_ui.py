@@ -291,6 +291,42 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.operation_result, 130)
         terminate_processes.assert_called_once_with()
 
+    async def test_ctrl_c_stops_the_worker_and_exits_the_application(self) -> None:
+        bridge = PortableRuntimeBridge()
+        operation_finished = threading.Event()
+
+        def operation() -> int:
+            try:
+                bridge.choose(
+                    (("continue", "Continue"), ("quit", "Quit")),
+                    default_key="continue",
+                    cancel_key="quit",
+                    render=lambda _key: None,
+                )
+                return 0
+            finally:
+                operation_finished.set()
+
+        app = PortableApplicationShell(bridge, operation)
+        with mock.patch(
+            "devloop.portable_ui.app.terminate_active_process_trees",
+        ) as terminate_processes:
+            async with app.run_test(size=(100, 30)) as pilot:
+                menu = app.query_one("#portable-navigation", OptionList)
+                for _ in range(20):
+                    await pilot.pause()
+                    if menu.option_count == 2:
+                        break
+
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+
+                self.assertFalse(app.is_running)
+
+        self.assertTrue(operation_finished.wait(timeout=1))
+        self.assertEqual(app.operation_result, 130)
+        terminate_processes.assert_called_once_with()
+
     async def test_help_and_logs_open_inside_the_application(self) -> None:
         app = PortableApplicationShell(PortableRuntimeBridge(), lambda: 0)
         async with app.run_test(size=(100, 30)) as pilot:

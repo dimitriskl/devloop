@@ -26,7 +26,7 @@ def main() -> int:
     linux = _load_manifest(evidence_root / "linux-release.json")
     _validate_platform_pair(root, windows, linux)
     demonstration = _demonstration(evidence_root / "demonstration.json", root)
-    notes = (root / "docs" / "release-notes-v0.1.0.md").read_text(encoding="utf-8")
+    notes = (root / "docs" / "release-notes-v0.2.1.md").read_text(encoding="utf-8")
     if not args.allow_pending_notes and "PENDING" in notes:
         raise SystemExit("Release notes still contain PENDING required evidence.")
     payload = {
@@ -97,7 +97,7 @@ def _validate_platform_pair(
         raise SystemExit("Linux release evidence has the wrong platform identity.")
     actual = {
         f"{path.name}:{hashlib.sha256(path.read_bytes()).hexdigest()}"
-        for path in (root / "dist").glob("devloop_codexcli-0.1.0*")
+        for path in (root / "dist").glob("devloop_codexcli-0.2.1*")
         if path.is_file()
     }
     if actual != set(windows.identity.artifact_hashes):

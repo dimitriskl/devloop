@@ -7,14 +7,17 @@ domain, execution, persistence, UI, or workflow packages.
 
 ## Contracts And Ownership
 
-Portable workflow documents use only `devloop.portable-workflow/v3`. The loader
-rejects every earlier schema explicitly — both v1 and v2 — through
-`SupersededWorkflowSchemaError`; there is no migration, compatibility reader, or
-dual-write path. Each Workflow Step is a UUIDv4-keyed instance with a unique
-display name, an open Step Component ID, component-owned scope and ports,
-explicit Outcome Transitions, typed Port Bindings, Step Execution Settings
-when applicable, an independent Execution Budget, capabilities, and optional
-bounded Step Guidance.
+Portable workflow documents use only `devloop.portable-workflow/v3`. The strict
+loader rejects earlier schemas through `SupersededWorkflowSchemaError`. At the
+run-state boundary, `state.py` provides one narrow compatibility path for a
+hash-valid v2 resolved workflow: it converts the formerly Codex-only settings
+to Step Execution Settings with `CODEX_CLI` as their explicit backend, validates
+the v3 result, re-hashes it, records a migration event, and preserves the run's
+issue and attempt state. User Workflow Defaults and v1 runs remain fail-closed.
+Each Workflow Step is a UUIDv4-keyed instance with a unique display name, an
+open Step Component ID, component-owned scope and ports, explicit Outcome
+Transitions, typed Port Bindings, Step Execution Settings when applicable, an
+independent Execution Budget, capabilities, and optional bounded Step Guidance.
 
 Step Execution Settings are persisted under the step's `execution_settings` key
 and carry a required `backend` naming one member of the closed
@@ -28,12 +31,12 @@ Component Execution Defaults are backend-parameterised: every built-in role
 supplies defaults for every backend, and a new Workflow Step starts on
 `DEFAULT_EXECUTION_BACKEND`.
 
-Each superseded-schema rejection is turned into an actionable operator message
-at the boundary that owns the document. `workflow_defaults.py` states that the
+Each unsupported-schema rejection is turned into an actionable operator message
+at the boundary that owns the document. `workflow_defaults.py` states that a
 saved Workflow Default must be recreated in `/options` with `reset-workflow`
 then `apply`, and the Workflow Editor opens its fail-closed recovery mode.
-`state.py` states that the unfinished Workflow Run cannot be resumed and names
-its PRD-local loop-state file. Neither path surfaces a traceback.
+`state.py` migrates a valid v2 run automatically; it rejects v1 or malformed
+state and names the PRD-local loop-state file. Neither path surfaces a traceback.
 
 `portable_workflow.py` owns the serialization contract, graph and binding
 validation, execution, rework routing, and typed attempt records.
@@ -86,14 +89,15 @@ Tests and the CLI use the same interface.
 A new run validates and snapshots the current User Workflow Default before its
 first attempt. Once `resolved_workflow` and `resolved_workflow_hash` exist,
 reruns preserve the graph, Step Instance IDs, component types, bindings,
-budgets, and guidance. Before the next resumed attempt, matching Step Instances
-adopt the latest saved Skills and Agent References, and — only when the saved
-default keeps that step's snapshotted Execution Backend — its model, reasoning
-effort, and Fast preference; the state definition and hash are then replaced
-atomically. The
-Execution Backend is deliberately not adopted: a resumed Workflow Run keeps the
-backend its Run Snapshot recorded, so a saved default naming another backend
-refreshes only that step's capabilities.
+and transitions. Applying the Workflow Default while inspecting a Current Run,
+or resolving that unfinished run again, replaces every non-structural preference
+on matching Step Instances: display name, Execution Backend, model, reasoning
+effort, Fast preference, execution budget, Skills, Agent References, and
+guidance. The state definition and hash are replaced atomically, issue cursors
+and Step Attempt Records are preserved, and the change is recorded as a
+`workflow-preferences-applied` event. An attempt that has already launched keeps
+the settings it started with; subsequent attempts on unfinished Issues use the
+new preferences.
 The editor exposes Current Run as read-only and the Workflow Default as
 editable. A hash mismatch or unknown field stops recovery instead of
 normalizing corrupted state.

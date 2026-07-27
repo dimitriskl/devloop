@@ -143,10 +143,11 @@ execution settings, capabilities, guidance, runtime state, and attempt history.
 
 Press Enter on the development summary to start with the shown defaults. Use
 `/run-options` to adjust this launch before starting, or `/options` to edit the
-User Workflow Default. Capability changes are adopted by matching steps before
-the next resumed attempt; model, reasoning-effort, and Fast changes are adopted
-only when the step keeps the Execution Backend the run snapshotted. None of them
-change an agent turn already running.
+User Workflow Default. Apply replaces every non-structural preference on
+matching steps in the selected unfinished run, including the Execution Backend,
+model, reasoning effort, Fast preference, execution budget, capabilities, and
+guidance. It preserves completed attempt history and cannot change an agent turn
+that is already running. Structural edits apply to new runs.
 
 Inside the Workflow Editor, select an agent-backed step and use `backend` to
 choose its Execution Backend, then `model`, `reasoning`, or `fast` to choose its
@@ -342,16 +343,13 @@ For PRD-folder runs, it also writes:
 - `devloop.status.json`
 
 Each new run stores a resolved `devloop.portable-workflow/v3` definition and
-canonical hash in the JSON state. On rerun, capability preferences for matching
-Workflow Steps refresh atomically before the next attempt. Model,
-reasoning-effort, and Fast preferences refresh only when the saved Workflow
-Default names the same Execution Backend the run snapshotted for that step. When
-it names a different backend, the run keeps its snapshotted backend together
-with that backend's model, reasoning effort, and Fast, so one backend's model is
-never grafted onto another. The graph, bindings, budgets, and guidance remain
-unchanged. The same state keeps generic Step Runtime States and an
-ordered Step Attempt Record for every execution, so duplicate reviews,
-changes-requested rework, interruption, and resume remain inspectable.
+canonical hash in the JSON state. On Apply or rerun, every non-structural
+preference for matching Workflow Steps refreshes atomically before the next
+attempt: Execution Backend, model, reasoning effort, Fast preference, execution
+budget, capabilities, display name, and guidance. The graph and bindings remain
+unchanged. The same state keeps generic Step Runtime States and an ordered Step
+Attempt Record for every execution, so duplicate reviews, changes-requested
+rework, interruption, and resume remain inspectable.
 
 Every Step Attempt Record also carries a `provenance` object recording which
 Execution Backend ran that attempt, the model its Step Execution Settings
@@ -372,10 +370,10 @@ accounting naming different models, and until that is understood a substitution
 must be visible rather than tidied away. The flag is derived from the two
 identifiers rather than stored independently, and loading a state file whose
 recorded flag disagrees with them fails with that message instead of reading the
-attempt back as clean. Portable
-workflow schemas v1 and v2 are intentionally rejected; repair or recreate an old
-local default in `/options` rather than expecting migration or compatibility
-mode. When preflight finds a superseded or malformed User Workflow Default,
+attempt back as clean. Old User Workflow Defaults on schemas v1 and v2 are
+intentionally rejected; repair or recreate an old local default in `/options`.
+A hash-valid v2 Current Run is migrated automatically at the run-state boundary.
+When preflight finds a superseded or malformed User Workflow Default,
 `/options` opens a fail-closed recovery mode instead of loading the rejected
 content as a draft. Use `reset-workflow` and then `apply` to atomically replace
 it with the built-in v3 default. `cancel` leaves the stored configuration
@@ -384,24 +382,24 @@ unchanged.
 ### Breaking change: schema v3 records an Execution Backend
 
 Schema v3 adds a required Execution Backend to every agent-backed Workflow
-Step's Step Execution Settings, so it is not compatible with v2. There is no
-migration. Two consequences apply the first time you run this version:
+Step's Step Execution Settings. Two consequences apply the first time you run
+this version:
 
 - A saved Workflow Default created before this change is rejected and must be
   recreated. Open `/options`, choose `reset-workflow`, then `apply`. Reapply any
   per-step model, reasoning-effort, Fast, budget, capability, and guidance
   choices you had made.
-- An unfinished Workflow Run created before this change cannot be resumed,
-  because its PRD-local `*.loop.state.json` holds a v2 resolved workflow. Finish
-  that run with the previous Dev Loop version before upgrading, or delete its
-  loop-state file to start the PRD again from its first Workflow Step. Your
-  repository changes are untouched either way.
+- An unfinished Workflow Run with a valid v2 snapshot is migrated in place.
+  Its Codex-only settings become `CODEX_CLI` Step Execution Settings, its
+  workflow hash is replaced, and a migration event is recorded. Issue state,
+  attempt history, and the exact resume cursor remain unchanged. V1, corrupt,
+  or malformed snapshots still fail closed.
 
-Both cases report an actionable message naming the remedy rather than failing
-with a stack trace. Existing Codex-backed Workflow Steps behave exactly as
-before once the default is recreated: the Execution Backend is displayed in the
-`/options` Selection Preview, and the `backend` action changes it for any
-agent-backed Workflow Step in the editable Workflow Default scope.
+Both cases are handled without a stack trace. Existing Codex-backed Workflow
+Steps behave exactly as before once the default is recreated or the run is
+migrated: the Execution Backend is displayed in the `/options` Selection
+Preview, and the `backend` action changes it for any agent-backed Workflow Step
+in the editable Workflow Default scope.
 
 Dependency scheduler state is stored in the same JSON file. It includes ready
 and waiting projections, normal attempts, per-issue additional-pass counters,

@@ -32,7 +32,7 @@ if [ "${DEVLOOP_GATE_CAPTURE:-0}" != "1" ]; then
   if [ "$status" -ne 0 ]; then result=FAILED; fi
   set --
   if [ "$tier" = "release" ]; then
-    for artifact in dist/devloop_codexcli-0.1.0-*.whl dist/devloop_codexcli-0.1.0.tar.gz; do
+    for artifact in dist/devloop_codexcli-0.2.1-*.whl dist/devloop_codexcli-0.2.1.tar.gz; do
       if [ -f "$artifact" ]; then set -- "$@" --artifact "$artifact"; fi
     done
   fi

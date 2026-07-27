@@ -5,10 +5,10 @@ Installation, operation, commands, parameters, recovery, and troubleshooting
 | Document | Value |
 | --- | --- |
 | Product | Dev Loop CodexCLI |
-| Product version | v0.1.0 |
-| Guide version | 1.1 |
-| Last updated | 15 July 2026 |
-| Implementation baseline | `origin/main` at `3f56dbf` |
+| Product version | v0.2.1 |
+| Guide version | 1.2 |
+| Last updated | 27 July 2026 |
+| Release commit | PENDING |
 
 > Scope: This guide covers only the separately installed `codexcli` Textual
 > application and the companion `codexcli-gate` evidence command. `codexcli` is
@@ -120,8 +120,8 @@ Both methods install the `devloop-codexcli` package and expose the interactive `
 Use the wheel or source archive supplied with the release. Examples:
 
 ```text
-uv tool install ./dist/devloop_codexcli-0.1.0-py3-none-any.whl
-pipx install ./dist/devloop_codexcli-0.1.0-py3-none-any.whl
+uv tool install ./dist/devloop_codexcli-0.2.1-py3-none-any.whl
+pipx install ./dist/devloop_codexcli-0.2.1-py3-none-any.whl
 ```
 
 ### 3.3 Reinstall after an update
@@ -258,7 +258,7 @@ Branch: devloop/<feature-slug>
 Path:   <repository-parent>/worktrees/<repository-name>-<feature-slug>
 ```
 
-Review the path, branch, and base commit in the UI before selecting a choice. In v0.1.0, the proposed worktree path must not already exist.
+Review the path, branch, and base commit in the UI before selecting a choice. In v0.2.1, the proposed worktree path must not already exist.
 
 Before development begins, CodexCLI runs a permission preflight against the exact canonical workspace root. The parent process proves nested writes, directory enumeration, file hashing, bounded test execution, and clean Git inspection; the real App Server must then prove it can operate within the same workspace boundary. Temporary probe files are removed. If the preflight fails, development does not start. Correct the reported filesystem, Git, model, approval, or Windows ACL issue and choose the workspace again.
 
@@ -320,7 +320,7 @@ codexcli run --repo ~/code/my-project
 codexcli run --help
 ```
 
-### 7.3 Parameters not provided by v0.1.0
+### 7.3 Parameters not provided by v0.2.1
 
 The interactive `codexcli` command does not expose CLI flags for workflow selection, direct run-ID resume, arbitrary model or reasoning values, provider, sandbox, approval policy, worktree path, branch name, retry counts, language, retention, purge, or finalization. Use the contextual UI commands and choices described below. Configure the provider and authentication in Codex CLI, and use `/profile` for CodexCLI's supported component execution profiles.
 
@@ -414,7 +414,7 @@ Valid component IDs are `analysis`, `development`, `code-review`, and `qa`. Vali
 /language zh-Hans
 ```
 
-The default launcher value is `en`. The setting is session-local in v0.1.0, and machine identifiers remain stable English tokens. For predictable generated content, write the feature request and clarifications in the desired language as well.
+The default launcher value is `en`. The setting is session-local in v0.2.1, and machine identifiers remain stable English tokens. For predictable generated content, write the feature request and clarifications in the desired language as well.
 
 `/retry` and `/reset` require a canonical Issue ID. Lowercase input is normalized to uppercase. Valid examples begin with `ISSUE-` and contain at least three digits:
 
@@ -502,7 +502,7 @@ Before choosing a workspace:
 
 Development may modify tracked and untracked files in the selected workspace. Code review is read-only. QA may create ignored build output or run artifacts but must not change source-controlled files.
 
-At completion, publish or integrate the workspace manually. Typical follow-up actions—commit, merge, push, pull request creation, branch deletion, and worktree removal—remain outside CodexCLI v0.1.0.
+At completion, publish or integrate the workspace manually. Typical follow-up actions—commit, merge, push, pull request creation, branch deletion, and worktree removal—remain outside CodexCLI v0.2.1.
 
 ## 12. Runs, Persistence, and Recovery
 
@@ -544,7 +544,7 @@ An in-flight operation interrupted by shutdown becomes `UNKNOWN` and is never re
 - `/runs` lists all runs for the current project.
 - Runs are project-scoped; pointing `--repo` at another repository shows a different registry.
 - Unfinished and completed runs are retained by default.
-- v0.1.0 has no purge command or advanced retention UI.
+- v0.2.1 has no purge command or advanced retention UI.
 - Do not manually edit a run snapshot, event log, lock, or artifact while a run is active.
 
 ## 13. Outputs and File Locations
@@ -579,7 +579,7 @@ The run root creates its own ignore rule so project-local run data is not treate
 | macOS | `~/Library/Application Support/codexcli/` | Same location |
 | Linux | `${XDG_CONFIG_HOME:-~/.config}/codexcli/` | `${XDG_DATA_HOME:-~/.local/share}/codexcli/` |
 
-The main v0.1.0 user configuration file is `capability-profiles.json`.
+The main v0.2.1 user configuration file is `capability-profiles.json`.
 
 ## 14. Security and Operational Boundaries
 
@@ -656,7 +656,7 @@ git -C /path/to/repository worktree list
 git -C /path/to/repository branch --list "devloop/*"
 ```
 
-The v0.1.0 proposal requires a new path and branch. Remove or rename stale resources manually only after confirming they are no longer needed, or choose the current checkout.
+The v0.2.1 proposal requires a new path and branch. Remove or rename stale resources manually only after confirming they are no longer needed, or choose the current checkout.
 
 ### 15.8 A run was interrupted
 
@@ -699,13 +699,13 @@ For normal release verification, use `install/run-verification-tier.sh` or `inst
 ## 16. Known Limitations
 
 - Third-party executable Step Component installation is deferred.
-- GitHub installation of Skills or Agent References is not available inside CodexCLI v0.1.0.
+- GitHub installation of Skills or Agent References is not available inside CodexCLI v0.2.1.
 - Legacy PRDs, issue packs, sessions, and run state are not imported or migrated.
 - Scheduling is sequential in one selected workspace.
 - The interactive `codexcli` CLI exposes only `doctor`, `run`, `--repo`, and help; component profiles are selected in the application, and advanced workflow flags are not implemented. `codexcli-gate` is a separate evidence-recording executable.
 - Advanced retention and purge controls are deferred.
 - Merge, push, pull request creation, branch deletion, and worktree removal are manual.
-- The Composer exposes the verified controls in Section 9; `@` file search and attachment commands are not part of the v0.1.0 user interface.
+- The Composer exposes the verified controls in Section 9; `@` file search and attachment commands are not part of the v0.2.1 user interface.
 - Content-language selection is session-local; machine identifiers and protocol tokens remain English.
 - Terminal rendering depends on the terminal's Unicode, font, width, and input-method support.
 

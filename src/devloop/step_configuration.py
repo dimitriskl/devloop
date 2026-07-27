@@ -19,6 +19,22 @@ STEP_GUIDANCE_PRECEDENCE = (
     "outrank Step Guidance. Guidance cannot change workflow structure or Step "
     "Execution Settings."
 )
+# Attempt contexts are immutable evidence. Runs created before execution backends
+# were generalized recorded the former Codex-specific name, so their exact
+# precedence sentence must remain readable without treating arbitrary text as a
+# configurable precedence.
+LEGACY_CODEX_STEP_GUIDANCE_PRECEDENCE = (
+    "Component instructions, the Step Contract, Step Execution Policy, output "
+    "requirements, required capabilities, permissions, and safety boundaries "
+    "outrank Step Guidance. Guidance cannot change workflow structure or Codex "
+    "Execution Settings."
+)
+RECORDED_STEP_GUIDANCE_PRECEDENCES = frozenset(
+    {
+        STEP_GUIDANCE_PRECEDENCE,
+        LEGACY_CODEX_STEP_GUIDANCE_PRECEDENCE,
+    }
+)
 # How a requested-versus-serving model mismatch names itself, identically in the
 # Portable Activity Feed, the Workflow Status Bar, the Workflow Progress
 # Dashboard, Plain Mode and the persisted Step Attempt Record, so one search term
@@ -199,7 +215,7 @@ class StepAttemptContext:
     guidance_precedence: str = STEP_GUIDANCE_PRECEDENCE
 
     def __post_init__(self) -> None:
-        if self.guidance_precedence != STEP_GUIDANCE_PRECEDENCE:
+        if self.guidance_precedence not in RECORDED_STEP_GUIDANCE_PRECEDENCES:
             raise ValueError("Step attempt guidance precedence is not configurable.")
         if self.guidance is not None:
             object.__setattr__(

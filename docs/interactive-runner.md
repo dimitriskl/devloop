@@ -232,18 +232,17 @@ before Apply.
 Use `rename`, `undo`, `reset-step`, or `reset-workflow` for the remaining draft
 actions. `apply` atomically replaces the User Workflow Default; `cancel`
 discards the workflow and capability-selection draft. When unfinished work is
-resumed, capability changes for matching Step Instances are adopted before the
-next attempt; model, reasoning-effort, and Fast changes are adopted only when
-the default keeps that step's snapshotted Execution Backend.
+resumed, every non-structural preference for matching Step Instances is adopted
+before the next attempt, including Execution Backend, model, reasoning effort,
+Fast preference, execution budget, capabilities, display name, and guidance.
 
 When an existing implementation worktree contains loop state, the editor also
 shows its read-only **Current Run** configuration. Enter `current` to inspect
 it and `future` to return to the editable **Workflow Default**. Applying that
-draft does not change a Codex turn already in progress. Stop and rerun to use
-updated Skills or Agent References on the next attempt, and updated model,
-reasoning effort, or Fast when the Execution Backend still matches. Workflow
-structure, bindings, budgets, and guidance remain fixed for the existing run and
-apply only to new runs.
+draft refreshes the selected Current Run immediately but does not change an
+agent turn already in progress. Subsequent attempts on unfinished Issues use the
+new preferences. Workflow structure and bindings remain fixed for the existing
+run and apply only to new runs.
 
 If live catalog discovery or exact-setting validation fails before an attempt,
 the preflight prompt can open `/options`, run `retry-catalog`, and revalidate

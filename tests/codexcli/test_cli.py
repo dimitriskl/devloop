@@ -21,7 +21,7 @@ def test_project_metadata_exposes_the_isolated_codexcli_command() -> None:
         if entry.group == "console_scripts"
     }
 
-    assert installed.version == "0.1.0"
+    assert installed.version == "0.2.1"
     assert installed.metadata["Requires-Python"] == ">=3.10"
     assert scripts["codexcli"] == "devloop.entrypoint:main"
     assert scripts["codexcli-gate"] == "devloop.verification.cli:main"

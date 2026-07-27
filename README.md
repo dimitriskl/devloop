@@ -183,7 +183,7 @@ left pane keeps the selected project, implementation branch, and exact
 checkout/worktree receiving changes visible throughout the run; F5 opens the
 full paths and PRD.
 
-## Separate Optional Application: CodexCLI v0.1.0
+## Separate Optional Application: CodexCLI v0.2.1
 
 The installable hackathon workflow is available as `codexcli`:
 
@@ -196,7 +196,7 @@ codexcli run --repo /path/to/repository
 `pipx install .` is also supported. Codex CLI installation and authentication
 are prerequisites; the real Codex App Server is the only executable backend.
 See `docs/codexcli-quickstart.md` for the five-minute path and
-`docs/release-checklist-v0.1.0.md` for Windows/Linux release gates and known
+`docs/release-checklist-v0.2.1.md` for Windows/Linux release gates and known
 limitations.
 
 The bundle is designed to be copied to a machine that does not already have a
@@ -366,11 +366,12 @@ sensible defaults (all pending issues, a dedicated worktree, the
 self-improvement wiki always on). Type `/run-options` to change the start issue,
 worktree parent path, worktree folder name, or branch first. Type `/options` to
 edit the User Workflow Default and, when resuming an existing implementation
-worktree, inspect its read-only Current Run. Capability changes are adopted
-before the next resumed attempt; model, effort, and Fast changes are adopted
-only when they keep that step's Execution Backend. The active workflow structure
-remains fixed. When a run finishes successfully, the runner asks whether to
-merge the implementation branch or worktree into another branch.
+worktree, inspect its read-only Current Run. Apply replaces all non-structural
+preferences on matching steps in unfinished work, including the Execution
+Backend, model, effort, Fast preference, budget, capabilities, and guidance.
+The active workflow structure and completed attempt history remain fixed. When
+a run finishes successfully, the runner asks whether to merge the implementation
+branch or worktree into another branch.
 
 The final handoff command is equivalent to:
 

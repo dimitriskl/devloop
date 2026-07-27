@@ -27,6 +27,8 @@ from .portable_workflow import (
     DataContractId,
     InterruptedStepAttemptRecord,
     IssueStatus,
+    PORTABLE_WORKFLOW_SCHEMA,
+    PORTABLE_WORKFLOW_SCHEMA_V2,
     PortableStepComponentCatalog,
     PortableWorkflowCheckpoint,
     PortableWorkflowRunResult,
@@ -41,6 +43,7 @@ from .portable_workflow import (
     canonical_workflow_document_hash,
     canonical_workflow_hash,
     load_portable_workflow,
+    migrate_portable_workflow_v2_document,
     parse_issue_status,
     refresh_resumable_execution_preferences,
     step_attempt_record_to_dict,
@@ -141,6 +144,33 @@ class LoopStateWriter:
         try:
             workflow = load_portable_workflow(document, catalog)
         except SupersededWorkflowSchemaError as error:
+            if error.found_schema == PORTABLE_WORKFLOW_SCHEMA_V2:
+                expected_hash = self.state.get("resolved_workflow_hash")
+                actual_hash = canonical_workflow_document_hash(document)
+                if expected_hash != actual_hash:
+                    raise ValueError(
+                        "Resolved portable workflow hash does not match its content."
+                    ) from error
+                migrated_document = migrate_portable_workflow_v2_document(
+                    document,
+                    catalog,
+                )
+                workflow = load_portable_workflow(migrated_document, catalog)
+                validated_document = workflow.to_dict()
+                migrated_hash = canonical_workflow_hash(workflow)
+                self.state["resolved_workflow"] = validated_document
+                self.state["resolved_workflow_hash"] = migrated_hash
+                self.add_event(
+                    "workflow-schema-migrated",
+                    {
+                        "from_schema": PORTABLE_WORKFLOW_SCHEMA_V2,
+                        "to_schema": PORTABLE_WORKFLOW_SCHEMA,
+                        "from_hash": expected_hash,
+                        "to_hash": migrated_hash,
+                    },
+                )
+                self.flush()
+                return workflow
             raise ValueError(
                 f"{error} This unfinished Workflow Run cannot be resumed: its "
                 f"resolved workflow in {self.state_path.name} predates the "
@@ -169,9 +199,48 @@ class LoopStateWriter:
         )
         if refreshed_workflow == current_workflow:
             return current_workflow
+        previous_hash = canonical_workflow_hash(current_workflow)
+        refreshed_steps = {
+            step.instance_id: step
+            for step in refreshed_workflow.steps
+        }
+        changed_step_ids = [
+            str(step.instance_id)
+            for step in current_workflow.steps
+            if refreshed_steps.get(step.instance_id) != step
+        ]
+        backend_changes: list[dict[str, str]] = []
+        for step in current_workflow.steps:
+            refreshed_step = refreshed_steps.get(step.instance_id)
+            current_settings = step.execution_settings
+            refreshed_settings = (
+                refreshed_step.execution_settings
+                if refreshed_step is not None
+                else None
+            )
+            if (
+                current_settings is not None
+                and refreshed_settings is not None
+                and current_settings.backend is not refreshed_settings.backend
+            ):
+                backend_changes.append(
+                    {
+                        "step_instance_id": str(step.instance_id),
+                        "from_backend": current_settings.backend.value,
+                        "to_backend": refreshed_settings.backend.value,
+                    }
+                )
         self.state["resolved_workflow"] = refreshed_workflow.to_dict()
-        self.state["resolved_workflow_hash"] = canonical_workflow_hash(
-            refreshed_workflow
+        refreshed_hash = canonical_workflow_hash(refreshed_workflow)
+        self.state["resolved_workflow_hash"] = refreshed_hash
+        self.add_event(
+            "workflow-preferences-applied",
+            {
+                "from_hash": previous_hash,
+                "to_hash": refreshed_hash,
+                "step_instance_ids": changed_step_ids,
+                "backend_changes": backend_changes,
+            },
         )
         self.flush()
         return refreshed_workflow

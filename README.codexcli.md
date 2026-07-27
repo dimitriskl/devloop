@@ -1,6 +1,6 @@
 # Dev Loop CodexCLI
 
-CodexCLI v0.1.0 is a local, resumable workflow runner for the real Codex App
+CodexCLI v0.2.1 is a local, resumable workflow runner for the real Codex App
 Server. It guides one repository through analysis, workspace preparation,
 development, independent code review, QA, and explicit local finalization.
 
@@ -56,5 +56,5 @@ uv tool install .
 Use the request in `examples/release-demo/feature-request.md`. The script
 creates a disposable Git repository and opens the real workflow against it.
 
-See `docs/codexcli-quickstart.md` and `docs/release-checklist-v0.1.0.md` in the
+See `docs/codexcli-quickstart.md` and `docs/release-checklist-v0.2.1.md` in the
 source repository for setup, troubleshooting, and release verification.

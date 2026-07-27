@@ -321,7 +321,7 @@ class PortableApplicationShell(App[None]):
         Binding("f9", "actions", "Actions", show=False),
         Binding("alt+v", "paste_image", "Paste image", show=False),
         Binding("escape", "back", "Back", show=False),
-        Binding("ctrl+c", "request_stop", "Stop", show=False, priority=True),
+        Binding("ctrl+c", "request_stop", "Stop and Exit", show=False, priority=True),
     ]
 
     def __init__(
@@ -795,7 +795,7 @@ class PortableApplicationShell(App[None]):
         )
         self.query_one("#portable-status", Static).update("WORKING")
         self.query_one("#portable-actions", Static).update(
-            "F1 Help | F4 Logs | F5 Context | Ctrl+C Stop | Esc Status"
+            "F1 Help | F4 Logs | F5 Context | Ctrl+C Stop & Exit | Esc Status"
         )
         self._publish_activity(f"RUNNING · {safe_message}")
 
@@ -820,7 +820,7 @@ class PortableApplicationShell(App[None]):
                 "F4       Captured activity and output\n"
                 "F5       Project, branch, worktree, and PRD context\n"
                 "F9       Focus contextual actions\n"
-                "Ctrl+C   Request a safe stop",
+                "Ctrl+C   Stop the current operation and exit",
             )
         )
 
@@ -885,24 +885,8 @@ class PortableApplicationShell(App[None]):
         self._respond(request_id, "/paste", "Attaching screenshot")
 
     def action_request_stop(self) -> None:
-        if self._active_request_id is not None and self._cancel_key is not None:
-            self.push_screen(
-                PortableTextOverlay(
-                    "Stop Current Interaction",
-                    "Press Esc to keep working.\n\n"
-                    "Use Esc again in the main view to choose the explicit "
-                    "Back or Cancel action safely.",
-                )
-            )
-            return
-        self.push_screen(
-            PortableTextOverlay(
-                "Workflow Is Running",
-                "There is no safe interrupt point at this moment.\n\n"
-                "Dev Loop will keep the terminal application mounted and expose "
-                "a Back, Cancel, or Exit action at the next safe boundary.",
-            )
-        )
+        self._stop_operation()
+        self.exit()
 
 
 def run_portable_application(operation: Callable[[], int]) -> int:

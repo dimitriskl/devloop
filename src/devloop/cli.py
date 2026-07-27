@@ -1549,10 +1549,9 @@ def resolve_run_workflow_with_repair(
             if has_current_snapshot:
                 writer(
                     "The Current Run structure is fixed. /options can update "
-                    "capabilities for the resumed attempt, and model, effort, Fast "
-                    "only if the Execution Backend matches; retry-catalog retries "
-                    "live discovery for every backend this Workflow references; "
-                    "/quit stops the run."
+                    "all matching-step preferences for unfinished work, including "
+                    "the Execution Backend; retry-catalog retries live discovery "
+                    "for every backend this Workflow references; /quit stops the run."
                 )
             else:
                 writer(

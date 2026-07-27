@@ -57,25 +57,24 @@ settings, capabilities, outcomes, and any preserved guidance. Guidance marked
 ## A portable workflow default reports a superseded or malformed schema
 
 Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v3`.
-Both v1 and v2 are rejected explicitly; there is no reader, migration, or
-dual-write path for either. From planning or implementation preflight, open
-`/options`; the editor enters a fail-closed recovery mode and does not load
-rejected content as an editable draft. Choose `reset-workflow` and then `apply`
-to atomically replace the invalid default with the built-in v3 workflow, then
-reapply your per-step choices. Choose `cancel` to leave the stored configuration
-byte-for-byte unchanged. You may instead repair the local JSON outside a
-running Current Run. Malformed UUIDs, duplicate names, unknown Step Types,
-invalid routes, scopes, bindings, and unknown fields fail closed rather than
-being ignored.
+User Workflow Defaults on both v1 and v2 are rejected explicitly. From planning
+or implementation preflight, open `/options`; the editor enters a fail-closed
+recovery mode and does not load rejected content as an editable draft. Choose
+`reset-workflow` and then `apply` to atomically replace the invalid default with
+the built-in v3 workflow, then reapply your per-step choices. Choose `cancel` to
+leave the stored configuration byte-for-byte unchanged. You may instead repair
+the local JSON outside a running Current Run. Malformed UUIDs, duplicate names,
+unknown Step Types, invalid routes, scopes, bindings, and unknown fields fail
+closed rather than being ignored.
 
 ## An unfinished run reports that it cannot be resumed
 
-A Workflow Run started before schema v3 holds a v2 resolved workflow in its
-PRD-local `*.loop.state.json`, which cannot be read. Preflight says so and names
-the state file instead of failing with a stack trace. Either finish that run
-with the previous Dev Loop version, or delete its `*.loop.state.json` to start
-the PRD again from its first Workflow Step. Repository changes already written by
-earlier attempts stay in the workspace.
+A hash-valid Workflow Run on schema v2 is migrated automatically. The migration
+makes its formerly implicit Codex backend explicit, preserves the issue board,
+attempt history, and exact resume cursor, then applies compatible model, effort,
+Fast, and capability preferences from the current Workflow Default. A v1,
+hash-mismatched, or malformed run still fails closed and names its state file
+instead of surfacing a stack trace.
 
 ## Fast reports that the backend advertises no Fast support
 
@@ -93,9 +92,10 @@ authorize a run, for either backend. If preflight names a Step Display Name and
 model, reasoning effort, or Fast setting, edit that exact Workflow Default step
 in `/options` and retry. Dev Loop does not substitute another model, lower
 effort, or disable Fast silently. Capability preferences are adopted before the
-next resumed attempt; model, reasoning-effort, and Fast preferences are adopted
-only when the step keeps its snapshotted Execution Backend. None of them can
-change an agent turn that is already running; stop and rerun first.
+next resumed attempt together with the selected Execution Backend, model,
+reasoning effort, Fast preference, execution budget, and guidance. None of them
+can change an agent turn that is already running; the next attempt on unfinished
+work uses the applied preferences.
 
 If selecting a Claude model is refused, the message is the provider's own: check
 the identifier and whether your account can use that model. The selection is not

@@ -51,8 +51,8 @@ if ($env:DEVLOOP_GATE_CAPTURE -ne "1") {
     if ($Tier -eq "release") {
         Get-ChildItem -LiteralPath "dist" -File -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.Name -like "devloop_codexcli-0.1.0-*.whl" -or
-                $_.Name -eq "devloop_codexcli-0.1.0.tar.gz"
+                $_.Name -like "devloop_codexcli-0.2.1-*.whl" -or
+                $_.Name -eq "devloop_codexcli-0.2.1.tar.gz"
             } |
             ForEach-Object { $arguments += @("--artifact", $_.FullName) }
     }

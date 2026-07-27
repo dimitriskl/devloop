@@ -1,4 +1,4 @@
-# CodexCLI v0.1.0 Five-Minute Quick Start
+# CodexCLI v0.2.1 Five-Minute Quick Start
 
 ## Prerequisites
 
@@ -14,8 +14,8 @@ uv --version
 # or: pipx --version
 ```
 
-Codex App Server is the only executable backend in v0.1.0. Provider and model
-configuration remains in Codex CLI.
+Codex App Server is the only executable backend in CodexCLI v0.2.1. Provider
+and model configuration remains in Codex CLI.
 
 ## Install
 
@@ -78,4 +78,4 @@ worktree.
 - Interrupted work: start `codexcli run`, enter `/resume`, and select the exact
   unfinished run. Unknown in-flight operations are not replayed automatically.
 
-See `docs/release-checklist-v0.1.0.md` for clean-machine and real-backend gates.
+See `docs/release-checklist-v0.2.1.md` for clean-machine and real-backend gates.

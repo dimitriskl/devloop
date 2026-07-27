@@ -116,11 +116,11 @@ running-workflow view appropriate to its arguments and saved state.
 | F4 | Open the filtered log viewer |
 | F5 | Open full project, branch, worktree, and PRD context; a view-specific command such as Add may override it |
 | F9 | Open the complete contextual Actions menu |
-| Ctrl+C | Open the context-aware stop dialog while work is running |
+| Ctrl+C | Stop the current operation and exit the application |
 
-F10 is not required because desktop terminals may reserve it. Exit is an
-explicit launcher/final-view action and may also use Ctrl+Q when no destructive
-operation is pending.
+F10 is not required because desktop terminals may reserve it. Launcher and
+final views retain explicit Exit actions; Ctrl+C is the global immediate
+stop-and-exit path.
 
 ### Choice And Input Rules
 
@@ -171,12 +171,11 @@ actionable result inside the final view rather than a scrolling error block.
   widgets directly.
 - UI actions emit typed intents to a controller. Widgets do not perform
   workflow, Git, state, or Codex operations.
-- Ctrl+C opens a stop dialog instead of terminating the renderer. Available
-  choices reflect what the current operation can safely do.
-- If the terminal delivers Ctrl+C as a process-level interrupt, application
-  teardown releases blocked menu/input waits and terminates owned subprocess
-  trees before asyncio closes its worker executor. The shell prompt therefore
-  returns without the 300-second executor-join warning.
+- Ctrl+C requests application shutdown immediately, releases blocked menu/input
+  waits, terminates owned subprocess trees, and exits with status 130.
+- If the terminal delivers Ctrl+C as a process-level interrupt, the same
+  teardown contract applies before asyncio closes its worker executor. The shell
+  prompt therefore returns without the 300-second executor-join warning.
 - Recoverable failures appear in an error overlay with Retry, Details, Back, or
   Exit actions as appropriate.
 - An unhandled error restores the terminal before reporting one concise startup
@@ -383,7 +382,8 @@ non-secret result logs inside the workspace for inspection.
 5. No raw Codex or command stream writes outside the shell.
 6. F4 exposes complete filtered logs without leaving the application.
 7. Direct devloop invocation uses the same shell and execution view.
-8. Ctrl+C presents safe contextual choices and never leaves a damaged terminal.
+8. Ctrl+C stops the current operation, exits promptly, and never leaves a
+   damaged terminal.
 9. Normal exit returns to the original prompt without dumping the application
    transcript.
 10. --plain and redirected runs remain deterministic and control-sequence free.

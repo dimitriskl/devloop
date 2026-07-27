@@ -372,7 +372,7 @@ def header_xml() -> bytes:
 
 def footer_xml() -> bytes:
     return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:ftr xmlns:w="{W_NS}"><w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="4" w:color="C8D2DC"/></w:pBdr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t xml:space="preserve">Dev Loop v0.1.0  |  Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>'''.encode("utf-8")
+<w:ftr xmlns:w="{W_NS}"><w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="4" w:color="C8D2DC"/></w:pBdr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t xml:space="preserve">Dev Loop v0.2.1  |  Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:rPr><w:color w:val="{MUTED}"/><w:sz w:val="16"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>'''.encode("utf-8")
 
 
 CONTENT_TYPES = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -418,7 +418,7 @@ def core_xml() -> bytes:
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="{CP_NS}" xmlns:dc="{DC_NS}" xmlns:dcterms="{DCTERMS_NS}" xmlns:xsi="{XSI_NS}">
-  <dc:title>CodexCLI User Guide</dc:title><dc:subject>Installation, commands, parameters, recovery, and operation</dc:subject><dc:creator>Dev Loop</dc:creator><cp:lastModifiedBy>Dev Loop</cp:lastModifiedBy><dc:description>Professional user guide for Dev Loop CodexCLI v0.1.0.</dc:description><cp:keywords>CodexCLI, Dev Loop, user guide, installation, parameters</cp:keywords><dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified><cp:revision>1</cp:revision>
+  <dc:title>CodexCLI User Guide</dc:title><dc:subject>Installation, commands, parameters, recovery, and operation</dc:subject><dc:creator>Dev Loop</dc:creator><cp:lastModifiedBy>Dev Loop</cp:lastModifiedBy><dc:description>Professional user guide for Dev Loop CodexCLI v0.2.1.</dc:description><cp:keywords>CodexCLI, Dev Loop, user guide, installation, parameters</cp:keywords><dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified><cp:revision>1</cp:revision>
 </cp:coreProperties>'''.encode("utf-8")
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 import uuid
 from dataclasses import replace
@@ -22,6 +23,11 @@ from devloop.portable_execution_backend import (
     BackendAvailability,
     ExecutionBackendId,
     load_bundled_model_catalog,
+)
+from devloop.portable_runtime import (
+    PortableRuntimeBridge,
+    PortableRuntimeEventKind,
+    portable_runtime_session,
 )
 from devloop.portable_component_catalog import build_portable_component_catalog
 from devloop.portable_workflow import (
@@ -2390,6 +2396,60 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertIn("reset-workflow", rendered)
         self.assertIn("must be reset before Apply", rendered)
 
+    def test_invalid_default_opens_recovery_choices_in_application_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "devloop-plan.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "user_workflow_default": {
+                            "schema": "devloop.portable-workflow/v1",
+                        },
+                        "user_workflow_default_hash": "invalid",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bridge = PortableRuntimeBridge()
+            outcome: list[EditorResult] = []
+
+            def run_editor() -> None:
+                with portable_runtime_session(bridge):
+                    outcome.append(
+                        run_workflow_editor(
+                            path,
+                            read_line=FakeEditor([]).read_line,
+                            write=lambda _: None,
+                            terminal_width=100,
+                        )
+                    )
+
+            worker = threading.Thread(target=run_editor)
+            worker.start()
+            first_event = bridge.next_event(timeout=1)
+            screen_event = bridge.next_event(timeout=1)
+            bridge.respond(first_event.request_id, "cancel")
+            worker.join(timeout=1)
+
+            self.assertIs(
+                first_event.kind,
+                PortableRuntimeEventKind.CHOICE_REQUESTED,
+            )
+            self.assertEqual(
+                tuple(key for key, _label in first_event.options),
+                ("reset-workflow", "cancel"),
+            )
+            self.assertIs(
+                screen_event.kind,
+                PortableRuntimeEventKind.SCREEN_UPDATED,
+            )
+            self.assertIn("recovery mode", screen_event.content)
+            self.assertIn("superseded by", screen_event.content)
+            self.assertNotIn("Workflow Default (editable)", screen_event.content)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcome, [EditorResult.CANCELLED])
+
     def test_current_run_is_read_only_while_workflow_default_remains_editable(
         self,
     ) -> None:
@@ -2432,8 +2492,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Workflow Default (editable)", rendered)
         self.assertIn(
-            "Resume: capabilities refresh; model, effort, Fast only if the "
-            "Execution Backend matches",
+            "Apply: unfinished runs adopt all matching-step preferences, "
+            "including the Execution Backend",
             rendered,
         )
         self.assertIn("Current Run (read-only)", rendered)

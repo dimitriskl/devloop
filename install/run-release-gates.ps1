@@ -53,9 +53,9 @@ if (-not $UseExistingArtifacts) {
     Invoke-Native uv @("build", "--sdist", "--wheel", "--out-dir", "dist")
 }
 Invoke-Native uv @("run", "python", "install/verify-release.py", "--dist", "dist")
-$wheels = @(Get-ChildItem -LiteralPath "dist" -File -Filter "devloop_codexcli-0.1.0-*.whl")
+$wheels = @(Get-ChildItem -LiteralPath "dist" -File -Filter "devloop_codexcli-0.2.1-*.whl")
 if ($wheels.Count -ne 1) {
-    throw "Expected exactly one verified v0.1.0 wheel."
+    throw "Expected exactly one verified v0.2.1 wheel."
 }
 $wheel = $wheels[0]
 $python = (& uv run python -c "import sys; print(sys.executable)") | Select-Object -Last 1
@@ -93,4 +93,4 @@ if ($RealBackend) {
     )
 }
 
-Write-Output "PASS v0.1.0 release gates"
+Write-Output "PASS v0.2.1 release gates"

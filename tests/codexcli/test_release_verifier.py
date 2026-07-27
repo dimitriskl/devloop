@@ -17,15 +17,15 @@ def _write_valid_release_artifacts(
     extra_runtime_file: str | None = None,
     metadata_suffix: str = "",
 ) -> None:
-    wheel = dist / "devloop_codexcli-0.1.0-py3-none-any.whl"
+    wheel = dist / "devloop_codexcli-0.2.1-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
-            "devloop_codexcli-0.1.0.dist-info/METADATA",
-            "Metadata-Version: 2.4\nName: devloop-codexcli\nVersion: 0.1.0\n"
+            "devloop_codexcli-0.2.1.dist-info/METADATA",
+            "Metadata-Version: 2.4\nName: devloop-codexcli\nVersion: 0.2.1\n"
             f"{metadata_suffix}",
         )
         archive.writestr(
-            "devloop_codexcli-0.1.0.dist-info/entry_points.txt",
+            "devloop_codexcli-0.2.1.dist-info/entry_points.txt",
             "[console_scripts]\n"
             "codexcli = devloop.entrypoint:main\n\n"
             "codexcli-gate = devloop.verification.cli:main\n\n"
@@ -35,15 +35,15 @@ def _write_valid_release_artifacts(
         )
         if extra_runtime_file is not None:
             archive.writestr(f"devloop/{extra_runtime_file}", "")
-    sdist = dist / "devloop_codexcli-0.1.0.tar.gz"
+    sdist = dist / "devloop_codexcli-0.2.1.tar.gz"
     with tarfile.open(sdist, "w:gz") as archive:
-        content = b"Metadata-Version: 2.4\nName: devloop-codexcli\nVersion: 0.1.0\n"
-        member = tarfile.TarInfo("devloop_codexcli-0.1.0/PKG-INFO")
+        content = b"Metadata-Version: 2.4\nName: devloop-codexcli\nVersion: 0.2.1\n"
+        member = tarfile.TarInfo("devloop_codexcli-0.2.1/PKG-INFO")
         member.size = len(content)
         archive.addfile(member, io.BytesIO(content))
         if extra_runtime_file is not None:
             runtime_member = tarfile.TarInfo(
-                f"devloop_codexcli-0.1.0/src/devloop/{extra_runtime_file}"
+                f"devloop_codexcli-0.2.1/src/devloop/{extra_runtime_file}"
             )
             runtime_member.size = 0
             archive.addfile(runtime_member, io.BytesIO())

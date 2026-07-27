@@ -30,6 +30,7 @@ from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FINAL_REVIEW_STEP_ID,
     PORTABLE_WORKFLOW_SCHEMA,
+    PORTABLE_WORKFLOW_SCHEMA_V2,
     QA_STEP_ID,
     SECURITY_REVIEW_STEP_ID,
     SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS,
@@ -43,6 +44,7 @@ from devloop.portable_workflow import (
     StepInstanceId,
     StepOutcome,
     StepScope,
+    canonical_workflow_document_hash,
     default_component_execution_defaults,
     default_portable_component_catalog,
     default_portable_workflow,
@@ -417,7 +419,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
         )
         self.assertEqual(restored.to_dict(), document)
 
-    def test_both_prior_schema_versions_are_rejected_with_their_remedy(self) -> None:
+    def test_prior_schema_defaults_and_schema_v1_runs_are_rejected(self) -> None:
         catalog = default_portable_component_catalog()
         self.assertEqual(
             SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS,
@@ -446,6 +448,8 @@ class StepExecutionSettingsTests(unittest.TestCase):
                     ):
                         WorkflowDefaultStore(configuration_path, catalog).load_saved()
 
+            if superseded != SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS[0]:
+                continue
             with self.subTest(schema=superseded, path="run resume"):
                 with tempfile.TemporaryDirectory() as raw:
                     issue_index = Path(raw) / "README.md"
@@ -464,6 +468,169 @@ class StepExecutionSettingsTests(unittest.TestCase):
                         "resumed",
                     ):
                         LoopStateWriter(issue_index).resolved_workflow(catalog)
+
+    def test_schema_v2_run_migrates_and_refreshes_model_without_losing_cursor(
+        self,
+    ) -> None:
+        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_index = root / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            configuration_path = root / "devloop-plan.json"
+
+            legacy_document = default_portable_workflow().to_dict()
+            legacy_document["schema"] = PORTABLE_WORKFLOW_SCHEMA_V2
+            for step in legacy_document["steps"]:
+                settings = step.pop("execution_settings")
+                self.assertEqual(
+                    settings.pop("backend"),
+                    ExecutionBackendId.CODEX_CLI.value,
+                )
+                step["codex_settings"] = settings
+
+            writer = LoopStateWriter(issue_index)
+            writer.state.update(
+                {
+                    "resolved_workflow": legacy_document,
+                    "resolved_workflow_hash": canonical_workflow_document_hash(
+                        legacy_document
+                    ),
+                    "selected_issues": ["0003", "0004"],
+                    "issues": {
+                        "0003": {"status": "BLOCKED", "current_pass": 2},
+                        "0004": {"status": "IN_PROGRESS", "current_pass": 1},
+                    },
+                    "step_runtime_states": {"resume-cursor": {"pass": 2}},
+                    "step_attempt_records": {"existing-attempt": {"kept": True}},
+                }
+            )
+            writer.flush()
+
+            preferred_document = default_portable_workflow().to_dict()
+            development = next(
+                step
+                for step in preferred_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            development["execution_settings"]["model"] = "gpt-5.6-luna"
+            development["execution_settings"]["reasoning_effort"] = "high"
+            WorkflowDefaultStore(configuration_path, catalog).replace(
+                load_portable_workflow(preferred_document, catalog)
+            )
+
+            resolved = cli.resolve_run_workflow(
+                LoopStateWriter(issue_index),
+                catalog,
+                user_workflow_path=configuration_path,
+                model_catalog_loader=self._live_catalog,
+                require_preflight=True,
+            )
+            migrated_state = LoopStateWriter(issue_index).state
+
+        self.assertEqual(
+            resolved.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-luna",
+                "high",
+                FastPreference.OFF,
+            ),
+        )
+        self.assertEqual(
+            migrated_state["resolved_workflow"]["schema"],
+            PORTABLE_WORKFLOW_SCHEMA,
+        )
+        self.assertTrue(
+            all(
+                "codex_settings" not in step
+                for step in migrated_state["resolved_workflow"]["steps"]
+            )
+        )
+        self.assertEqual(
+            migrated_state["resolved_workflow_hash"],
+            canonical_workflow_document_hash(
+                migrated_state["resolved_workflow"]
+            ),
+        )
+        self.assertEqual(migrated_state["selected_issues"], ["0003", "0004"])
+        self.assertEqual(
+            migrated_state["issues"],
+            {
+                "0003": {"status": "BLOCKED", "current_pass": 2},
+                "0004": {"status": "IN_PROGRESS", "current_pass": 1},
+            },
+        )
+        self.assertEqual(
+            migrated_state["step_runtime_states"],
+            {"resume-cursor": {"pass": 2}},
+        )
+        self.assertEqual(
+            migrated_state["step_attempt_records"],
+            {"existing-attempt": {"kept": True}},
+        )
+        self.assertIn(
+            {
+                "from_schema": PORTABLE_WORKFLOW_SCHEMA_V2,
+                "to_schema": PORTABLE_WORKFLOW_SCHEMA,
+            },
+            [
+                {
+                    "from_schema": event.get("from_schema"),
+                    "to_schema": event.get("to_schema"),
+                }
+                for event in migrated_state["events"]
+                if event.get("type") == "workflow-schema-migrated"
+            ],
+        )
+
+    def test_schema_v2_run_migration_rejects_a_hash_mismatch_without_writing(
+        self,
+    ) -> None:
+        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            issue_index = Path(raw) / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            writer = LoopStateWriter(issue_index)
+            writer.record_resolved_workflow(default_portable_workflow(), catalog)
+            writer.state["resolved_workflow"]["schema"] = PORTABLE_WORKFLOW_SCHEMA_V2
+            writer.flush()
+            before = writer.state_path.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                LoopStateWriter(issue_index).resolved_workflow(catalog)
+
+            after = writer.state_path.read_text(encoding="utf-8")
+
+        self.assertEqual(after, before)
+
+    def test_schema_v2_run_migration_rejects_missing_agent_settings(self) -> None:
+        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            issue_index = Path(raw) / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            legacy_document = default_portable_workflow().to_dict()
+            legacy_document["schema"] = PORTABLE_WORKFLOW_SCHEMA_V2
+            for step in legacy_document["steps"]:
+                settings = step.pop("execution_settings")
+                settings.pop("backend")
+                step["codex_settings"] = settings
+            legacy_document["steps"][0].pop("codex_settings")
+
+            writer = LoopStateWriter(issue_index)
+            writer.state["resolved_workflow"] = legacy_document
+            writer.state["resolved_workflow_hash"] = (
+                canonical_workflow_document_hash(legacy_document)
+            )
+            writer.flush()
+            before = writer.state_path.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "requires Codex Settings"):
+                LoopStateWriter(issue_index).resolved_workflow(catalog)
+
+            after = writer.state_path.read_text(encoding="utf-8")
+
+        self.assertEqual(after, before)
 
     def test_prior_schema_rejections_reach_the_operator_without_a_traceback(self) -> None:
         catalog = default_portable_component_catalog()
@@ -498,6 +665,8 @@ class StepExecutionSettingsTests(unittest.TestCase):
                 self.assertIn("superseded by", rendered)
                 self.assertIn("reset-workflow", rendered)
 
+            if superseded != SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS[0]:
+                continue
             with self.subTest(schema=superseded, path="run resume"):
                 with tempfile.TemporaryDirectory() as raw:
                     root = Path(raw)
@@ -570,10 +739,9 @@ class StepExecutionSettingsTests(unittest.TestCase):
             self.assertNotIn(f"schema-{short_version}", rendered)
             self.assertNotIn(f"built-in {short_version}", rendered.lower())
 
-    def test_apply_message_qualifies_a_resumed_refresh_by_execution_backend(
+    def test_apply_message_explains_unfinished_run_preference_replacement(
         self,
     ) -> None:
-        """Apply must not promise a model, effort, or Fast refresh across backends."""
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = Path(raw) / "devloop-plan.json"
             output: list[str] = []
@@ -595,9 +763,9 @@ class StepExecutionSettingsTests(unittest.TestCase):
         self.assertIs(result, EditorResult.APPLIED)
         self.assertEqual(
             applied_message,
-            "Workflow default applied. Resume: capabilities refresh; model, "
-            "effort, Fast only if the Execution Backend matches. Structural "
-            "changes apply to new runs.",
+            "Workflow default applied. Matching steps in unfinished runs adopt "
+            "all preferences, including the Execution Backend. Running attempts "
+            "are unchanged. Structural changes apply to new runs.",
         )
 
     def test_execution_budget_round_trips_independently_from_execution_settings(self) -> None:
@@ -1345,7 +1513,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
         )
         self.assertTrue(all(call["pass_number"] == 3 for call in calls))
 
-    def test_resume_keeps_the_snapshotted_backend_while_refreshing_capabilities(
+    def test_resume_adopts_all_preferred_step_preferences(
         self,
     ) -> None:
         catalog = default_portable_component_catalog()
@@ -1385,6 +1553,15 @@ class StepExecutionSettingsTests(unittest.TestCase):
             "reasoning_effort": "high",
             "fast": "OFF",
         }
+        preferred_development["display_name"] = "Preferred Development"
+        preferred_development["execution_budget"] = {
+            "timeout_seconds": 2400,
+            "checkpoint_seconds": 360,
+        }
+        preferred_development["guidance"] = {
+            "text": "Use the newly applied preferences.",
+            "review_state": "READY",
+        }
         preferred = load_portable_workflow(preferred_document, catalog)
 
         refreshed = refresh_resumable_execution_preferences(snapshot, preferred)
@@ -1392,11 +1569,23 @@ class StepExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(
             refreshed.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
             (
-                ExecutionBackendId.CLAUDE_CODE,
-                "claude-sonnet-5",
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-terra",
                 "high",
                 FastPreference.OFF,
             ),
+        )
+        self.assertEqual(
+            refreshed.step(DEVELOPMENT_STEP_ID).display_name,
+            "Preferred Development",
+        )
+        self.assertEqual(
+            refreshed.step(DEVELOPMENT_STEP_ID).execution_budget,
+            preferred.step(DEVELOPMENT_STEP_ID).execution_budget,
+        )
+        self.assertEqual(
+            refreshed.step(DEVELOPMENT_STEP_ID).guidance,
+            preferred.step(DEVELOPMENT_STEP_ID).guidance,
         )
         self.assertEqual(
             refreshed.step(DEVELOPMENT_STEP_ID).capability_profile,
@@ -1405,6 +1594,85 @@ class StepExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(
             refreshed.step(FINAL_REVIEW_STEP_ID).execution_settings,
             preferred.step(FINAL_REVIEW_STEP_ID).execution_settings,
+        )
+
+    def test_applied_backend_replaces_the_snapshot_for_unfinished_work(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            configuration_path = root / "devloop-plan.json"
+            issue_index = root / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            catalog = default_portable_component_catalog()
+            snapshot = default_portable_workflow()
+            writer = LoopStateWriter(issue_index)
+            writer.record_resolved_workflow(snapshot, catalog)
+            writer.state["issues"]["0004"] = {
+                "status": "IN_PROGRESS",
+                "current_step_instance_id": str(DEVELOPMENT_STEP_ID),
+                "current_pass": 1,
+            }
+            existing_attempt_history = {
+                "existing-step": {
+                    "0004": [{"attempt_id": "completed-before-apply"}],
+                }
+            }
+            writer.state["step_attempt_records"] = existing_attempt_history
+            writer.flush()
+
+            preferred_document = snapshot.to_dict()
+            development = next(
+                step
+                for step in preferred_document["steps"]
+                if step["instance_id"] == DEVELOPMENT_STEP_ID
+            )
+            development["execution_settings"] = {
+                "backend": "CLAUDE_CODE",
+                "model": "claude-sonnet-5",
+                "reasoning_effort": "high",
+                "fast": "OFF",
+            }
+            preferred = load_portable_workflow(preferred_document, catalog)
+            WorkflowDefaultStore(configuration_path, catalog).replace(preferred)
+
+            resolved = cli.resolve_run_workflow(
+                writer,
+                catalog,
+                user_workflow_path=configuration_path,
+            )
+            restored = LoopStateWriter(issue_index)
+
+        self.assertEqual(
+            resolved.step(DEVELOPMENT_STEP_ID).execution_settings,
+            preferred.step(DEVELOPMENT_STEP_ID).execution_settings,
+        )
+        self.assertEqual(
+            restored.resolved_workflow(catalog)
+            .step(DEVELOPMENT_STEP_ID)
+            .execution_settings,
+            preferred.step(DEVELOPMENT_STEP_ID).execution_settings,
+        )
+        self.assertEqual(
+            restored.state["issues"]["0004"]["current_step_instance_id"],
+            str(DEVELOPMENT_STEP_ID),
+        )
+        self.assertEqual(
+            restored.state["step_attempt_records"],
+            existing_attempt_history,
+        )
+        applied_event = next(
+            event
+            for event in restored.state["events"]
+            if event["type"] == "workflow-preferences-applied"
+        )
+        self.assertEqual(
+            applied_event["backend_changes"],
+            [
+                {
+                    "step_instance_id": str(DEVELOPMENT_STEP_ID),
+                    "from_backend": "CODEX_CLI",
+                    "to_backend": "CLAUDE_CODE",
+                }
+            ],
         )
 
     def test_loop_state_round_trips_the_current_per_step_settings(self) -> None:

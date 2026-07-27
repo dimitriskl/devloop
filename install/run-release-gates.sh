@@ -38,7 +38,7 @@ if [ "$use_existing_artifacts" -eq 0 ]; then
   uv build --sdist --wheel --out-dir dist
 fi
 uv run python install/verify-release.py --dist dist
-wheel=$(find dist -maxdepth 1 -type f -name 'devloop_codexcli-0.1.0-*.whl' -print)
+wheel=$(find dist -maxdepth 1 -type f -name 'devloop_codexcli-0.2.1-*.whl' -print)
 uv tool install --force "$wheel"
 codexcli --help
 codexcli doctor --help
@@ -65,4 +65,4 @@ if [ "$real_backend" -eq 1 ]; then
   uv run pytest -q -m integration --basetemp="$release_temp/pytest-real"
 fi
 
-printf '%s\n' 'PASS v0.1.0 release gates'
+printf '%s\n' 'PASS v0.2.1 release gates'

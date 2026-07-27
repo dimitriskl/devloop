@@ -866,6 +866,7 @@ def run_options_menu(
     state_path: Path,
     *,
     current_workflow: WorkflowDefinition | None = None,
+    current_run_issues_index: Path | None = None,
     component_catalog: PortableStepComponentCatalog | None = None,
     model_catalog_loader: Callable[[], ModelCatalog] | None = None,
     catalog_access: BackendModelCatalogAccess | None = None,
@@ -925,6 +926,16 @@ def run_options_menu(
         select_option=choose_workflow_selection,
     )
     if result is EditorResult.APPLIED:
+        if current_run_issues_index is not None:
+            preferred_workflow = WorkflowDefaultStore(
+                state_path,
+                installed_components,
+            ).load()
+            current_run_state = LoopStateWriter(current_run_issues_index)
+            current_run_state.refresh_resolved_workflow_execution_preferences(
+                preferred_workflow,
+                installed_components,
+            )
         selection.planning_skills = list(draft_selection.planning_skills)
         selection.role_skills = {
             role: list(paths) for role, paths in draft_selection.role_skills.items()
@@ -961,6 +972,22 @@ def load_handoff_current_workflow(
     *,
     component_catalog: PortableStepComponentCatalog | None = None,
 ) -> WorkflowDefinition | None:
+    issues_index = resolve_handoff_current_run_issues_index(
+        repo_root,
+        artifacts,
+        params,
+    )
+    return load_current_run_workflow(
+        issues_index,
+        component_catalog=component_catalog,
+    )
+
+
+def resolve_handoff_current_run_issues_index(
+    repo_root: Path,
+    artifacts: PlanningArtifacts,
+    params: HandoffParams,
+) -> Path:
     issues_index = artifacts.issues_index
     if params.use_worktree and params.worktree_path.exists():
         existing_worktree = resolve_existing_worktree(
@@ -977,10 +1004,7 @@ def load_handoff_current_workflow(
                 pass
             else:
                 issues_index = existing_worktree / relative_index
-    return load_current_run_workflow(
-        issues_index,
-        component_catalog=component_catalog,
-    )
+    return issues_index
 
 
 def run_capability_options_menu(
@@ -1318,11 +1342,14 @@ def run_handoff(
         if raw == "/quit":
             return 0
         if raw == "/options":
+            current_run_issues_index = resolve_handoff_current_run_issues_index(
+                repo_root,
+                artifacts,
+                params,
+            )
             try:
-                current_workflow = load_handoff_current_workflow(
-                    repo_root,
-                    artifacts,
-                    params,
+                current_workflow = load_current_run_workflow(
+                    current_run_issues_index,
                     component_catalog=component_catalog,
                 )
             except ValueError as error:
@@ -1335,11 +1362,13 @@ def run_handoff(
                 current_workflow = None
             if current_workflow is None:
                 current_workflow = workflow_snapshot
+                current_run_issues_index = None
             run_options_menu(
                 bundle_root,
                 selection,
                 state_path,
                 current_workflow=current_workflow,
+                current_run_issues_index=current_run_issues_index,
                 component_catalog=component_catalog,
                 catalog_access=BackendModelCatalogAccess(
                     cwd=(
