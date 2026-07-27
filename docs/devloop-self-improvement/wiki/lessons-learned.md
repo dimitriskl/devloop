@@ -8,9 +8,33 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: Dev Loop startup, authenticated backends, cross-platform and release workflows
 - Lesson: Detect mandatory gates that require credentials, network access, another operating system, writable user storage, recording, or publication authority before starting a long issue pack.
-- Evidence: In the July 21 recovery run, Issue 0003 already passed 131 platform-independent behaviors, but its mandatory Android/iOS Release and device gates could not run without MAUI workloads, mobile tooling, and an Apple build host.
-- Action: Preflight every non-repository prerequisite, show which acceptance gates are unavailable, and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
-- Last seen: 2026-07-21
+- Evidence: In the July 21 recovery run, Issue 0003 could not run mandatory mobile gates. On July 25, Issue 0014 accumulated repeated database-security review cycles without its disposable PostgreSQL/PostGIS gate, and Issue 0015 then repeated the same missing `DATABASE_TEST_ADMIN_URL` blocker.
+- Action: Preflight every non-repository prerequisite, including required database URLs, clients, extensions, and dependencies; show unavailable acceptance gates and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
+- Last seen: 2026-07-25
+
+## Execute Database Security Contracts
+
+- Applies to: coder, reviewer, QA, database migrations, role provisioning and privilege checks
+- Lesson: SQL-source assertions and mocked query calls cannot prove that security scripts compile, provisioned roles start, or production transactions succeed; execute the real behavior against a disposable database.
+- Evidence: Issue 0014 source checks passed while review found an undeclared PL/pgSQL variable and version-sensitive privilege checks; Issue 0015 mocks passed while a focused PostgreSQL probe reproduced privileges missing from the production publisher.
+- Action: Run migrations, provisioning, startup assertions, and representative read/write paths as the real restricted roles in an isolated database, then fail the required CI gate when that execution is skipped.
+- Last seen: 2026-07-25
+
+## Audit The Full Effective Database Privilege Graph
+
+- Applies to: coder, reviewer, QA, PostgreSQL least-privilege boundaries and supported-version policy
+- Lesson: Fail-closed role validation must cover table and column grants, schemas, routines, default PUBLIC execution, transitive SET-capable memberships, and unsafe attributes on every reachable role.
+- Evidence: Successive Issue 0014 reviews found bypasses through column-level DML, indirect memberships, drifted privileged role attributes, default routine execution, and the PostgreSQL-17-only `MAINTAIN` privilege despite no declared version floor.
+- Action: Declare the supported database-version floor, enumerate exact required and forbidden effective privileges, and test excess grants, membership drift, and role-attribute drift in the disposable database gate.
+- Last seen: 2026-07-25
+
+## Enforce Closed Domain Values At Every Boundary
+
+- Applies to: coder, reviewer, QA, canonical schemas, serializers and public API contracts
+- Lesson: A closed domain vocabulary is enforced only when storage, runtime projections, serializers, and published schemas all reject or canonicalize values consistently.
+- Evidence: Issue 0014 reviews admitted arbitrary Facility Fact keys, unsupported Country codes, and noncanonical Country labels; a final probe returned `GB-ENG` as `United Kingdom` until the canonical mapping was enforced across database and API boundaries.
+- Action: Model closed sets with enums, constraints, or reference data; parse external strings at ingestion and add mutation tests for every unsupported code, label, key, and extra public field.
+- Last seen: 2026-07-25
 
 ## Validate Authenticated External Endpoints Before Use
 
@@ -104,9 +128,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
 - Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round, including after a run is resumed.
-- Evidence: Issue 0003 received five attempts on July 21 that reproduced the same missing platform prerequisites. On July 23, Issue 0001 consumed all five blocker-resolution retries while two structured results repeated the same Angular dependency and cache blocker, two attempts timed out, the last hit the inactivity watchdog, and seven dependent issues remained waiting without a relevant environment change.
+- Evidence: Issue 0003 received five attempts on July 21 for the same missing platform prerequisites, and Issue 0001 consumed all five July 23 retries without an environment change. On July 25, Issue 0015 repeated an already-applied privilege fix and returned the same missing `DATABASE_TEST_ADMIN_URL` blocker twice.
 - Action: Persist a normalized blocker fingerprint with its relevant environment, repository, and contract state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries and resumed runs until that state or guidance changes, surface a concise diagnostic, and leave one operator or runner action on the loop board.
-- Last seen: 2026-07-23
+- Last seen: 2026-07-25
 
 ## Validate Every Component Of Derived Data
 

@@ -143,16 +143,37 @@ execution settings, capabilities, guidance, runtime state, and attempt history.
 
 Press Enter on the development summary to start with the shown defaults. Use
 `/run-options` to adjust this launch before starting, or `/options` to edit the
-User Workflow Default. Model, reasoning-effort, Fast, and capability changes
-are adopted by matching steps before the next resumed attempt. They do not
-change a Codex turn already running.
+User Workflow Default. Capability changes are adopted by matching steps before
+the next resumed attempt; model, reasoning-effort, and Fast changes are adopted
+only when the step keeps the Execution Backend the run snapshotted. None of them
+change an agent turn already running.
 
-Inside the Workflow Editor, select a Codex-backed step and use `model`,
-`reasoning`, or `fast` to choose its execution settings. Choices are filtered
-by the live Codex Model Catalog. `retry-catalog` retries temporary discovery
+Inside the Workflow Editor, select an agent-backed step and use `backend` to
+choose its Execution Backend, then `model`, `reasoning`, or `fast` to choose its
+execution settings for that backend. The `backend` menu annotates each backend
+with whether it is installed on this machine, and changing the backend moves the
+step's model and reasoning effort to that backend's component defaults so the
+step stays valid. A step is only ever offered its own backend's models, so the
+model list states which backend it belongs to and carries a `backend` choice that
+names the other backend and whether it is installed; taking it moves the step and
+re-opens the list on that backend's models, so a Codex CLI list is not a dead end
+when you came looking for a Claude model. Codex choices are filtered by the live
+Codex CLI Model
+Catalog. Claude choices come from the bundled Claude catalog, which offers
+pinned identifiers, short aliases, and an entry for typing an identifier the
+bundle does not list; the model you pick is verified against your own account
+once before it is saved, an alias is stored as the concrete identifier it
+resolved to, and a refusal is shown in the provider's own words.
+`retry-catalog` retries temporary discovery
 failures; any stale cache is labeled display-only and cannot authorize a run.
-Run startup refreshes the catalog and stops with the exact step and unsupported
-setting instead of silently falling back. Fast Off is passed explicitly, so a
+Run startup refreshes the catalog of every Execution Backend the workflow
+actually uses — and only those, so a workflow with no Claude steps never needs
+the Claude CLI and a workflow with no Codex steps never needs Codex signed in —
+then stops with the exact step and unsupported setting instead of silently
+falling back. Each distinct Claude model the run selects is also verified once
+against your own account before the run starts; if that is refused, the message
+names the step and the provider's reason, and the fix is to choose another model
+in `/options`. Fast Off is passed explicitly, so a
 global Codex `/fast` setting cannot change the saved step choice.
 Use `budget` to edit the selected step's separate timeout and checkpoint
 inactivity deadline. Budget changes never alter model, reasoning, or Fast.
@@ -320,28 +341,78 @@ For PRD-folder runs, it also writes:
 - `devloop.status.md`
 - `devloop.status.json`
 
-Each new run stores a resolved `devloop.portable-workflow/v2` definition and
-canonical hash in the JSON state. On rerun, matching model, reasoning-effort,
-Fast, and capability preferences refresh atomically before the next attempt;
-the graph, bindings, budgets, and guidance remain unchanged. The same state
-keeps generic Step Runtime States and an
+Each new run stores a resolved `devloop.portable-workflow/v3` definition and
+canonical hash in the JSON state. On rerun, capability preferences for matching
+Workflow Steps refresh atomically before the next attempt. Model,
+reasoning-effort, and Fast preferences refresh only when the saved Workflow
+Default names the same Execution Backend the run snapshotted for that step. When
+it names a different backend, the run keeps its snapshotted backend together
+with that backend's model, reasoning effort, and Fast, so one backend's model is
+never grafted onto another. The graph, bindings, budgets, and guidance remain
+unchanged. The same state keeps generic Step Runtime States and an
 ordered Step Attempt Record for every execution, so duplicate reviews,
-changes-requested rework, interruption, and resume remain inspectable. Portable
-workflow schema v1 is intentionally rejected; repair or recreate an old local
-default in `/options` rather than expecting migration or compatibility mode.
-When preflight finds a schema-v1 or malformed schema-v2 User Workflow Default,
+changes-requested rework, interruption, and resume remain inspectable.
+
+Every Step Attempt Record also carries a `provenance` object recording which
+Execution Backend ran that attempt, the model its Step Execution Settings
+requested, the model the finished turn's own usage accounting reported, and — for
+a Claude-backed attempt — the cost and turn count the provider reported. A
+mixed-backend attempt history is therefore readable from the state file alone,
+without opening a durable log. Only Claude-backed attempts record cost and turn
+count, so the two backends' spend is not yet directly comparable.
+Cost is evidence only: the Execution Budget is time-based and no spend limit is
+derived from it.
+
+If the requested and reported models differ, the record's `model_mismatch` is
+`true`, both identifiers are kept, and the disagreement is announced in the
+Portable Activity Feed while the run is in front of you and on the Workflow
+Status Bar as `MODEL MISMATCH`. Dev Loop deliberately does not reconcile them: a
+prototype observed a provider's session-initialisation event and its own usage
+accounting naming different models, and until that is understood a substitution
+must be visible rather than tidied away. The flag is derived from the two
+identifiers rather than stored independently, and loading a state file whose
+recorded flag disagrees with them fails with that message instead of reading the
+attempt back as clean. Portable
+workflow schemas v1 and v2 are intentionally rejected; repair or recreate an old
+local default in `/options` rather than expecting migration or compatibility
+mode. When preflight finds a superseded or malformed User Workflow Default,
 `/options` opens a fail-closed recovery mode instead of loading the rejected
 content as a draft. Use `reset-workflow` and then `apply` to atomically replace
-it with the built-in v2 default. `cancel` leaves the stored configuration
+it with the built-in v3 default. `cancel` leaves the stored configuration
 unchanged.
+
+### Breaking change: schema v3 records an Execution Backend
+
+Schema v3 adds a required Execution Backend to every agent-backed Workflow
+Step's Step Execution Settings, so it is not compatible with v2. There is no
+migration. Two consequences apply the first time you run this version:
+
+- A saved Workflow Default created before this change is rejected and must be
+  recreated. Open `/options`, choose `reset-workflow`, then `apply`. Reapply any
+  per-step model, reasoning-effort, Fast, budget, capability, and guidance
+  choices you had made.
+- An unfinished Workflow Run created before this change cannot be resumed,
+  because its PRD-local `*.loop.state.json` holds a v2 resolved workflow. Finish
+  that run with the previous Dev Loop version before upgrading, or delete its
+  loop-state file to start the PRD again from its first Workflow Step. Your
+  repository changes are untouched either way.
+
+Both cases report an actionable message naming the remedy rather than failing
+with a stack trace. Existing Codex-backed Workflow Steps behave exactly as
+before once the default is recreated: the Execution Backend is displayed in the
+`/options` Selection Preview, and the `backend` action changes it for any
+agent-backed Workflow Step in the editable Workflow Default scope.
 
 Dependency scheduler state is stored in the same JSON file. It includes ready
 and waiting projections, normal attempts, per-issue additional-pass counters,
 and the active scheduling reservation. Rerunning the same command resumes that
-reservation without double charging it. Usage exhaustion, authentication
-failure, or Codex service unavailability pauses the entire run as `RUN PAUSED`;
-restore the backend condition and rerun the same command to continue the exact
-issue, workflow step, pass, scheduling phase, and Blocker Resolution round.
+reservation without double charging it. On either Execution Backend, usage
+exhaustion, authentication failure, service unavailability, or model access
+withdrawn mid-run pauses the entire run as `RUN PAUSED`; restore the backend
+condition and rerun the same command to continue the exact issue, workflow step,
+pass, scheduling phase, and Blocker Resolution round. A pause changes no issue
+outcome and spends no attempt budget. A transient network failure is retried
+inside the same attempt instead, under that attempt's Execution Budget.
 
 Completed issue files are updated in place with `Completed: [x]`, checked
 acceptance criteria, and implementation notes. Completed issues are skipped on

@@ -56,7 +56,7 @@ function Install-DevelopmentRuntime {
     if ($LASTEXITCODE -ne 0) {
         throw 'devloop-development: dependency installation failed'
     }
-    & $nextPython -c 'import textual; raise SystemExit(0 if textual.__version__ == "8.2.8" else 1)'
+    & $nextPython -c "import textual; raise SystemExit(0 if textual.__version__ == '8.2.8' else 1)"
     if ($LASTEXITCODE -ne 0) {
         throw 'devloop-development: runtime validation failed'
     }

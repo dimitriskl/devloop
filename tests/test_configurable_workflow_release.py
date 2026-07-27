@@ -33,7 +33,8 @@ class ConfigurableWorkflowReleaseTests(unittest.TestCase):
         steps = {step["instance_id"]: step for step in document["steps"]}
         security_review = steps[str(SECURITY_REVIEW_STEP_ID)]
         final_review = steps[str(FINAL_REVIEW_STEP_ID)]
-        security_review["codex_settings"] = {
+        security_review["execution_settings"] = {
+            "backend": "CODEX_CLI",
             "model": "gpt-5.6-luna",
             "reasoning_effort": "high",
             "fast": "OFF",
@@ -43,7 +44,8 @@ class ConfigurableWorkflowReleaseTests(unittest.TestCase):
             "text": "Prioritize authentication and trust-boundary defects.",
             "review_state": "READY",
         }
-        final_review["codex_settings"] = {
+        final_review["execution_settings"] = {
+            "backend": "CODEX_CLI",
             "model": "gpt-5.6-sol",
             "reasoning_effort": "xhigh",
             "fast": "ON",

@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from .execution_backend_id import ExecutionBackendId, parse_execution_backend_id
 from .terminal_text import has_unsafe_terminal_controls
 from .subprocess_utils import (
     process_tree_creation_kwargs,
@@ -28,20 +29,31 @@ FAST_CATALOG_SERVICE_TIER_NAME = "Fast"
 DEPRECATED_FAST_SPEED_TIER_ID = "fast"
 DEFAULT_CATALOG_TIMEOUT_SECONDS = 10.0
 MODEL_CATALOG_CACHE_SUFFIX = ".model-catalog-cache.json"
+# The Codex CLI Backend's cache predates per-backend catalogs and keeps its
+# name, so an existing installation's display cache is not orphaned by this
+# change. Every other backend qualifies the suffix with its own slug.
+UNQUALIFIED_CACHE_BACKEND = ExecutionBackendId.CODEX_CLI
 
 
 def _validate_terminal_safe_catalog_text(value: str, field_name: str) -> None:
     if has_unsafe_terminal_controls(value):
         raise ValueError(
-            f"Codex Model Catalog {field_name} must not contain control "
+            f"Model Catalog {field_name} must not contain control "
             "characters or line breaks."
         )
 
 
-def model_catalog_cache_path(configuration_path: Path) -> Path:
-    return configuration_path.with_name(
-        f"{configuration_path.stem}{MODEL_CATALOG_CACHE_SUFFIX}"
+def model_catalog_cache_path(
+    configuration_path: Path,
+    backend: ExecutionBackendId = UNQUALIFIED_CACHE_BACKEND,
+) -> Path:
+    """The display-cache path for one backend's Model Catalog."""
+    suffix = (
+        MODEL_CATALOG_CACHE_SUFFIX
+        if backend is UNQUALIFIED_CACHE_BACKEND
+        else f".model-catalog-cache.{backend.slug}.json"
     )
+    return configuration_path.with_name(f"{configuration_path.stem}{suffix}")
 
 
 class CatalogSource(str, Enum):
@@ -54,44 +66,60 @@ class CatalogDiscoveryError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class CodexModel:
+class CatalogModel:
+    """One selectable model entry belonging to one Execution Backend's catalog.
+
+    ``is_alias`` marks a picker convenience: a short name the provider resolves
+    to a concrete pinned identifier. An alias is offered for selection and never
+    persisted — see :meth:`ExecutionBackend.verify_selected_model`.
+    """
+
     model_id: str
     display_name: str
     description: str
     reasoning_efforts: tuple[str, ...]
     service_tier_ids: tuple[str, ...] = ()
     advertises_fast: bool = False
+    backend: ExecutionBackendId = ExecutionBackendId.CODEX_CLI
+    is_alias: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.backend, ExecutionBackendId):
+            raise ValueError("Model Catalog entries require a known Execution Backend.")
         if not isinstance(self.model_id, str) or not self.model_id.strip():
-            raise ValueError("Codex Model Catalog entries require a model ID.")
+            raise ValueError("Model Catalog entries require a model ID.")
         _validate_terminal_safe_catalog_text(self.model_id, "model IDs")
         if not isinstance(self.display_name, str) or not self.display_name.strip():
-            raise ValueError("Codex Model Catalog entries require a display name.")
+            raise ValueError("Model Catalog entries require a display name.")
         _validate_terminal_safe_catalog_text(self.display_name, "display names")
         if not isinstance(self.description, str):
-            raise ValueError("Codex Model Catalog descriptions must be strings.")
+            raise ValueError("Model Catalog descriptions must be strings.")
         _validate_terminal_safe_catalog_text(self.description, "descriptions")
         if not self.reasoning_efforts:
             raise ValueError(
-                f"Codex model {self.model_id!r} advertises no reasoning efforts."
+                f"Model {self.model_id!r} advertises no reasoning efforts."
             )
         if any(
             not isinstance(effort, str) or not effort.strip()
             for effort in self.reasoning_efforts
         ):
-            raise ValueError("Codex reasoning-effort IDs must be non-empty.")
+            raise ValueError("Reasoning-effort IDs must be non-empty.")
         for effort in self.reasoning_efforts:
             _validate_terminal_safe_catalog_text(effort, "reasoning-effort IDs")
         if any(
             not isinstance(tier_id, str) or not tier_id.strip()
             for tier_id in self.service_tier_ids
         ):
-            raise ValueError("Codex service-tier IDs must be non-empty.")
+            raise ValueError("Service-tier IDs must be non-empty.")
         for tier_id in self.service_tier_ids:
             _validate_terminal_safe_catalog_text(tier_id, "service-tier IDs")
         if not isinstance(self.advertises_fast, bool):
-            raise ValueError("Codex Fast availability must be a boolean.")
+            raise ValueError("Fast availability must be a boolean.")
+        if self.advertises_fast and not self.backend.advertises_fast:
+            raise ValueError(
+                f"The {self.backend.display_name} Backend advertises no Fast "
+                f"support, so model {self.model_id!r} cannot advertise it."
+            )
 
     @property
     def supports_fast(self) -> bool:
@@ -99,37 +127,115 @@ class CodexModel:
 
 
 @dataclass(frozen=True)
-class CodexModelCatalog:
-    models: tuple[CodexModel, ...]
+class ModelCatalog:
+    """The account-aware catalog belonging to one Execution Backend.
+
+    ``reasoning_efforts`` is the effort set the backend's provider fixes for
+    every model, used for a free-text identifier the catalog does not list. It
+    is empty for a backend whose entries each advertise their own efforts.
+
+    ``accepts_free_text_model`` says whether the backend takes a model
+    identifier this catalog does not list, which a bundled catalog does and a
+    live account-aware one does not.
+
+    ``verifies_selection`` says whether selecting one of these models requires a
+    verification call before it can be saved. An account-aware catalog needs
+    none — listing a model is already the account's answer — while a bundled
+    catalog needs one, both to check the account and to resolve a short alias to
+    the concrete identifier that gets persisted.
+    """
+
+    models: tuple[CatalogModel, ...]
     fetched_at: str
     source: CatalogSource = CatalogSource.LIVE
+    backend: ExecutionBackendId = ExecutionBackendId.CODEX_CLI
+    reasoning_efforts: tuple[str, ...] = ()
+    accepts_free_text_model: bool = False
+    verifies_selection: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.backend, ExecutionBackendId):
+            raise ValueError("A Model Catalog requires a known Execution Backend.")
         if not self.models:
-            raise ValueError("The live Codex Model Catalog returned no selectable models.")
+            raise ValueError(
+                f"The live {self.backend.display_name} Model Catalog returned no "
+                "selectable models."
+            )
         if not isinstance(self.fetched_at, str) or not self.fetched_at.strip():
-            raise ValueError("Codex Model Catalog fetched-at timestamps must be non-empty.")
+            raise ValueError("Model Catalog fetched-at timestamps must be non-empty.")
         _validate_terminal_safe_catalog_text(
             self.fetched_at,
             "fetched-at timestamps",
         )
         model_ids = [model.model_id for model in self.models]
         if len(set(model_ids)) != len(model_ids):
-            raise ValueError("The Codex Model Catalog returned duplicate model IDs.")
+            raise ValueError("The Model Catalog returned duplicate model IDs.")
+        mismatched = [
+            model.model_id
+            for model in self.models
+            if model.backend is not self.backend
+        ]
+        if mismatched:
+            raise ValueError(
+                f"The {self.backend.display_name} Model Catalog contains entries "
+                f"belonging to another Execution Backend: {sorted(mismatched)}"
+            )
+        for effort in self.reasoning_efforts:
+            if not isinstance(effort, str) or not effort.strip():
+                raise ValueError("Reasoning-effort IDs must be non-empty.")
+            _validate_terminal_safe_catalog_text(effort, "reasoning-effort IDs")
+        if not isinstance(self.accepts_free_text_model, bool):
+            raise ValueError("Free-text model acceptance must be a boolean.")
+        if not isinstance(self.verifies_selection, bool):
+            raise ValueError("Selection verification must be a boolean.")
+        if self.accepts_free_text_model and not self.reasoning_efforts:
+            raise ValueError(
+                f"The {self.backend.display_name} Model Catalog accepts a "
+                "free-text model identifier but advertises no reasoning efforts "
+                "for it."
+            )
 
     @property
     def is_fresh(self) -> bool:
         return self.source is CatalogSource.LIVE
 
-    def model(self, model_id: str) -> CodexModel:
+    def model(self, model_id: str) -> CatalogModel:
         for model in self.models:
             if model.model_id == model_id:
                 return model
-        raise ValueError(f"Model {model_id!r} is unavailable in the live Codex catalog.")
+        raise ValueError(
+            f"Model {model_id!r} is unavailable in the live "
+            f"{self.backend.display_name} catalog."
+        )
+
+    def selectable_model(self, model_id: str) -> CatalogModel:
+        """One listed entry, or a synthesized entry for a free-text identifier.
+
+        A concrete identifier an alias resolved to, and an identifier the user
+        typed, are both valid selections this catalog does not list; both still
+        need an entry so reasoning-effort and Fast choices have something to
+        read. The synthesized entry carries the backend's fixed effort set.
+        """
+        try:
+            return self.model(model_id)
+        except ValueError:
+            if not self.accepts_free_text_model:
+                raise
+        return CatalogModel(
+            model_id=model_id,
+            display_name=model_id,
+            description="Model identifier this bundle does not list.",
+            reasoning_efforts=self.reasoning_efforts,
+            backend=self.backend,
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "backend": self.backend.value,
             "fetched_at": self.fetched_at,
+            "reasoning_efforts": list(self.reasoning_efforts),
+            "accepts_free_text_model": self.accepts_free_text_model,
+            "verifies_selection": self.verifies_selection,
             "models": [
                 {
                     "model_id": model.model_id,
@@ -138,35 +244,59 @@ class CodexModelCatalog:
                     "reasoning_efforts": list(model.reasoning_efforts),
                     "service_tier_ids": list(model.service_tier_ids),
                     "supports_fast": model.supports_fast,
+                    "is_alias": model.is_alias,
                 }
                 for model in self.models
             ],
         }
 
 
-class CodexModelCatalogCache:
-    """Persists the last catalog for editor display, never run authorization."""
+class ModelCatalogCache:
+    """Persists the last catalog for editor display, never run authorization.
 
-    def __init__(self, path: Path) -> None:
+    One cache belongs to one Execution Backend. A cached document that records a
+    different backend is rejected rather than loaded, so a misplaced or stale
+    file can never present one provider's models as another's.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        backend: ExecutionBackendId = UNQUALIFIED_CACHE_BACKEND,
+    ) -> None:
         self._path = path
+        self._backend = backend
 
-    def load(self) -> CodexModelCatalog | None:
+    @property
+    def backend(self) -> ExecutionBackendId:
+        return self._backend
+
+    def load(self) -> ModelCatalog | None:
         if not self._path.is_file():
             return None
         try:
             document = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise ValueError("Cached Codex Model Catalog is not valid JSON.") from error
+            raise ValueError("Cached Model Catalog is not valid JSON.") from error
         if not isinstance(document, Mapping):
-            raise ValueError("Cached Codex Model Catalog must be an object.")
+            raise ValueError("Cached Model Catalog must be an object.")
         raw_models = document.get("models")
         fetched_at = document.get("fetched_at")
         if not isinstance(raw_models, list) or not isinstance(fetched_at, str):
-            raise ValueError("Cached Codex Model Catalog is malformed.")
-        models: list[CodexModel] = []
+            raise ValueError("Cached Model Catalog is malformed.")
+        raw_backend = document.get("backend")
+        if raw_backend is not None:
+            cached_backend = parse_execution_backend_id(raw_backend)
+            if cached_backend is not self._backend:
+                raise ValueError(
+                    "Cached Model Catalog belongs to the "
+                    f"{cached_backend.display_name} Backend, not the "
+                    f"{self._backend.display_name} Backend."
+                )
+        models: list[CatalogModel] = []
         for raw_model in raw_models:
             if not isinstance(raw_model, Mapping):
-                raise ValueError("Cached Codex Model Catalog contains a malformed model.")
+                raise ValueError("Cached Model Catalog contains a malformed model.")
             reasoning_efforts = _cached_string_list(raw_model, "reasoning_efforts")
             service_tier_ids = _cached_string_list(raw_model, "service_tier_ids")
             supports_fast = _cached_fast_availability(
@@ -174,7 +304,7 @@ class CodexModelCatalogCache:
                 service_tier_ids,
             )
             models.append(
-                CodexModel(
+                CatalogModel(
                     model_id=_cached_required_string(raw_model, "model_id"),
                     display_name=_cached_required_string(
                         raw_model,
@@ -187,18 +317,36 @@ class CodexModelCatalogCache:
                     ),
                     reasoning_efforts=reasoning_efforts,
                     service_tier_ids=service_tier_ids,
-                    advertises_fast=supports_fast,
+                    advertises_fast=supports_fast and self._backend.advertises_fast,
+                    backend=self._backend,
+                    is_alias=_cached_boolean(raw_model, "is_alias"),
                 )
             )
-        return CodexModelCatalog(
+        return ModelCatalog(
             models=tuple(models),
             fetched_at=fetched_at,
             source=CatalogSource.CACHE,
+            backend=self._backend,
+            reasoning_efforts=_cached_string_list(
+                document,
+                "reasoning_efforts",
+                allow_missing=True,
+            ),
+            accepts_free_text_model=_cached_boolean(
+                document,
+                "accepts_free_text_model",
+            ),
+            verifies_selection=_cached_boolean(document, "verifies_selection"),
         )
 
-    def replace(self, catalog: CodexModelCatalog) -> None:
+    def replace(self, catalog: ModelCatalog) -> None:
         if not catalog.is_fresh:
-            raise ValueError("Only a live Codex Model Catalog can refresh the cache.")
+            raise ValueError("Only a live Model Catalog can refresh the cache.")
+        if catalog.backend is not self._backend:
+            raise ValueError(
+                f"A {catalog.backend.display_name} Model Catalog cannot refresh "
+                f"the {self._backend.display_name} display cache."
+            )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
@@ -253,8 +401,8 @@ class CodexModelCatalogAdapter:
         self._timeout_seconds = timeout_seconds
         self._session_factory = session_factory or self._create_session
 
-    def discover(self) -> CodexModelCatalog:
-        models: list[CodexModel] = []
+    def discover(self) -> ModelCatalog:
+        models: list[CatalogModel] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
         try:
@@ -286,9 +434,10 @@ class CodexModelCatalogAdapter:
                 f"Could not discover the live Codex Model Catalog: {error}"
             ) from error
         try:
-            return CodexModelCatalog(
+            return ModelCatalog(
                 models=tuple(models),
                 fetched_at=datetime.now().isoformat(timespec="seconds"),
+                backend=ExecutionBackendId.CODEX_CLI,
             )
         except ValueError as error:
             raise CatalogDiscoveryError(str(error)) from error
@@ -301,11 +450,11 @@ class CodexModelCatalogAdapter:
         )
 
 
-def _models_from_page(page: Mapping[str, Any]) -> tuple[CodexModel, ...]:
+def _models_from_page(page: Mapping[str, Any]) -> tuple[CatalogModel, ...]:
     raw_models = page.get("data")
     if not isinstance(raw_models, list):
         raise CatalogDiscoveryError("Codex Model Catalog page has no model list.")
-    models: list[CodexModel] = []
+    models: list[CatalogModel] = []
     for raw_model in raw_models:
         if not isinstance(raw_model, Mapping):
             raise CatalogDiscoveryError("Codex Model Catalog contains a malformed model.")
@@ -322,7 +471,7 @@ def _models_from_page(page: Mapping[str, Any]) -> tuple[CodexModel, ...]:
         service_tiers, supports_fast = _service_tier_metadata(raw_model, model_id)
         additional_speed_tiers = _additional_speed_tier_ids(raw_model, model_id)
         models.append(
-            CodexModel(
+            CatalogModel(
                 model_id=model_id,
                 display_name=display_name,
                 description=description,
@@ -427,15 +576,28 @@ def _required_string(
 def _cached_string_list(
     value: Mapping[str, Any],
     key: str,
+    *,
+    allow_missing: bool = False,
 ) -> tuple[str, ...]:
     raw = value.get(key)
+    if raw is None and allow_missing:
+        return ()
     if not isinstance(raw, list) or not all(
         isinstance(item, str) and item.strip() for item in raw
     ):
-        raise ValueError(f"Cached Codex Model Catalog field {key!r} is malformed.")
+        raise ValueError(f"Cached Model Catalog field {key!r} is malformed.")
     for item in raw:
         _validate_terminal_safe_catalog_text(item, f"field {key!r}")
     return tuple(raw)
+
+
+def _cached_boolean(value: Mapping[str, Any], key: str) -> bool:
+    raw = value.get(key)
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError(f"Cached Model Catalog field {key!r} is malformed.")
+    return raw
 
 
 def _cached_fast_availability(
@@ -453,7 +615,7 @@ def _cached_fast_availability(
         )
     if not isinstance(raw, bool):
         raise ValueError(
-            "Cached Codex Model Catalog field 'supports_fast' is malformed."
+            "Cached Model Catalog field 'supports_fast' is malformed."
         )
     return raw
 
@@ -466,7 +628,7 @@ def _cached_required_string(
 ) -> str:
     raw = value.get(key)
     if not isinstance(raw, str) or (not allow_empty and not raw.strip()):
-        raise ValueError(f"Cached Codex Model Catalog field {key!r} is malformed.")
+        raise ValueError(f"Cached Model Catalog field {key!r} is malformed.")
     _validate_terminal_safe_catalog_text(raw, f"field {key!r}")
     return raw
 

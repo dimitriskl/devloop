@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
 
 from devloop.cli import validate_issue_target_product, validate_prd_target_product
+
+PORTABLE_PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "devloop"
+PORTABLE_EXECUTION_BACKEND_PACKAGE = "portable_execution_backend"
+CODEXCLI_PACKAGES = frozenset(
+    {
+        "application",
+        "components",
+        "domain",
+        "execution",
+        "persistence",
+        "ui",
+        "workflow",
+    }
+)
 
 
 class ProductBoundaryTests(unittest.TestCase):
@@ -62,6 +77,55 @@ class ProductBoundaryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "issue targets codexcli"):
                 validate_issue_target_product(issue)
+
+
+class PortableExecutionBackendImportBoundaryTests(unittest.TestCase):
+    """The portable Execution Backend package must not reach into CodexCLI."""
+
+    def imported_devloop_modules(self, module_path: Path) -> set[str]:
+        """Every `devloop.<...>` module the given module imports."""
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        package_parts = module_path.parent.relative_to(PORTABLE_PACKAGE_ROOT).parts
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(
+                    alias.name for alias in node.names if alias.name.startswith("devloop")
+                )
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 0:
+                    if module.startswith("devloop"):
+                        imported.add(module)
+                    continue
+                base = package_parts[: len(package_parts) - (node.level - 1)]
+                imported.add(".".join(("devloop", *base, module)).rstrip("."))
+        return imported
+
+    def test_package_modules_import_nothing_from_a_codexcli_package(self) -> None:
+        package_root = PORTABLE_PACKAGE_ROOT / PORTABLE_EXECUTION_BACKEND_PACKAGE
+        module_paths = sorted(package_root.glob("*.py"))
+        self.assertTrue(module_paths, "The portable execution-backend package is missing.")
+
+        for module_path in module_paths:
+            with self.subTest(module=module_path.name):
+                for imported in self.imported_devloop_modules(module_path):
+                    parts = imported.split(".")
+                    self.assertEqual(parts[0], "devloop", imported)
+                    self.assertNotIn(
+                        parts[1] if len(parts) > 1 else "",
+                        CODEXCLI_PACKAGES,
+                        f"{module_path.name} imports the CodexCLI module {imported}",
+                    )
+
+    def test_every_codexcli_package_stays_out_of_the_portable_backend(self) -> None:
+        for package in sorted(CODEXCLI_PACKAGES):
+            with self.subTest(package=package):
+                self.assertTrue(
+                    (PORTABLE_PACKAGE_ROOT / package).is_dir(),
+                    f"The CodexCLI package {package} no longer exists; update the "
+                    "portable product boundary.",
+                )
 
 
 if __name__ == "__main__":

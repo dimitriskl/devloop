@@ -175,15 +175,26 @@ an explicit confirmation, never deletes downstream steps, and repairs only an
 unambiguous Primary Path success link. `type` preserves the selected identity,
 name, and position while resetting type-owned settings and showing the repair
 work. All three operations remain draft-only and can be reverted with `undo`.
-For Codex-backed steps, `model`, `reasoning`, and `fast` edit that Step
-Instance's independent Codex Execution Settings. Model names come from every
-page of the live installed Codex catalog; reasoning choices and Fast are
-limited to capabilities advertised for the selected model. If discovery
+For agent-backed steps, `model`, `reasoning`, and `fast` edit that Step
+Instance's independent Step Execution Settings, whose Execution Backend is shown
+ahead of the model, and `backend` opens an Execution Backend
+menu annotated with each backend's availability on this machine; choosing a
+different backend moves the step's model and reasoning effort to that backend's
+component defaults. Model, reasoning, and Fast then operate on the Model Catalog
+belonging to that step's backend. Codex model names come from every page of the
+live installed Codex catalog. Claude model names come from the bundled Claude
+catalog, which offers pinned identifiers, short aliases, and an entry for typing
+an identifier the bundle does not list; browsing costs nothing, one selection
+costs one verification call against the operator's own account, an alias is saved
+as the concrete identifier it resolved to, and a refusal is shown in the
+provider's own words with nothing saved. Reasoning choices and Fast are limited
+to capabilities advertised for the selected model, and Fast is refused for a
+backend that advertises none. If discovery
 fails, the editor marks its last cache as stale display-only data and offers
 `retry-catalog`. A fresh catalog preflight is still required before execution,
 and an unavailable model, effort, or Fast choice blocks the run without
-substitution. Local deterministic steps instead state that Codex settings do
-not apply.
+substitution. Local deterministic steps instead state that Step Execution
+Settings do not apply.
 Every step also shows an independent Execution Budget. Use `budget` to set its
 overall timeout and checkpoint inactivity deadline without changing its model,
 reasoning effort, or Fast choice. These limits are snapshotted with the
@@ -220,17 +231,19 @@ Guidance marked `NEEDS_REVIEW` must be explicitly kept, edited, or cleared
 before Apply.
 Use `rename`, `undo`, `reset-step`, or `reset-workflow` for the remaining draft
 actions. `apply` atomically replaces the User Workflow Default; `cancel`
-discards the workflow and capability-selection draft. Matching model,
-reasoning-effort, Fast, and capability changes are adopted before the next
-attempt when unfinished work is resumed.
+discards the workflow and capability-selection draft. When unfinished work is
+resumed, capability changes for matching Step Instances are adopted before the
+next attempt; model, reasoning-effort, and Fast changes are adopted only when
+the default keeps that step's snapshotted Execution Backend.
 
 When an existing implementation worktree contains loop state, the editor also
 shows its read-only **Current Run** configuration. Enter `current` to inspect
 it and `future` to return to the editable **Workflow Default**. Applying that
 draft does not change a Codex turn already in progress. Stop and rerun to use
-updated model, reasoning effort, Fast, Skills, or Agent References on the next
-attempt. Workflow structure, bindings, budgets, and guidance remain fixed for
-the existing run and apply only to new runs.
+updated Skills or Agent References on the next attempt, and updated model,
+reasoning effort, or Fast when the Execution Backend still matches. Workflow
+structure, bindings, budgets, and guidance remain fixed for the existing run and
+apply only to new runs.
 
 If live catalog discovery or exact-setting validation fails before an attempt,
 the preflight prompt can open `/options`, run `retry-catalog`, and revalidate

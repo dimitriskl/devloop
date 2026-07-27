@@ -13,10 +13,15 @@ from typing import Any, Callable, Sequence
 from . import statusui
 from .clipboard import capture_clipboard_image
 from .codex_events import CodexTurnOutcome, codex_turn_outcome, parse_codex_event
-from .codex_runner import codex_execution_settings_args, resolve_codex_executable
 from .lineeditor import LineEditor
+from .portable_execution_backend import update_checkpoint_for_step_activity
+from .portable_execution_backend.codex_cli import (
+    codex_execution_settings_args,
+    codex_step_activity_event,
+    resolve_codex_executable,
+)
 from .portable_workflow import (
-    CodexExecutionSettings,
+    StepExecutionSettings,
     ExecutionBudget,
     default_execution_budget,
 )
@@ -28,7 +33,6 @@ from .subprocess_utils import (
     reap_process_after_terminal_event,
     terminate_process,
     unregister_process_tree,
-    update_checkpoint_for_backend_event,
 )
 from .terminal_text import sanitize_terminal_text
 
@@ -91,7 +95,7 @@ class ChatConfig:
     codex: str
     repo_root: Path
     bundle_root: Path
-    codex_settings: CodexExecutionSettings
+    execution_settings: StepExecutionSettings
     execution_budget: ExecutionBudget = field(
         default_factory=lambda: default_execution_budget("analysis")
     )
@@ -155,7 +159,7 @@ class ChatSession:
                     "--skip-git-repo-check",
                 ]
             )
-        command.extend(codex_execution_settings_args(self.config.codex_settings))
+        command.extend(codex_execution_settings_args(self.config.execution_settings))
         for image in self.pending_images:
             command.extend(["-i", str(image)])
         command.append(first_prompt if first_prompt is not None else message)
@@ -284,9 +288,9 @@ def run_streaming(
                 waiting_indicator.start()
             if json_mode:
                 event = parse_codex_event(line)
-                update_checkpoint_for_backend_event(
+                update_checkpoint_for_step_activity(
                     budget,
-                    event,
+                    codex_step_activity_event(event),
                     active_backend_items,
                 )
                 turn_outcome = codex_turn_outcome(event)

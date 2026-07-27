@@ -164,6 +164,48 @@ class RunReviewTests(unittest.TestCase):
         self.assertNotIn("exit code 124", rendered)
         self.assertNotIn("...", review.issues[0].detail)
 
+    def _rendered_blocked_summary(self, blocked_summary: str) -> str:
+        review = build_run_review(
+            [Issue("0001", "Long-running development", Path("0001.md"), False)],
+            {"0001": {"status": "BLOCKED", "blocked_summary": blocked_summary}},
+            loop_state_path=Path("README.loop.md"),
+            rerun_available=True,
+        )
+        return render_run_review(review, RunReviewAction.EXIT)
+
+    def test_review_names_the_backend_a_budget_expired_attempt_actually_ran_on(
+        self,
+    ) -> None:
+        """The upgraded wording follows the backend named in the stored summary."""
+        for backend, expected in (
+            ("Claude Code", "before Claude Code returned a final role result."),
+            ("Codex CLI", "before Codex CLI returned a final role result."),
+        ):
+            with self.subTest(backend=backend):
+                rendered = self._rendered_blocked_summary(
+                    f"The {backend} Backend failed with exit code 124. "
+                    r"See E:\logs\0001-coder-pass1.stderr.txt."
+                )
+
+                self.assertIn(f"Execution Budget timeout expired {expected}", rendered)
+                self.assertIn(
+                    "Changes already written remain in the workspace.",
+                    rendered,
+                )
+                self.assertIn(r"E:\logs\0001-coder-pass1.stderr.txt", rendered)
+                self.assertNotIn("exit code 124", rendered)
+
+    def test_review_leaves_a_summary_with_another_exit_code_alone(self) -> None:
+        summary = (
+            "The Claude Code Backend failed with exit code 1. "
+            r"See E:\logs\0001-coder-pass1.stderr.txt."
+        )
+
+        rendered = self._rendered_blocked_summary(summary)
+
+        self.assertIn(summary, rendered)
+        self.assertNotIn("Execution Budget timeout expired", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

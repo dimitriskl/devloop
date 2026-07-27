@@ -11,6 +11,18 @@ from unittest import mock
 
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue
+from devloop.model_catalog import (
+    CatalogDiscoveryError,
+    CatalogModel,
+    ModelCatalog,
+    ModelCatalogCache,
+    model_catalog_cache_path,
+)
+from devloop.portable_execution_backend import (
+    BackendAvailability,
+    ExecutionBackendId,
+    load_bundled_model_catalog,
+)
 from devloop.portable_component_catalog import build_portable_component_catalog
 from devloop.portable_workflow import (
     ANALYSIS_COMPONENT_ID,
@@ -24,6 +36,7 @@ from devloop.portable_workflow import (
     REVIEW_RESULT_CONTRACT,
     REVIEWER_COMPONENT_ID,
     SECURITY_REVIEW_STEP_ID,
+    FastPreference,
     IssueStatus,
     PortableRoleAdapter,
     PortableStepComponent,
@@ -40,13 +53,25 @@ from devloop.portable_workflow import (
 )
 from devloop.workflow_defaults import WorkflowDefaultStore
 from devloop.workflow_editor import (
+    BACKEND_SWITCH_KEY,
+    EDITOR_COMMAND_GROUPS,
+    FREE_TEXT_MODEL_KEY,
+    WORKFLOW_ACTIONS,
     EditorResult,
+    EditorScope,
+    SelectionMenu,
     WorkflowDraft,
+    render_model_picker,
     render_workflow_editor,
     run_workflow_editor,
 )
 from devloop.state import LoopStateWriter
 from devloop.step_configuration import GuidanceReviewState, StepGuidance
+
+
+BUNDLED_CLAUDE_CATALOG = (
+    Path(__file__).resolve().parents[1] / "catalogs" / "claude-code-models.json"
+)
 
 
 class FakeEditor:
@@ -57,6 +82,108 @@ class FakeEditor:
     def read_line(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return next(self._responses)
+
+
+class _MenuRecorder:
+    """Stands in for the arrow-key menu, recording what each view offered."""
+
+    def __init__(self, answers: dict[str, str]) -> None:
+        self._answers = answers
+        self.menus: list[SelectionMenu] = []
+
+    def select(self, menu: SelectionMenu) -> str:
+        self.menus.append(menu)
+        for prefix, answer in self._answers.items():
+            if menu.title.startswith(prefix):
+                return answer
+        return menu.cancel_key
+
+    def menu(self, title_prefix: str) -> SelectionMenu:
+        for menu in self.menus:
+            if menu.title.startswith(title_prefix):
+                return menu
+        raise AssertionError(
+            f"No menu titled {title_prefix!r}; saw {[m.title for m in self.menus]}"
+        )
+
+
+class _RecordingVerifier:
+    """The one verification call per selection, driven without a provider."""
+
+    def __init__(
+        self,
+        resolutions: dict[str, str] | None = None,
+        refusals: dict[str, str] | None = None,
+    ) -> None:
+        self._resolutions = resolutions or {}
+        self._refusals = refusals or {}
+        self.calls: list[tuple[ExecutionBackendId, str]] = []
+
+    def verify(self, backend: ExecutionBackendId, model_id: str) -> str:
+        self.calls.append((backend, model_id))
+        refusal = self._refusals.get(model_id)
+        if refusal is not None:
+            raise RuntimeError(refusal)
+        return self._resolutions.get(model_id, model_id)
+
+
+def _bundled_claude_catalog() -> ModelCatalog:
+    return load_bundled_model_catalog(
+        BUNDLED_CLAUDE_CATALOG,
+        fetched_at="2026-07-25T12:00:00",
+    )
+
+
+def _codex_catalog() -> ModelCatalog:
+    return ModelCatalog(
+        models=(
+            CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",), advertises_fast=True),
+            CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+        ),
+        fetched_at="2026-07-25T12:00:00",
+    )
+
+
+def _per_backend_catalog_loader():
+    def load(backend: ExecutionBackendId) -> ModelCatalog:
+        if backend is ExecutionBackendId.CLAUDE_CODE:
+            return _bundled_claude_catalog()
+        return _codex_catalog()
+
+    return load
+
+
+def _fake_availability(*, claude_installed: bool = True):
+    def availability() -> tuple[BackendAvailability, ...]:
+        return (
+            BackendAvailability(ExecutionBackendId.CODEX_CLI, True, "installed"),
+            BackendAvailability(
+                ExecutionBackendId.CLAUDE_CODE,
+                claude_installed,
+                "installed" if claude_installed else "not installed",
+            ),
+        )
+
+    return availability
+
+
+def _claude_backed_default(
+    raw: str,
+    component_catalog: PortableStepComponentCatalog,
+) -> Path:
+    """A stored Workflow Default whose first Workflow Step runs on Claude Code."""
+    configuration_path = Path(raw) / "devloop-plan.json"
+    document = default_portable_workflow().to_dict()
+    document["steps"][0]["execution_settings"] = {
+        "backend": "CLAUDE_CODE",
+        "model": "claude-sonnet-5",
+        "reasoning_effort": "high",
+        "fast": "OFF",
+    }
+    WorkflowDefaultStore(configuration_path, component_catalog).replace(
+        load_portable_workflow(document, component_catalog)
+    )
+    return configuration_path
 
 
 class PortableComponentCatalogTests(unittest.TestCase):
@@ -123,7 +250,7 @@ class WorkflowDefaultStoreTests(unittest.TestCase):
             document = workflow.to_dict()
             for step in document["steps"]:
                 step.pop("capability_profile")
-                step.pop("codex_settings")
+                step.pop("execution_settings")
                 step.pop("execution_budget")
             canonical_document = json.dumps(
                 document,
@@ -227,8 +354,8 @@ class WorkflowDraftCapabilityTests(unittest.TestCase):
                 component.default_capability_profile(),
             )
             self.assertEqual(
-                reset_step.codex_settings,
-                component.codex_execution_defaults,
+                reset_step.execution_settings,
+                component.default_execution_settings,
             )
             self.assertEqual(
                 reset_step.execution_budget,
@@ -289,7 +416,7 @@ class WorkflowDraftTransformationTests(unittest.TestCase):
         self.assertNotEqual(duplicated.instance_id, source.instance_id)
         self.assertEqual(duplicated.display_name, "Security Review 2")
         self.assertEqual(duplicated.component_id, source.component_id)
-        self.assertEqual(duplicated.codex_settings, source.codex_settings)
+        self.assertEqual(duplicated.execution_settings, source.execution_settings)
         self.assertEqual(duplicated.execution_budget, source.execution_budget)
         self.assertEqual(duplicated.capability_profile, source.capability_profile)
         self.assertEqual(duplicated.input_bindings, source.input_bindings)
@@ -504,8 +631,8 @@ class WorkflowDraftTransformationTests(unittest.TestCase):
         self.assertEqual(changed_position, source_position)
         self.assertEqual(changed.component_id, QA_COMPONENT_ID)
         self.assertEqual(
-            changed.codex_settings,
-            replacement_component.codex_execution_defaults,
+            changed.execution_settings,
+            replacement_component.default_execution_settings,
         )
         self.assertEqual(
             changed.execution_budget,
@@ -817,7 +944,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         )
         self.assertIn("Type Change Preview — QA", "\n".join(output))
         self.assertIn(
-            "Reset: Codex settings, Execution Budget, capabilities, ports, bindings, and outcomes",
+            "Reset: Step Execution Settings, Execution Budget, capabilities, "
+            "ports, bindings, and outcomes",
             "\n".join(output),
         )
 
@@ -2303,7 +2431,11 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         rendered = "\n".join(output)
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Workflow Default (editable)", rendered)
-        self.assertIn("matching model, effort, Fast, and capabilities", rendered)
+        self.assertIn(
+            "Resume: capabilities refresh; model, effort, Fast only if the "
+            "Execution Backend matches",
+            rendered,
+        )
         self.assertIn("Current Run (read-only)", rendered)
         self.assertIn("Current Run cannot be edited", rendered)
         self.assertIn("Snapshot Review", rendered)
@@ -2312,6 +2444,659 @@ class WorkflowEditorFlowTests(unittest.TestCase):
             "Snapshot Review",
         )
         self.assertEqual(stored.step(SECURITY_REVIEW_STEP_ID).display_name, "Future Review")
+
+    def test_selection_preview_shows_the_backend_ahead_of_the_model_in_both_scopes(
+        self,
+    ) -> None:
+        catalog = default_portable_component_catalog()
+        current_document = default_portable_workflow().to_dict()
+        current_security_review = next(
+            step
+            for step in current_document["steps"]
+            if step["instance_id"] == SECURITY_REVIEW_STEP_ID
+        )
+        current_security_review["execution_settings"] = {
+            "backend": "CLAUDE_CODE",
+            "model": "claude-sonnet-5",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+        }
+        current_workflow = load_portable_workflow(current_document, catalog)
+
+        for scope, workflow, expected_backend, expected_model in (
+            (
+                EditorScope.CURRENT_RUN,
+                current_workflow,
+                "Claude Code",
+                "claude-sonnet-5",
+            ),
+            (
+                EditorScope.FUTURE_RUNS,
+                default_portable_workflow(),
+                "Codex CLI",
+                "gpt-5.6-sol",
+            ),
+        ):
+            with self.subTest(scope=scope.value):
+                rendered = render_workflow_editor(
+                    workflow,
+                    SECURITY_REVIEW_STEP_ID,
+                    catalog,
+                    terminal_width=140,
+                    terminal_height=40,
+                    scope=scope,
+                )
+
+                self.assertIn(f"Backend: {expected_backend}", rendered)
+                self.assertIn(f"Model: {expected_model}", rendered)
+                self.assertLess(
+                    rendered.index(f"Backend: {expected_backend}"),
+                    rendered.index(f"Model: {expected_model}"),
+                    rendered,
+                )
+
+    def test_the_execution_backend_action_is_offered_in_the_step_group(self) -> None:
+        step_action_keys = tuple(
+            action.command for action in WORKFLOW_ACTIONS if action.group == "Step"
+        )
+        self.assertEqual(
+            step_action_keys,
+            (
+                "select",
+                "rename",
+                "type",
+                "backend",
+                "model",
+                "reasoning",
+                "fast",
+                "budget",
+                "guidance",
+                "capabilities",
+            ),
+        )
+        edit_step_commands = next(
+            commands for group, commands in EDITOR_COMMAND_GROUPS if group == "Edit step"
+        )
+        self.assertIn("backend", edit_step_commands)
+
+    def test_the_backend_menu_annotates_availability_and_moves_to_defaults(
+        self,
+    ) -> None:
+        """Each backend is annotated, and choosing one resets model and effort."""
+        component_catalog = default_portable_component_catalog()
+        recorder = _MenuRecorder({"Execution Backend": "CLAUDE_CODE"})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "backend", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(claude_installed=False),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        menu = recorder.menu("Execution Backend")
+        labels = dict(menu.options)
+        self.assertIn("Codex CLI · installed · current", labels["CODEX_CLI"])
+        self.assertIn("Claude Code · not installed", labels["CLAUDE_CODE"])
+        self.assertIn(menu.cancel_key, labels)
+        expected = component_catalog.resolve(
+            ANALYSIS_COMPONENT_ID
+        ).execution_defaults_for(ExecutionBackendId.CLAUDE_CODE)
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.as_tuple(),
+            expected.as_tuple(),
+        )
+
+    def test_the_model_list_switches_backend_and_offers_that_backends_models(
+        self,
+    ) -> None:
+        """The list's own entry names one backend, so it must deliver that backend.
+
+        A Workflow Step is only ever offered its own backend's models, so someone
+        looking for a Claude model in a Codex CLI list finds nothing and no
+        indication that anything else exists. The entry that fixes that promises
+        to run the step on the named backend and choose its model, so it must not
+        stop at asking the same question again.
+        """
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier()
+        recorder = _MenuRecorder(
+            {
+                "Model · Codex CLI": BACKEND_SWITCH_KEY,
+                "Model · Claude Code": "1",
+            }
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        codex_menu = recorder.menu("Model · Codex CLI")
+        offered = dict(codex_menu.options)
+        self.assertIn(BACKEND_SWITCH_KEY, offered)
+        self.assertIn("Claude Code", offered[BACKEND_SWITCH_KEY])
+        self.assertIn("Codex CLI", " ".join(codex_menu.description))
+        self.assertEqual(
+            [menu.title for menu in recorder.menus if menu.title.startswith("Model")],
+            [
+                "Model · Codex CLI · Analysis",
+                "Model · Claude Code · Analysis",
+            ],
+        )
+        # The intermediate chooser is what the label promised to skip.
+        self.assertNotIn(
+            "Execution Backend",
+            [menu.title.split(" · ")[0] for menu in recorder.menus],
+        )
+        claude_model = _bundled_claude_catalog().models[0].model_id
+        self.assertEqual(
+            verifier.calls,
+            [(ExecutionBackendId.CLAUDE_CODE, claude_model)],
+        )
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.backend,
+            ExecutionBackendId.CLAUDE_CODE,
+        )
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            claude_model,
+        )
+
+    def test_the_model_list_route_names_a_backend_that_is_not_installed(self) -> None:
+        """The direct route must not hide what the annotated chooser would show."""
+        component_catalog = default_portable_component_catalog()
+        recorder = _MenuRecorder({})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(claude_installed=False),
+                select_option=recorder.select,
+            )
+
+        label = dict(recorder.menu("Model · Codex CLI").options)[BACKEND_SWITCH_KEY]
+        self.assertIn("Claude Code", label)
+        self.assertIn("not installed", label)
+
+    def test_an_unavailable_catalog_still_points_at_the_execution_backend(self) -> None:
+        """With no catalog the model list never opens, so the message must route.
+
+        Someone whose Codex CLI cannot serve a catalog has no way through the
+        model list at all, and that is exactly the person who needs to be told
+        another Execution Backend exists.
+        """
+        component_catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
+                    CatalogDiscoveryError("codex unavailable")
+                ),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+            )
+
+        message = next(
+            entry
+            for entry in output
+            if entry.startswith("No Codex CLI Model Catalog is available")
+        )
+        self.assertIn("Execution Backend", message)
+
+    def test_the_non_tty_model_list_documents_the_backend_switch(self) -> None:
+        """Line-by-line output must offer the same route, typed as a word."""
+        component_catalog = default_portable_component_catalog()
+        rendered_picker = render_model_picker(_codex_catalog(), terminal_width=100)
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(
+                    ["1", "model", BACKEND_SWITCH_KEY, "1", "apply"]
+                ).read_line,
+                write=output.append,
+                terminal_width=100,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        rendered = "\n".join(output)
+        self.assertIn(BACKEND_SWITCH_KEY, rendered_picker)
+        self.assertIn("Execution Backend", rendered_picker)
+        self.assertIn("Claude Code Models", rendered)
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.as_tuple()[:2],
+            (
+                ExecutionBackendId.CLAUDE_CODE,
+                _bundled_claude_catalog().models[0].model_id,
+            ),
+        )
+
+    def test_opening_options_for_a_claude_step_costs_no_verification_call(self) -> None:
+        """Browsing is free: the bundled entries are listed without a call."""
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier()
+        recorder = _MenuRecorder({})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "cancel", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+
+        self.assertEqual(verifier.calls, [])
+        menu = recorder.menu("Model · Claude Code")
+        offered = dict(menu.options)
+        self.assertIn("claude-opus-5", offered["1"])
+        self.assertTrue(
+            any("(alias)" in label for label in offered.values()),
+            offered,
+        )
+        self.assertTrue(
+            any("Enter another model identifier" in label for label in offered.values()),
+            offered,
+        )
+        self.assertIn(FREE_TEXT_MODEL_KEY, offered)
+
+    def test_selecting_a_short_alias_persists_the_resolved_pinned_identifier(
+        self,
+    ) -> None:
+        """An alias is a picker convenience; only the concrete identifier is saved."""
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier({"sonnet": "claude-sonnet-5-20260615"})
+        catalog = _bundled_claude_catalog()
+        alias_position = str(
+            next(
+                index
+                for index, model in enumerate(catalog.models, start=1)
+                if model.model_id == "sonnet"
+            )
+        )
+        recorder = _MenuRecorder({"Model · Claude Code": alias_position})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored_document = configuration_path.read_text(encoding="utf-8")
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        self.assertEqual(
+            verifier.calls,
+            [(ExecutionBackendId.CLAUDE_CODE, "sonnet")],
+        )
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            "claude-sonnet-5-20260615",
+        )
+        self.assertNotIn('"model": "sonnet"', stored_document)
+
+    def test_a_refused_model_is_reported_verbatim_and_not_saved(self) -> None:
+        component_catalog = default_portable_component_catalog()
+        refusal = "Invalid model name: made-up-model"
+        verifier = _RecordingVerifier(refusals={"claude-opus-5": refusal})
+        recorder = _MenuRecorder({"Model · Claude Code": "1"})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        self.assertIn(refusal, "\n".join(output))
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            "claude-sonnet-5",
+        )
+
+    def test_a_free_text_model_identifier_is_verified_before_it_is_saved(self) -> None:
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier({"claude-opus-6": "claude-opus-6"})
+        recorder = _MenuRecorder(
+            {
+                "Model · Claude Code": FREE_TEXT_MODEL_KEY,
+                "Reasoning effort": "1",
+            }
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(
+                    ["1", "model", "claude-opus-6", "apply"]
+                ).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        self.assertEqual(
+            verifier.calls,
+            [(ExecutionBackendId.CLAUDE_CODE, "claude-opus-6")],
+        )
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            "claude-opus-6",
+        )
+
+    def test_claude_reasoning_choices_are_limited_to_supported_efforts(self) -> None:
+        component_catalog = default_portable_component_catalog()
+        recorder = _MenuRecorder({"Reasoning effort": "1"})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "reasoning", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        menu = recorder.menu("Reasoning effort")
+        offered = tuple(
+            label for key, label in menu.options if key != menu.cancel_key
+        )
+        self.assertEqual(offered, _bundled_claude_catalog().reasoning_efforts)
+        self.assertIn(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.reasoning_effort,
+            offered,
+        )
+
+    def test_every_added_choice_offers_a_cancel_item_reachable_by_escape(self) -> None:
+        """Esc maps to the cancel key, so every menu must actually offer one."""
+        component_catalog = default_portable_component_catalog()
+        recorder = _MenuRecorder(
+            {
+                "Execution Backend": "cancel",
+                "Model · Claude Code": "cancel",
+                "Reasoning effort": "cancel",
+            }
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(
+                    ["1", "backend", "model", "reasoning", "fast", "cancel"]
+                ).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        self.assertTrue(recorder.menus)
+        for menu in recorder.menus:
+            with self.subTest(menu=menu.title):
+                self.assertIn(menu.cancel_key, dict(menu.options), menu.title)
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            "claude-sonnet-5",
+        )
+
+    def test_the_non_tty_fallback_drives_backend_and_free_text_selection(self) -> None:
+        """Without raw-key support the same choices stay reachable line by line."""
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier({"claude-opus-5": "claude-opus-5"})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            result = run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(
+                    [
+                        "1",
+                        "backend",
+                        "CLAUDE_CODE",
+                        "model",
+                        FREE_TEXT_MODEL_KEY,
+                        "claude-opus-5",
+                        "reasoning",
+                        "1",
+                        "apply",
+                    ]
+                ).read_line,
+                write=output.append,
+                terminal_width=120,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        rendered = "\n".join(output)
+        self.assertIs(result, EditorResult.APPLIED)
+        self.assertIn("Execution Backends", rendered)
+        self.assertIn("CLAUDE_CODE. Claude Code — installed", rendered)
+        self.assertIn("Claude Code Models — live", rendered)
+        settings = stored.step(ANALYSIS_STEP_ID).execution_settings
+        self.assertIs(settings.backend, ExecutionBackendId.CLAUDE_CODE)
+        self.assertEqual(settings.model, "claude-opus-5")
+        self.assertEqual(
+            verifier.calls,
+            [(ExecutionBackendId.CLAUDE_CODE, "claude-opus-5")],
+        )
+
+    def test_codex_model_selection_costs_no_verification_call(self) -> None:
+        """The live Codex catalog is the account's own answer, so selection is free."""
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier()
+        recorder = _MenuRecorder({"Model · Codex CLI": "2", "Reasoning effort": "1"})
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "apply"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+                select_option=recorder.select,
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        self.assertEqual(verifier.calls, [])
+        settings = stored.step(ANALYSIS_STEP_ID).execution_settings
+        self.assertIs(settings.backend, ExecutionBackendId.CODEX_CLI)
+        self.assertEqual(settings.model, "gpt-5.6-luna")
+
+    def test_a_stale_claude_cache_cannot_change_a_step(self) -> None:
+        """A cached catalog is display-only for the Claude backend too."""
+        component_catalog = default_portable_component_catalog()
+        verifier = _RecordingVerifier()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            ModelCatalogCache(
+                model_catalog_cache_path(
+                    configuration_path,
+                    ExecutionBackendId.CLAUDE_CODE,
+                ),
+                ExecutionBackendId.CLAUDE_CODE,
+            ).replace(_bundled_claude_catalog())
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "model", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
+                    CatalogDiscoveryError("backend unavailable")
+                ),
+                verify_model=verifier.verify,
+                backend_availability=_fake_availability(),
+            )
+            stored = WorkflowDefaultStore(configuration_path, component_catalog).load()
+
+        rendered = "\n".join(output)
+        self.assertIn(
+            "A fresh live Claude Code Model Catalog is required",
+            rendered,
+        )
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
+            "claude-sonnet-5",
+        )
+
+    def test_the_model_picker_and_detail_line_name_the_step_backend(self) -> None:
+        rendered_picker = render_model_picker(
+            _bundled_claude_catalog(),
+            terminal_width=120,
+        )
+        component_catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = _claude_backed_default(raw, component_catalog)
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=140,
+                catalog=component_catalog,
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
+                    CatalogDiscoveryError("backend unavailable")
+                ),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+            )
+
+        self.assertIn("Claude Code Models — live", rendered_picker)
+        self.assertIn("Claude Code Model Catalog: unavailable", "\n".join(output))
+
+    def test_fast_is_refused_for_a_backend_that_advertises_no_fast_support(self) -> None:
+        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            document = default_portable_workflow().to_dict()
+            document["steps"][0]["execution_settings"] = {
+                "backend": "CLAUDE_CODE",
+                "model": "claude-sonnet-5",
+                "reasoning_effort": "high",
+                "fast": "OFF",
+            }
+            WorkflowDefaultStore(configuration_path, catalog).replace(
+                load_portable_workflow(document, catalog)
+            )
+            output: list[str] = []
+
+            run_workflow_editor(
+                configuration_path,
+                read_line=FakeEditor(["1", "fast", "cancel"]).read_line,
+                write=output.append,
+                terminal_width=120,
+                catalog=catalog,
+                model_catalog_loader=_per_backend_catalog_loader(),
+                verify_model=_RecordingVerifier().verify,
+                backend_availability=_fake_availability(),
+            )
+            stored = WorkflowDefaultStore(configuration_path, catalog).load()
+
+        self.assertIn(
+            "Claude Code Backend advertises no Fast support",
+            "\n".join(output),
+        )
+        self.assertIs(
+            stored.step(ANALYSIS_STEP_ID).execution_settings.fast,
+            FastPreference.OFF,
+        )
 
     def test_rendered_editor_never_exceeds_terminal_height(self) -> None:
         height = 20

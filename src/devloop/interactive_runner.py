@@ -21,8 +21,11 @@ from .issue_pack import parse_issue_index, select_issues
 from .lineeditor import LineEditor
 from .model_catalog import (
     CatalogDiscoveryError,
-    CodexModelCatalog,
-    CodexModelCatalogAdapter,
+    ModelCatalog,
+)
+from .portable_execution_backend import (
+    BackendModelCatalogAccess,
+    ExecutionBackendId,
 )
 from .portable_workflow import (
     IssueStatus,
@@ -34,7 +37,7 @@ from .portable_workflow import (
     default_portable_component_catalog,
     parse_issue_status,
     planning_workflow_step,
-    preflight_codex_execution_settings,
+    preflight_step_execution_settings,
 )
 from .portable_component_catalog import build_portable_component_catalog
 from .product_scope import TargetProduct, detect_target_product
@@ -66,7 +69,9 @@ from .workflow_editor import (
     EditorResult,
     SelectionMenu,
     WorkflowDraft,
+    backend_model_catalog_loader,
     run_workflow_editor,
+    single_backend_model_catalog_loader,
 )
 from .workflow_defaults import (
     PORTABLE_PLANNER_CONFIGURATION_FILE,
@@ -256,16 +261,13 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
     wiki_index = bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"
     component_catalog = build_portable_component_catalog(bundle.root)
-    model_catalog_adapter = CodexModelCatalogAdapter(
-        args.codex,
-        cwd=repo_root,
-    )
+    catalog_access = BackendModelCatalogAccess(cwd=repo_root, codex=args.codex)
     workflow_snapshot = preflight_analysis_workflow(
         bundle_root=bundle.root,
         state_path=state_path,
         selection=selection,
         component_catalog=component_catalog,
-        model_catalog_loader=model_catalog_adapter.discover,
+        catalog_access=catalog_access,
     )
     if workflow_snapshot is None:
         print("Planning aborted before Analysis execution.")
@@ -287,7 +289,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         ),
         wiki_index=wiki_index,
     )
-    planning_settings = planning_step.codex_settings
+    planning_settings = planning_step.execution_settings
     assert planning_settings is not None
 
     config = ChatConfig(
@@ -296,7 +298,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         bundle_root=bundle.root,
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
-        codex_settings=planning_settings,
+        execution_settings=planning_settings,
         execution_budget=planning_step.execution_budget,
         workflow_progress=statusui.project_workflow_progress(
             workflow_snapshot,
@@ -323,7 +325,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             state_path,
             current_workflow=workflow_snapshot,
             component_catalog=component_catalog,
-            model_catalog_loader=model_catalog_adapter.discover,
+            catalog_access=catalog_access,
         ),
         status_summary=lambda: _status_summary(repo_root, selection),
         resume_artifacts=lambda: choose_resume_artifacts(repo_root).artifacts,
@@ -363,34 +365,49 @@ def preflight_analysis_workflow(
     state_path: Path,
     selection: "catalog_module.Selection",
     component_catalog: PortableStepComponentCatalog,
-    model_catalog_loader: Callable[[], CodexModelCatalog],
+    model_catalog_loader: Callable[[], ModelCatalog] | None = None,
+    catalog_access: BackendModelCatalogAccess | None = None,
 ) -> WorkflowDefinition | None:
-    """Return the exact workflow authorized for Analysis after interactive repair."""
+    """Return the exact workflow authorized for Analysis after interactive repair.
+
+    ``catalog_access`` supplies the per-backend Model Catalogs this preflight
+    authorizes against and that `/options` needs; the Workflow is authorized
+    against every Execution Backend it references and no other.
+    ``model_catalog_loader`` is the narrower Codex-only loader some callers hold;
+    with only that, a Workflow Step naming another backend is reported
+    unavailable rather than served Codex's models.
+    """
+    load_backend_catalog = backend_model_catalog_loader(
+        catalog_access,
+        model_catalog_loader,
+    )
+    preflight_cwd = catalog_access.cwd if catalog_access is not None else None
     while True:
         try:
             workflow = WorkflowDefaultStore(state_path, component_catalog).load()
             planning_step = planning_workflow_step(workflow, component_catalog)
-            live_model_catalog = model_catalog_loader()
-            preflight_codex_execution_settings(
+            preflight_step_execution_settings(
                 workflow,
                 component_catalog,
-                live_model_catalog,
+                load_backend_catalog,
+                cwd=preflight_cwd,
             )
-            if planning_step.codex_settings is None:
+            if planning_step.execution_settings is None:
                 raise ValueError(
-                    f"Planning step {planning_step.display_name!r} has no Codex "
+                    f"Planning step {planning_step.display_name!r} has no Step "
                     "Execution Settings."
                 )
             return workflow
         except (CatalogDiscoveryError, KeyError, ValueError) as error:
             safe_error = sanitize_terminal_text(error, preserve_newlines=False)
             print(
-                "Codex Execution Settings preflight failed before Analysis: "
+                "Step Execution Settings preflight failed before Analysis: "
                 f"{safe_error}"
             )
             print(
                 "Recovery: /options opens the Workflow Editor; retry-catalog "
-                "retries live discovery; /quit stops planning."
+                "retries live discovery for every backend this Workflow "
+                "references; /quit stops planning."
             )
         from .portable_runtime import active_portable_runtime
 
@@ -406,7 +423,7 @@ def preflight_analysis_workflow(
                 render=lambda selected: render_app_screen(
                     "Dev Loop > Preflight Recovery\n\n"
                     f"Selected: {selected}\n\n"
-                    "Choose how to recover the Codex execution settings."
+                    "Choose how to recover the Step Execution Settings."
                 ),
                 fallback=lambda: "/quit",
             )
@@ -421,6 +438,7 @@ def preflight_analysis_workflow(
                 state_path,
                 component_catalog=component_catalog,
                 model_catalog_loader=model_catalog_loader,
+                catalog_access=catalog_access,
             )
         elif action in {"retry-catalog", "/retry-catalog"}:
             continue
@@ -475,7 +493,7 @@ def choose_startup_artifacts(
     codex: str = "codex",
 ) -> StartupMenuResult:
     component_catalog = build_portable_component_catalog(bundle_root)
-    model_catalog_adapter = CodexModelCatalogAdapter(codex, cwd=repo_root)
+    catalog_access = BackendModelCatalogAccess(cwd=repo_root, codex=codex)
     while True:
         candidates = find_resume_candidates(repo_root)
         width, height = terminal_dimensions()
@@ -516,7 +534,7 @@ def choose_startup_artifacts(
                 selection,
                 state_path,
                 component_catalog=component_catalog,
-                model_catalog_loader=model_catalog_adapter.discover,
+                catalog_access=catalog_access,
             )
             continue
         resume_result = choose_resume_artifacts(
@@ -849,8 +867,17 @@ def run_options_menu(
     *,
     current_workflow: WorkflowDefinition | None = None,
     component_catalog: PortableStepComponentCatalog | None = None,
-    model_catalog_loader: Callable[[], CodexModelCatalog] | None = None,
+    model_catalog_loader: Callable[[], ModelCatalog] | None = None,
+    catalog_access: BackendModelCatalogAccess | None = None,
 ) -> None:
+    """Open the Workflow Editor with whatever Model Catalog access exists here.
+
+    ``catalog_access`` is the full per-backend access a normal session has: every
+    referenced backend's catalog, one verification call per model selection, and
+    Backend Availability. ``model_catalog_loader`` is the narrower Codex-only
+    loader some callers hold; with only that, Codex selection behaves exactly as
+    before and another backend's catalog is reported unavailable.
+    """
     draft_selection = catalog_module.Selection.from_dict(selection.to_dict())
     installed_components = component_catalog or build_portable_component_catalog(
         bundle_root
@@ -877,7 +904,24 @@ def run_options_menu(
             installed_components,
         ),
         configuration_updates=lambda: {"selection": draft_selection.to_dict()},
-        model_catalog_loader=model_catalog_loader,
+        model_catalog_loader=(
+            catalog_access.load_catalog
+            if catalog_access is not None
+            else (
+                single_backend_model_catalog_loader(
+                    ExecutionBackendId.CODEX_CLI,
+                    model_catalog_loader,
+                )
+                if model_catalog_loader is not None
+                else None
+            )
+        ),
+        verify_model=(
+            catalog_access.verify_model if catalog_access is not None else None
+        ),
+        backend_availability=(
+            catalog_access.availability if catalog_access is not None else None
+        ),
         select_option=choose_workflow_selection,
     )
     if result is EditorResult.APPLIED:
@@ -1204,12 +1248,13 @@ def run_handoff(
 ) -> int:
     component_catalog = build_portable_component_catalog(bundle_root)
     slug = artifact_slug(artifacts)
+    branch_name = sanitize_branch_name(f"devloop/{slug}")
     params = HandoffParams(
         start_issue=None,
         run_all=True,
-        use_worktree=True,
+        use_worktree=current_branch(repo_root) != branch_name,
         worktree_path=default_worktree_path(repo_root, slug, parent=load_last_worktree_parent()),
-        branch_name=sanitize_branch_name(f"devloop/{slug}"),
+        branch_name=branch_name,
     )
 
     while True:
@@ -1273,12 +1318,21 @@ def run_handoff(
         if raw == "/quit":
             return 0
         if raw == "/options":
-            current_workflow = load_handoff_current_workflow(
-                repo_root,
-                artifacts,
-                params,
-                component_catalog=component_catalog,
-            )
+            try:
+                current_workflow = load_handoff_current_workflow(
+                    repo_root,
+                    artifacts,
+                    params,
+                    component_catalog=component_catalog,
+                )
+            except ValueError as error:
+                # A rejected Current Run must not block editing the Workflow
+                # Default: state the reason and open /options without it.
+                print(
+                    "Current Run workflow unavailable: "
+                    f"{sanitize_terminal_text(error, preserve_newlines=False)}"
+                )
+                current_workflow = None
             if current_workflow is None:
                 current_workflow = workflow_snapshot
             run_options_menu(
@@ -1287,14 +1341,14 @@ def run_handoff(
                 state_path,
                 current_workflow=current_workflow,
                 component_catalog=component_catalog,
-                model_catalog_loader=CodexModelCatalogAdapter(
-                    codex,
+                catalog_access=BackendModelCatalogAccess(
                     cwd=(
                         params.worktree_path
                         if params.use_worktree and params.worktree_path.is_dir()
                         else repo_root
                     ),
-                ).discover,
+                    codex=codex,
+                ),
             )
             continue
         if raw == "/run-options":

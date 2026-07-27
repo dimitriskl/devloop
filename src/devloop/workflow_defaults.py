@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from .portable_workflow import (
     PortableStepComponentCatalog,
+    SupersededWorkflowSchemaError,
     WorkflowDefinition,
     canonical_workflow_document_hash,
     canonical_workflow_hash,
@@ -19,6 +20,10 @@ from .portable_workflow import (
 USER_WORKFLOW_DEFAULT_KEY = "user_workflow_default"
 USER_WORKFLOW_DEFAULT_HASH_KEY = "user_workflow_default_hash"
 PORTABLE_PLANNER_CONFIGURATION_FILE = "devloop-plan.json"
+SUPERSEDED_WORKFLOW_DEFAULT_REMEDY = (
+    "The saved Workflow Default must be recreated: open /options, choose "
+    "reset-workflow, then apply."
+)
 
 
 def portable_planner_configuration_path() -> Path:
@@ -79,7 +84,12 @@ class WorkflowDefaultStore:
             return None
         if not isinstance(document, dict):
             raise ValueError("The User Workflow Default must be a JSON object.")
-        workflow = load_portable_workflow(document, self._catalog)
+        try:
+            workflow = load_portable_workflow(document, self._catalog)
+        except SupersededWorkflowSchemaError as error:
+            raise ValueError(
+                f"{error} {SUPERSEDED_WORKFLOW_DEFAULT_REMEDY}"
+            ) from error
         expected_hash = data.get(USER_WORKFLOW_DEFAULT_HASH_KEY)
         actual_hash = canonical_workflow_document_hash(document)
         if expected_hash != actual_hash:

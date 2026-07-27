@@ -54,28 +54,66 @@ outputs only when that is deliberate. After `type`, review reset ports,
 settings, capabilities, outcomes, and any preserved guidance. Guidance marked
 `NEEDS_REVIEW` must be kept, edited, or cleared before `apply`.
 
-## A portable workflow default reports schema v1 or malformed schema v2
+## A portable workflow default reports a superseded or malformed schema
 
-Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v2`.
-There is no v1 reader, migration, or dual-write path. From planning or
-implementation preflight, open `/options`; the editor enters a fail-closed
-recovery mode and does not load rejected content as an editable draft. Choose
-`reset-workflow` and then `apply` to atomically replace the invalid default with
-the built-in v2 workflow. Choose `cancel` to leave the stored configuration
+Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v3`.
+Both v1 and v2 are rejected explicitly; there is no reader, migration, or
+dual-write path for either. From planning or implementation preflight, open
+`/options`; the editor enters a fail-closed recovery mode and does not load
+rejected content as an editable draft. Choose `reset-workflow` and then `apply`
+to atomically replace the invalid default with the built-in v3 workflow, then
+reapply your per-step choices. Choose `cancel` to leave the stored configuration
 byte-for-byte unchanged. You may instead repair the local JSON outside a
 running Current Run. Malformed UUIDs, duplicate names, unknown Step Types,
 invalid routes, scopes, bindings, and unknown fields fail closed rather than
 being ignored.
 
+## An unfinished run reports that it cannot be resumed
+
+A Workflow Run started before schema v3 holds a v2 resolved workflow in its
+PRD-local `*.loop.state.json`, which cannot be read. Preflight says so and names
+the state file instead of failing with a stack trace. Either finish that run
+with the previous Dev Loop version, or delete its `*.loop.state.json` to start
+the PRD again from its first Workflow Step. Repository changes already written by
+earlier attempts stay in the workspace.
+
+## Fast reports that the backend advertises no Fast support
+
+Fast is a Codex service-tier preference. Enabling it is valid only when the
+selected model advertises Fast, so a Workflow Step on a backend that advertises
+none is rejected rather than silently accepted and ignored. Leave Fast Off for
+that Workflow Step.
+
 ## Model discovery or execution preflight fails
 
-Confirm the installed Codex CLI is authenticated, then use `retry-catalog` in
-the Workflow Editor. A stale cache is display-only and cannot authorize a run.
-If preflight names a Step Display Name and model, reasoning effort, or Fast
-setting, edit that exact Workflow Default step in `/options` and retry. Dev Loop
-does not substitute another model, lower effort, or disable Fast silently.
-Matching execution preferences are adopted before the next resumed attempt.
-They cannot change a Codex turn that is already running; stop and rerun first.
+Confirm the Execution Backend the step names is installed and authenticated —
+the `backend` menu in `/options` annotates each backend's availability — then use
+`retry-catalog` in the Workflow Editor. A stale cache is display-only and cannot
+authorize a run, for either backend. If preflight names a Step Display Name and
+model, reasoning effort, or Fast setting, edit that exact Workflow Default step
+in `/options` and retry. Dev Loop does not substitute another model, lower
+effort, or disable Fast silently. Capability preferences are adopted before the
+next resumed attempt; model, reasoning-effort, and Fast preferences are adopted
+only when the step keeps its snapshotted Execution Backend. None of them can
+change an agent turn that is already running; stop and rerun first.
+
+If selecting a Claude model is refused, the message is the provider's own: check
+the identifier and whether your account can use that model. The selection is not
+saved, so the step keeps the model it had.
+
+Run startup verifies each distinct Claude model the run selects against your own
+account, once per model. If that verification is refused, the run does not start
+and the message names the Workflow Step, the model, and the provider's own reason.
+`retry-catalog` cannot fix it: the offered Claude entries ship with the bundle, so
+refreshing them changes nothing about what your account may use. Open `/options`
+and choose a model that account can use for that Workflow Step.
+
+If the Claude CLI cannot be started at all, the message says that instead of
+blaming your account, and names the command it tried to start. This is the usual
+shape on a new machine, a CI runner, or a restored configuration directory whose
+saved Workflow Default names Claude. Install or repair the Claude CLI, or give
+that Workflow Step a different Execution Backend in `/options`. Choosing another
+Claude model cannot help, because every one of them needs the same CLI.
 
 ## Dashboard rows wrap, lack color, or repeat in redirected output
 
@@ -125,12 +163,45 @@ issues.
 
 ## The runner prints `RUN PAUSED`
 
-This is a run-wide Codex availability problem, not an issue failure. Restore
-usage capacity, authentication, or service availability, then rerun the exact
-same `devloop` command. Do not delete the loop-state JSON: it preserves the
-active issue, workflow step, pass, scheduling phase, round, and remaining
-budgets. A repeated global failure remains paused and does not consume another
-issue attempt.
+This is a run-wide backend availability problem, not an issue failure. It is
+reported for either Execution Backend. The line names the condition:
+
+| Kind | What it means | What to do |
+| --- | --- | --- |
+| `USAGE_LIMIT` | The provider reports the account's usage as spent | Restore usage capacity |
+| `AUTHENTICATION` | The credentials on this machine no longer authorize the call | Restore authentication |
+| `SERVICE_UNAVAILABLE` | The provider answered with a server error | Wait for recovery |
+| `MODEL_ACCESS_WITHDRAWN` | The account can no longer use the model a step selects, although run preflight verified it | Choose another model for that step in `/options` |
+
+Then rerun the exact same `devloop` command. Do not delete the loop-state JSON:
+it preserves the active issue, workflow step, pass, scheduling phase, round, and
+remaining budgets. A paused run changes no issue outcome and consumes no issue
+attempt budget, so waiting and independent issues are still first in line on the
+rerun. A repeated global failure remains paused and still consumes nothing.
+
+A brief network failure is not a pause. Transport-level failures are retried
+inside the same attempt, under that attempt's Execution Budget and the shared
+retry delay, and the attempt continues if one succeeds.
+
+## The dashboard shows `MODEL MISMATCH`
+
+The attempt did not run on the model the Workflow Step selected: the finished
+turn's own usage accounting named a different model. Nothing is broken in your
+configuration and the run continues, but the result was not produced by the model
+you chose, so treat it accordingly when you compare backends or judge quality.
+
+Both identifiers are kept on that Step Attempt Record in `*.loop.state.json`
+under `provenance` — `requested_model`, `serving_model`, and `model_mismatch` —
+alongside the reported cost and turn count, and the full attempt transcript stays
+in `.loop.logs/*stdout*`. Dev Loop deliberately does not reconcile the two: a
+prototype observed a provider's session-initialisation event and its own usage
+accounting naming different models, and until that is understood a substitution
+must stay visible.
+
+`model_mismatch` is derived from the two identifiers, so editing it in the state
+file does not clear the warning — loading a record whose flag disagrees with the
+models it names fails with that message instead. If you see this, capture the
+step, the two identifiers, and the stdout log before rerunning.
 
 ## Codex returns invalid JSON
 

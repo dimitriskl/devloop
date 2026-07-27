@@ -4,7 +4,7 @@
 
 This repository contains a portable Dev Loop runner for local PRD and issue-pack workflows. The Python runner lives in `src/devloop/`: `cli.py` orchestrates runs, `issue_pack.py` parses issues, `codex_runner.py` invokes Codex, `state.py` writes loop state, and `worktree.py` handles worktrees.
 
-Wrapper scripts are in `bin/`. Documentation is under `docs/`. Prompt templates, schemas, and presets are in `prompts/`, `schemas/`, and `presets/`. Bundled Codex skills and Codex agent references live in `skills/codex/` and `agents/codex/`. The optional SQL diagnostics MCP server is under `mcp/sql_diagnostics/`.
+Wrapper scripts are in `bin/`. Documentation is under `docs/`. Prompt templates, schemas, and presets are in `prompts/`, `schemas/`, and `presets/`. Model Catalog reference data for backends whose provider offers no catalog endpoint lives in `catalogs/`. Bundled Codex skills and Codex agent references live in `skills/codex/` and `agents/codex/`. The optional SQL diagnostics MCP server is under `mcp/sql_diagnostics/`.
 
 ## Build, Test, and Development Commands
 
@@ -80,7 +80,29 @@ being printed beneath the prior screen.
 
 ## Testing Guidelines
 
-There is no formal Python test suite or linter config. Validate runner changes with `--dry-run --no-worktree` against a small local issue pack, and inspect `.loop.logs`, `README.loop.md`, and `README.loop.state.json` when behavior changes. For SQL MCP changes, run `.\install\build-sql-mcp.ps1`.
+A pytest suite lives in `tests/`: portable runner tests directly under `tests/`
+and CodexCLI tests under `tests/codexcli/`. Run the sandbox-safe subset:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q -m "not integration"
+```
+
+Tests marked `integration` need the installed real Codex CLI; per Managed Shell
+Safety, never launch them from an agent session.
+
+Ruff is configured in `pyproject.toml` (target `py310`, line length 100, rules
+`B`, `E`, `F`, `I`, `UP`), and mypy runs in strict mode over the CodexCLI
+packages listed there:
+
+```powershell
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m mypy
+```
+
+Ruff's `include` list currently selects the CodexCLI packages and
+`tests/codexcli/`; keep new portable modules clean against the same rules.
+
+Also validate runner changes with `--dry-run --no-worktree` against a small local issue pack, and inspect `.loop.logs`, `README.loop.md`, and `README.loop.state.json` when behavior changes. For SQL MCP changes, run `.\install\build-sql-mcp.ps1`.
 
 ## Self-Improvement Wiki
 

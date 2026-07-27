@@ -15,6 +15,7 @@ class BundleContext:
     root: Path
     prompts: Path
     schemas: Path
+    catalogs: Path = Path("catalogs")
 
     @classmethod
     def from_file(cls, current_file: Path) -> "BundleContext":
@@ -23,7 +24,17 @@ class BundleContext:
             root=root,
             prompts=root / "prompts",
             schemas=root / "schemas",
+            catalogs=root / "catalogs",
         )
+
+
+def installed_bundle_context() -> BundleContext:
+    """The bundle this installation runs from.
+
+    Resolved from this module's own location, so bundled reference data is found
+    without every caller having to know the bundle layout.
+    """
+    return BundleContext.from_file(Path(__file__).resolve())
 
 
 @dataclass(frozen=True)

@@ -12,31 +12,43 @@ from devloop.issue_pack import Issue
 from devloop.model_catalog import (
     CatalogDiscoveryError,
     CatalogSource,
-    CodexModel,
-    CodexModelCatalog,
-    CodexModelCatalogCache,
+    CatalogModel,
+    ModelCatalog,
+    ModelCatalogCache,
     model_catalog_cache_path,
+)
+from devloop.portable_execution_backend import (
+    ExecutionBackendId,
+    parse_execution_backend_id,
+)
+from devloop.portable_execution_backend.codex_cli import (
+    codex_execution_settings_args,
 )
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
-    CodexExecutionSettings,
     DEVELOPMENT_STEP_ID,
-    ExecutionBudget,
     FINAL_REVIEW_STEP_ID,
+    PORTABLE_WORKFLOW_SCHEMA,
     QA_STEP_ID,
     SECURITY_REVIEW_STEP_ID,
+    SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS,
+    ExecutionBudget,
     FastPreference,
     PortableStepComponent,
     PortableStepComponentCatalog,
     PortableWorkflowExecutor,
     StepComponentId,
+    StepExecutionSettings,
     StepInstanceId,
     StepOutcome,
     StepScope,
+    default_component_execution_defaults,
     default_portable_component_catalog,
     default_portable_workflow,
+    default_step_execution_settings,
     load_portable_workflow,
-    preflight_codex_execution_settings,
+    preflight_step_execution_settings,
+    refresh_resumable_execution_preferences,
 )
 from devloop.workflow_editor import render_workflow_editor
 from devloop.workflow_defaults import WorkflowDefaultStore
@@ -57,20 +69,24 @@ class _FakeEditor:
         return next(self._responses)
 
 
-class CodexExecutionSettingsTests(unittest.TestCase):
+class StepExecutionSettingsTests(unittest.TestCase):
     @staticmethod
-    def _live_catalog(*, sol_fast: bool = True) -> CodexModelCatalog:
-        return CodexModelCatalog(
+    def _live_catalog(
+        _backend: ExecutionBackendId | None = None,
+        *,
+        sol_fast: bool = True,
+    ) -> ModelCatalog:
+        return ModelCatalog(
             models=(
-                CodexModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                CodexModel(
+                CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+                CatalogModel(
                     "gpt-5.6-sol",
                     "Sol",
                     "",
                     ("high", "xhigh"),
                     advertises_fast=sol_fast,
                 ),
-                CodexModel("gpt-5.6-terra", "Terra", "", ("high",)),
+                CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
             ),
             fetched_at="2026-07-16T12:00:00",
             source=CatalogSource.LIVE,
@@ -80,23 +96,231 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         workflow = default_portable_workflow()
 
         self.assertEqual(
-            workflow.step(ANALYSIS_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+            workflow.step(ANALYSIS_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.OFF,
+            ),
         )
         self.assertEqual(workflow.start_step_id, ANALYSIS_STEP_ID)
         self.assertEqual(
-            workflow.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-luna", "high", FastPreference.OFF),
+            workflow.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-luna",
+                "high",
+                FastPreference.OFF,
+            ),
         )
         for step_id in (SECURITY_REVIEW_STEP_ID, FINAL_REVIEW_STEP_ID):
             self.assertEqual(
-                workflow.step(step_id).codex_settings.as_tuple(),
-                ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+                workflow.step(step_id).execution_settings.as_tuple(),
+                (
+                    ExecutionBackendId.CODEX_CLI,
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    FastPreference.OFF,
+                ),
             )
         self.assertEqual(
-            workflow.step(QA_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-terra", "high", FastPreference.OFF),
+            workflow.step(QA_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-terra",
+                "high",
+                FastPreference.OFF,
+            ),
         )
+
+    def test_backend_identity_is_a_closed_enum_parsed_at_the_boundary(self) -> None:
+        self.assertEqual(
+            tuple(member.value for member in ExecutionBackendId),
+            ("CODEX_CLI", "CLAUDE_CODE"),
+        )
+        self.assertIs(
+            parse_execution_backend_id("CLAUDE_CODE"),
+            ExecutionBackendId.CLAUDE_CODE,
+        )
+        self.assertIs(
+            parse_execution_backend_id(ExecutionBackendId.CODEX_CLI),
+            ExecutionBackendId.CODEX_CLI,
+        )
+        for rejected in ("codex", "OPENAI", "", None, 3):
+            with self.subTest(value=rejected):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "CODEX_CLI, CLAUDE_CODE",
+                ):
+                    parse_execution_backend_id(rejected)
+
+    def test_codex_command_line_refuses_settings_naming_another_backend(self) -> None:
+        claude_settings = StepExecutionSettings(
+            ExecutionBackendId.CLAUDE_CODE,
+            "claude-sonnet-5",
+            "high",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Codex CLI Backend cannot run.*Claude Code Backend",
+        ):
+            codex_execution_settings_args(claude_settings)
+
+        self.assertEqual(
+            codex_execution_settings_args(
+                StepExecutionSettings(
+                    ExecutionBackendId.CODEX_CLI,
+                    "gpt-5.6-luna",
+                    "high",
+                )
+            ),
+            [
+                "-m",
+                "gpt-5.6-luna",
+                "-c",
+                'model_reasoning_effort="high"',
+                "-c",
+                'service_tier="default"',
+                "--disable",
+                "fast_mode",
+            ],
+        )
+
+    def test_component_execution_defaults_cover_every_backend_per_role(self) -> None:
+        for role in ("analysis", "coder", "reviewer", "qa"):
+            with self.subTest(role=role):
+                defaults = default_component_execution_defaults(role)
+                self.assertEqual(set(defaults), set(ExecutionBackendId))
+                for backend, settings in defaults.items():
+                    self.assertIs(settings.backend, backend)
+                    self.assertIs(settings.fast, FastPreference.OFF)
+
+        self.assertEqual(
+            {
+                role: default_step_execution_settings(
+                    role,
+                    ExecutionBackendId.CODEX_CLI,
+                ).as_tuple()
+                for role in ("analysis", "coder", "reviewer", "qa")
+            },
+            {
+                "analysis": (
+                    ExecutionBackendId.CODEX_CLI,
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    FastPreference.OFF,
+                ),
+                "coder": (
+                    ExecutionBackendId.CODEX_CLI,
+                    "gpt-5.6-luna",
+                    "high",
+                    FastPreference.OFF,
+                ),
+                "reviewer": (
+                    ExecutionBackendId.CODEX_CLI,
+                    "gpt-5.6-sol",
+                    "xhigh",
+                    FastPreference.OFF,
+                ),
+                "qa": (
+                    ExecutionBackendId.CODEX_CLI,
+                    "gpt-5.6-terra",
+                    "high",
+                    FastPreference.OFF,
+                ),
+            },
+        )
+
+        catalog = default_portable_component_catalog()
+        for component in catalog.components:
+            if not component.is_agent_backed:
+                continue
+            with self.subTest(component=str(component.component_id)):
+                self.assertIs(
+                    component.default_execution_settings.backend,
+                    ExecutionBackendId.CODEX_CLI,
+                )
+                claude_defaults = component.execution_defaults_for(
+                    ExecutionBackendId.CLAUDE_CODE
+                )
+                self.assertIs(
+                    claude_defaults.backend,
+                    ExecutionBackendId.CLAUDE_CODE,
+                )
+
+    def test_fast_is_rejected_for_a_backend_advertising_no_fast_support(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Fast cannot be enabled for the Claude Code Backend",
+        ):
+            StepExecutionSettings(
+                ExecutionBackendId.CLAUDE_CODE,
+                "claude-sonnet-5",
+                "high",
+                FastPreference.ON,
+            )
+
+        document = default_portable_workflow().to_dict()
+        security_review = next(
+            step
+            for step in document["steps"]
+            if step["instance_id"] == SECURITY_REVIEW_STEP_ID
+        )
+        security_review["execution_settings"] = {
+            "backend": "CLAUDE_CODE",
+            "model": "claude-sonnet-5",
+            "reasoning_effort": "high",
+            "fast": "ON",
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Fast cannot be enabled for the Claude Code Backend.*Fast to Off",
+        ):
+            load_portable_workflow(document, default_portable_component_catalog())
+
+    def test_backend_is_a_strictly_validated_persisted_field(self) -> None:
+        catalog = default_portable_component_catalog()
+        invalid_settings = {
+            "Unsupported Step Execution Settings fields": {
+                "backend": "CODEX_CLI",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "fast": "OFF",
+                "service_tier": "priority",
+            },
+            "Unsupported Execution Backend 'CLAUDE'": {
+                "backend": "CLAUDE",
+                "model": "claude-sonnet-5",
+                "reasoning_effort": "high",
+                "fast": "OFF",
+            },
+            "Execution Backend must be one of": {
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "fast": "OFF",
+            },
+        }
+        for expected, raw_settings in invalid_settings.items():
+            with self.subTest(expected=expected):
+                document = default_portable_workflow().to_dict()
+                document["steps"][0]["execution_settings"] = raw_settings
+
+                with self.assertRaisesRegex(ValueError, expected):
+                    load_portable_workflow(document, catalog)
+
+    def test_the_previous_persisted_settings_key_is_no_longer_accepted(self) -> None:
+        document = default_portable_workflow().to_dict()
+        settings = document["steps"][0].pop("execution_settings")
+        document["steps"][0]["codex_settings"] = settings
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Unsupported portable workflow step fields: \['codex_settings'\]",
+        ):
+            load_portable_workflow(document, default_portable_component_catalog())
 
     def test_model_and_effort_reject_c1_and_bidirectional_controls(self) -> None:
         for field_name, model, effort in (
@@ -109,7 +333,11 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         ):
             with self.subTest(field_name=field_name, value=(model, effort)):
                 with self.assertRaisesRegex(ValueError, field_name):
-                    CodexExecutionSettings(model, effort)
+                    StepExecutionSettings(
+                        ExecutionBackendId.CODEX_CLI,
+                        model,
+                        effort,
+                    )
 
     def test_each_step_round_trips_an_independent_execution_choice(self) -> None:
         document = default_portable_workflow().to_dict()
@@ -118,7 +346,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             for step in document["steps"]
             if step["instance_id"] == SECURITY_REVIEW_STEP_ID
         )
-        security_review["codex_settings"] = {
+        security_review["execution_settings"] = {
+            "backend": "CODEX_CLI",
             "model": "gpt-5.6-terra",
             "reasoning_effort": "medium",
             "fast": "ON",
@@ -130,23 +359,254 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            restored.step(SECURITY_REVIEW_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-terra", "medium", FastPreference.ON),
+            restored.step(SECURITY_REVIEW_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-terra",
+                "medium",
+                FastPreference.ON,
+            ),
         )
         self.assertEqual(
-            restored.step(FINAL_REVIEW_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+            restored.step(FINAL_REVIEW_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.OFF,
+            ),
         )
         self.assertEqual(restored.to_dict(), document)
 
-    def test_execution_budget_round_trips_independently_from_codex_settings(self) -> None:
+    def test_every_agent_backed_step_round_trips_its_backend(self) -> None:
+        catalog = default_portable_component_catalog()
+        document = default_portable_workflow().to_dict()
+        agent_backed_ids = [
+            step["instance_id"]
+            for step in document["steps"]
+            if catalog.resolve(StepComponentId(step["component_id"])).is_agent_backed
+        ]
+        self.assertEqual(len(agent_backed_ids), len(document["steps"]))
+        claude_step_id = agent_backed_ids[1]
+        for step in document["steps"]:
+            if step["instance_id"] == claude_step_id:
+                step["execution_settings"] = {
+                    "backend": "CLAUDE_CODE",
+                    "model": "claude-sonnet-5",
+                    "reasoning_effort": "high",
+                    "fast": "OFF",
+                }
+
+        restored = load_portable_workflow(document, catalog)
+
+        self.assertEqual(restored.schema, "devloop.portable-workflow/v3")
+        self.assertEqual(
+            {
+                str(step.instance_id): step.execution_settings.backend
+                for step in restored.steps
+            },
+            {
+                step_id: (
+                    ExecutionBackendId.CLAUDE_CODE
+                    if step_id == claude_step_id
+                    else ExecutionBackendId.CODEX_CLI
+                )
+                for step_id in agent_backed_ids
+            },
+        )
+        self.assertEqual(restored.to_dict(), document)
+
+    def test_both_prior_schema_versions_are_rejected_with_their_remedy(self) -> None:
+        catalog = default_portable_component_catalog()
+        self.assertEqual(
+            SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS,
+            ("devloop.portable-workflow/v1", "devloop.portable-workflow/v2"),
+        )
+        for superseded in SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS:
+            with self.subTest(schema=superseded, path="workflow default"):
+                with tempfile.TemporaryDirectory() as raw:
+                    configuration_path = Path(raw) / "devloop-plan.json"
+                    document = default_portable_workflow().to_dict()
+                    document["schema"] = superseded
+                    configuration_path.write_text(
+                        json.dumps(
+                            {
+                                "user_workflow_default": document,
+                                "user_workflow_default_hash": "stale",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "superseded by 'devloop.portable-workflow/v3'.*recreated"
+                        ".*/options.*reset-workflow.*apply",
+                    ):
+                        WorkflowDefaultStore(configuration_path, catalog).load_saved()
+
+            with self.subTest(schema=superseded, path="run resume"):
+                with tempfile.TemporaryDirectory() as raw:
+                    issue_index = Path(raw) / "README.md"
+                    issue_index.write_text("", encoding="utf-8")
+                    writer = LoopStateWriter(issue_index)
+                    writer.record_resolved_workflow(
+                        default_portable_workflow(),
+                        catalog,
+                    )
+                    writer.state["resolved_workflow"]["schema"] = superseded
+                    writer.flush()
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "superseded by 'devloop.portable-workflow/v3'.*cannot be "
+                        "resumed",
+                    ):
+                        LoopStateWriter(issue_index).resolved_workflow(catalog)
+
+    def test_prior_schema_rejections_reach_the_operator_without_a_traceback(self) -> None:
+        catalog = default_portable_component_catalog()
+        for superseded in SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS:
+            with self.subTest(schema=superseded, path="workflow editor"):
+                with tempfile.TemporaryDirectory() as raw:
+                    configuration_path = Path(raw) / "devloop-plan.json"
+                    document = default_portable_workflow().to_dict()
+                    document["schema"] = superseded
+                    original = json.dumps(
+                        {
+                            "user_workflow_default": document,
+                            "user_workflow_default_hash": "stale",
+                        },
+                        indent=2,
+                    )
+                    configuration_path.write_text(original, encoding="utf-8")
+                    output: list[str] = []
+
+                    result = run_workflow_editor(
+                        configuration_path,
+                        read_line=_FakeEditor(["cancel"]).read_line,
+                        write=output.append,
+                        terminal_width=100,
+                    )
+                    persisted = configuration_path.read_text(encoding="utf-8")
+
+                rendered = "\n".join(output)
+                self.assertIs(result, EditorResult.CANCELLED)
+                self.assertEqual(persisted, original)
+                self.assertIn("recovery mode", rendered)
+                self.assertIn("superseded by", rendered)
+                self.assertIn("reset-workflow", rendered)
+
+            with self.subTest(schema=superseded, path="run resume"):
+                with tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    issue_index = root / "README.md"
+                    issue_index.write_text("", encoding="utf-8")
+                    writer = LoopStateWriter(issue_index)
+                    writer.record_resolved_workflow(
+                        default_portable_workflow(),
+                        catalog,
+                    )
+                    writer.state["resolved_workflow"]["schema"] = superseded
+                    writer.flush()
+                    output = []
+
+                    workflow = cli.resolve_run_workflow_with_repair(
+                        LoopStateWriter(issue_index),
+                        catalog,
+                        user_workflow_path=root / "devloop-plan.json",
+                        model_catalog_loader=self._live_catalog,
+                        read_line=lambda _prompt: "/quit",
+                        write=output.append,
+                    )
+
+                rendered = "\n".join(output)
+                self.assertIsNone(workflow)
+                self.assertIn("cannot be resumed", rendered)
+                self.assertIn("superseded by", rendered)
+                self.assertNotIn("Traceback", rendered)
+
+    def test_recovery_reset_message_names_the_current_schema_and_no_stale_version(
+        self,
+    ) -> None:
+        """The remedy path must name the live schema constant, never a frozen literal."""
+        catalog = default_portable_component_catalog()
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            document = default_portable_workflow().to_dict()
+            document["schema"] = SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS[-1]
+            configuration_path.write_text(
+                json.dumps(
+                    {
+                        "user_workflow_default": document,
+                        "user_workflow_default_hash": "stale",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output: list[str] = []
+
+            result = run_workflow_editor(
+                configuration_path,
+                read_line=_FakeEditor(["reset-workflow", "apply"]).read_line,
+                write=output.append,
+                terminal_width=100,
+            )
+            persisted = WorkflowDefaultStore(configuration_path, catalog).load()
+
+        rendered = "\n".join(output)
+        reset_message = next(
+            entry for entry in output if entry.startswith("Built-in ")
+        )
+        self.assertIs(result, EditorResult.APPLIED)
+        self.assertEqual(persisted, default_portable_workflow())
+        self.assertIn(PORTABLE_WORKFLOW_SCHEMA, reset_message)
+        for superseded in SUPERSEDED_PORTABLE_WORKFLOW_SCHEMAS:
+            # The rejection explanation may quote the version actually found, but
+            # the prepared-workflow message must never name a superseded one.
+            self.assertNotIn(superseded, reset_message)
+            short_version = superseded.rsplit("/", 1)[-1]
+            self.assertNotIn(f"schema-{short_version}", rendered)
+            self.assertNotIn(f"built-in {short_version}", rendered.lower())
+
+    def test_apply_message_qualifies_a_resumed_refresh_by_execution_backend(
+        self,
+    ) -> None:
+        """Apply must not promise a model, effort, or Fast refresh across backends."""
+        with tempfile.TemporaryDirectory() as raw:
+            configuration_path = Path(raw) / "devloop-plan.json"
+            output: list[str] = []
+
+            result = run_workflow_editor(
+                configuration_path,
+                read_line=_FakeEditor(["apply"]).read_line,
+                write=output.append,
+                terminal_width=100,
+            )
+
+        applied_message = " ".join(
+            next(
+                entry
+                for entry in output
+                if entry.startswith("Workflow default applied.")
+            ).split()
+        )
+        self.assertIs(result, EditorResult.APPLIED)
+        self.assertEqual(
+            applied_message,
+            "Workflow default applied. Resume: capabilities refresh; model, "
+            "effort, Fast only if the Execution Backend matches. Structural "
+            "changes apply to new runs.",
+        )
+
+    def test_execution_budget_round_trips_independently_from_execution_settings(self) -> None:
         document = default_portable_workflow().to_dict()
         development = next(
             step
             for step in document["steps"]
             if step["instance_id"] == DEVELOPMENT_STEP_ID
         )
-        original_codex_settings = dict(development["codex_settings"])
+        original_execution_settings = dict(development["execution_settings"])
         development["execution_budget"] = {
             "timeout_seconds": 2400,
             "checkpoint_seconds": 420,
@@ -162,12 +622,12 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             ExecutionBudget(timeout_seconds=2400, checkpoint_seconds=420),
         )
         self.assertEqual(
-            restored.step(DEVELOPMENT_STEP_ID).codex_settings.to_dict(),
-            original_codex_settings,
+            restored.step(DEVELOPMENT_STEP_ID).execution_settings.to_dict(),
+            original_execution_settings,
         )
         self.assertEqual(restored.to_dict(), document)
 
-    def test_local_deterministic_steps_explain_that_codex_settings_do_not_apply(self) -> None:
+    def test_local_deterministic_steps_explain_that_execution_settings_do_not_apply(self) -> None:
         local_component = PortableStepComponent(
             component_id=StepComponentId("example.local-check"),
             default_display_name="Local Check",
@@ -179,7 +639,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         step_id = StepInstanceId("54de2be8-5f1a-4be6-9b8c-0d7e6f5a4b03")
         workflow = load_portable_workflow(
             {
-                "schema": "devloop.portable-workflow/v2",
+                "schema": PORTABLE_WORKFLOW_SCHEMA,
                 "start_step_id": step_id,
                 "steps": [
                     {
@@ -211,7 +671,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             for step in document["steps"]
             if step["instance_id"] == SECURITY_REVIEW_STEP_ID
         )
-        security_review["codex_settings"]["fast"] = "ON"
+        security_review["execution_settings"]["fast"] = "ON"
         workflow = load_portable_workflow(
             document,
             default_portable_component_catalog(),
@@ -221,10 +681,10 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             ValueError,
             "Security Review.*Fast ON.*gpt-5.6-sol.*Retry Catalog.*options",
         ):
-            preflight_codex_execution_settings(
+            preflight_step_execution_settings(
                 workflow,
                 default_portable_component_catalog(),
-                self._live_catalog(sol_fast=False),
+                lambda _backend: self._live_catalog(sol_fast=False),
             )
 
     def test_editor_constrains_and_persists_model_effort_and_fast_per_step(self) -> None:
@@ -248,18 +708,28 @@ class CodexExecutionSettingsTests(unittest.TestCase):
 
         self.assertIs(result, EditorResult.APPLIED)
         self.assertEqual(
-            stored.step(ANALYSIS_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.ON),
+            stored.step(ANALYSIS_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.ON,
+            ),
         )
         self.assertEqual(
-            stored.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-luna", "high", FastPreference.OFF),
+            stored.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-luna",
+                "high",
+                FastPreference.OFF,
+            ),
         )
         rendered = "\n".join(output)
-        self.assertIn("Codex Models — live", rendered)
+        self.assertIn("Codex CLI Models — live", rendered)
         self.assertIn("2. Sol — gpt-5.6-sol", rendered)
 
-    def test_editor_persists_execution_budget_without_changing_codex_settings(self) -> None:
+    def test_editor_persists_execution_budget_without_changing_execution_settings(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = Path(raw) / "devloop-plan.json"
             output: list[str] = []
@@ -284,21 +754,26 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             ExecutionBudget(timeout_seconds=1200, checkpoint_seconds=150),
         )
         self.assertEqual(
-            stored.step(ANALYSIS_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+            stored.step(ANALYSIS_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.OFF,
+            ),
         )
         self.assertIn("Timeout:", "\n".join(output))
 
     def test_retry_catalog_replaces_visible_stale_cache_after_discovery_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = Path(raw) / "devloop-plan.json"
-            cache = CodexModelCatalogCache(
+            cache = ModelCatalogCache(
                 model_catalog_cache_path(configuration_path)
             )
             cache.replace(self._live_catalog())
             attempts = 0
 
-            def discover() -> CodexModelCatalog:
+            def discover(_backend: ExecutionBackendId) -> ModelCatalog:
                 nonlocal attempts
                 attempts += 1
                 if attempts == 1:
@@ -315,8 +790,11 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             )
 
         rendered = "\n".join(output)
-        self.assertIn("Codex Model Catalog refreshed from the live backend.", rendered)
-        self.assertNotIn("Codex Model Catalog: STALE", output[-1])
+        self.assertIn(
+            "Codex CLI Model Catalog refreshed from the live backend.",
+            rendered,
+        )
+        self.assertNotIn("Codex CLI Model Catalog: STALE", output[-1])
 
     def test_editor_sanitizes_backend_catalog_errors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -327,7 +805,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 read_line=_FakeEditor(["cancel"]).read_line,
                 write=output.append,
                 terminal_width=120,
-                model_catalog_loader=lambda: (_ for _ in ()).throw(
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
                     CatalogDiscoveryError(HOSTILE_TERMINAL_TEXT)
                 ),
             )
@@ -351,7 +829,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             with self.subTest(field_name=field_name), tempfile.TemporaryDirectory() as raw:
                 output: list[str] = []
 
-                def load_catalog() -> CodexModelCatalog:
+                def load_catalog(_backend: ExecutionBackendId) -> ModelCatalog:
                     model_values = {
                         "model_id": "gpt-5.6-luna",
                         "display_name": "Luna",
@@ -363,8 +841,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                         fetched_at = str(hostile_value)
                     else:
                         model_values[field_name] = hostile_value
-                    return CodexModelCatalog(
-                        models=(CodexModel(**model_values),),
+                    return ModelCatalog(
+                        models=(CatalogModel(**model_values),),
                         fetched_at=fetched_at,
                     )
 
@@ -384,7 +862,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                         for character in rendered
                     )
                 )
-                self.assertNotIn("Codex Models —", rendered)
+                self.assertNotIn("Codex CLI Models —", rendered)
                 self.assertNotIn("Reasoning Efforts —", rendered)
 
     def test_editor_rejects_hostile_cached_catalog_metadata_before_display(
@@ -437,15 +915,15 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                         for character in rendered
                     )
                 )
-                self.assertNotIn("Codex Models —", rendered)
+                self.assertNotIn("Codex CLI Models —", rendered)
                 self.assertNotIn("Reasoning Efforts —", rendered)
 
     def test_cached_only_model_choice_cannot_be_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = Path(raw) / "devloop-plan.json"
-            cached_catalog = CodexModelCatalog(
+            cached_catalog = ModelCatalog(
                 models=(
-                    CodexModel(
+                    CatalogModel(
                         "cached-only-model",
                         "Cached Only",
                         "",
@@ -455,7 +933,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 fetched_at="2026-07-15T12:00:00",
                 source=CatalogSource.LIVE,
             )
-            CodexModelCatalogCache(
+            ModelCatalogCache(
                 model_catalog_cache_path(configuration_path)
             ).replace(cached_catalog)
             output: list[str] = []
@@ -465,7 +943,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 read_line=_FakeEditor(["1", "model", "1", "apply"]).read_line,
                 write=output.append,
                 terminal_width=120,
-                model_catalog_loader=lambda: (_ for _ in ()).throw(
+                model_catalog_loader=lambda _backend: (_ for _ in ()).throw(
                     CatalogDiscoveryError("backend unavailable")
                 ),
             )
@@ -476,11 +954,11 @@ class CodexExecutionSettingsTests(unittest.TestCase):
 
         self.assertIs(result, EditorResult.APPLIED)
         self.assertEqual(
-            stored.step(ANALYSIS_STEP_ID).codex_settings.model,
+            stored.step(ANALYSIS_STEP_ID).execution_settings.model,
             "gpt-5.6-sol",
         )
         self.assertIn(
-            "fresh live Codex Model Catalog is required",
+            "fresh live Codex CLI Model Catalog is required",
             "\n".join(output),
         )
 
@@ -500,7 +978,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 for step in document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            development["codex_settings"]["reasoning_effort"] = "xhigh"
+            development["execution_settings"]["reasoning_effort"] = "xhigh"
             store.replace(
                 load_portable_workflow(
                     document,
@@ -517,8 +995,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                     writer,
                     default_portable_component_catalog(),
                     user_workflow_path=configuration_path,
-                    live_model_catalog=self._live_catalog(),
-                    require_codex_preflight=True,
+                    model_catalog_loader=self._live_catalog,
+                    require_preflight=True,
                 )
 
         self.assertNotIn("resolved_workflow", writer.state)
@@ -544,7 +1022,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 for step in unavailable_document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            development["codex_settings"]["model"] = "missing-model"
+            development["execution_settings"]["model"] = "missing-model"
             WorkflowDefaultStore(configuration_path, catalog).replace(
                 load_portable_workflow(unavailable_document, catalog)
             )
@@ -557,8 +1035,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                     writer,
                     catalog,
                     user_workflow_path=configuration_path,
-                    live_model_catalog=self._live_catalog(),
-                    require_codex_preflight=True,
+                    model_catalog_loader=self._live_catalog,
+                    require_preflight=True,
                 )
 
             restored = LoopStateWriter(issue_index)
@@ -577,7 +1055,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             issue_index.write_text("", encoding="utf-8")
             catalog = default_portable_component_catalog()
             invalid_document = default_portable_workflow().to_dict()
-            invalid_document["steps"][0]["codex_settings"]["model"] = "missing-model"
+            invalid_document["steps"][0]["execution_settings"]["model"] = "missing-model"
             store = WorkflowDefaultStore(configuration_path, catalog)
             store.replace(load_portable_workflow(invalid_document, catalog))
             writer = LoopStateWriter(issue_index)
@@ -590,7 +1068,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             )
             discovery_count = 0
 
-            def discover() -> CodexModelCatalog:
+            def discover() -> ModelCatalog:
                 nonlocal discovery_count
                 discovery_count += 1
                 result = next(discoveries)
@@ -642,7 +1120,7 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 for step in invalid_document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            invalid_development["codex_settings"]["model"] = "missing-model"
+            invalid_development["execution_settings"]["model"] = "missing-model"
             store = WorkflowDefaultStore(configuration_path, catalog)
             store.replace(load_portable_workflow(invalid_document, catalog))
 
@@ -652,7 +1130,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 for step in repaired_document["steps"]
                 if step["instance_id"] == DEVELOPMENT_STEP_ID
             )
-            repaired_development["codex_settings"] = {
+            repaired_development["execution_settings"] = {
+                "backend": "CODEX_CLI",
                 "model": "gpt-5.6-sol",
                 "reasoning_effort": "xhigh",
                 "fast": "OFF",
@@ -681,8 +1160,13 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 )
 
         self.assertEqual(
-            resolved.step(DEVELOPMENT_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-sol", "xhigh", FastPreference.OFF),
+            resolved.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-sol",
+                "xhigh",
+                FastPreference.OFF,
+            ),
         )
         self.assertEqual(
             editor.call_args.kwargs["current_workflow"],
@@ -745,13 +1229,15 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(workflow, default_portable_workflow())
         self.assertEqual(persisted, default_portable_workflow())
 
-    def test_cli_repair_cancel_preserves_a_malformed_v2_default(self) -> None:
+    def test_cli_repair_cancel_preserves_a_malformed_current_schema_default(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             configuration_path = root / "devloop-plan.json"
             original = (
                 '{"target_repo":"/repo","user_workflow_default":'
-                '{"schema":"devloop.portable-workflow/v2","steps":[]},'
+                f'{{"schema":"{PORTABLE_WORKFLOW_SCHEMA}","steps":[]}},'
                 '"user_workflow_default_hash":"invalid"}'
             )
             configuration_path.write_text(original, encoding="utf-8")
@@ -793,9 +1279,9 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [call["codex_settings"] for call in calls],
+            [call["execution_settings"] for call in calls],
             [
-                step.codex_settings
+                step.execution_settings
                 for step in workflow.primary_path()
                 if default_portable_component_catalog().resolve(step.component_id).scope
                 is StepScope.ISSUE
@@ -812,6 +1298,68 @@ class CodexExecutionSettingsTests(unittest.TestCase):
         )
         self.assertTrue(all(call["pass_number"] == 3 for call in calls))
 
+    def test_resume_keeps_the_snapshotted_backend_while_refreshing_capabilities(
+        self,
+    ) -> None:
+        catalog = default_portable_component_catalog()
+        snapshot_document = default_portable_workflow().to_dict()
+        development = next(
+            step
+            for step in snapshot_document["steps"]
+            if step["instance_id"] == DEVELOPMENT_STEP_ID
+        )
+        development["execution_settings"] = {
+            "backend": "CLAUDE_CODE",
+            "model": "claude-sonnet-5",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+        }
+        component = catalog.resolve(StepComponentId(development["component_id"]))
+        removable = next(
+            reference
+            for reference in component.default_capability_profile().capabilities
+            if component.required_capability_reason(reference) is None
+        )
+        development["capability_profile"] = {
+            key: [path for path in paths if path != removable.path]
+            for key, paths in development["capability_profile"].items()
+        }
+        snapshot = load_portable_workflow(snapshot_document, catalog)
+
+        preferred_document = default_portable_workflow().to_dict()
+        preferred_development = next(
+            step
+            for step in preferred_document["steps"]
+            if step["instance_id"] == DEVELOPMENT_STEP_ID
+        )
+        preferred_development["execution_settings"] = {
+            "backend": "CODEX_CLI",
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "high",
+            "fast": "OFF",
+        }
+        preferred = load_portable_workflow(preferred_document, catalog)
+
+        refreshed = refresh_resumable_execution_preferences(snapshot, preferred)
+
+        self.assertEqual(
+            refreshed.step(DEVELOPMENT_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CLAUDE_CODE,
+                "claude-sonnet-5",
+                "high",
+                FastPreference.OFF,
+            ),
+        )
+        self.assertEqual(
+            refreshed.step(DEVELOPMENT_STEP_ID).capability_profile,
+            preferred.step(DEVELOPMENT_STEP_ID).capability_profile,
+        )
+        self.assertEqual(
+            refreshed.step(FINAL_REVIEW_STEP_ID).execution_settings,
+            preferred.step(FINAL_REVIEW_STEP_ID).execution_settings,
+        )
+
     def test_loop_state_round_trips_the_current_per_step_settings(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -823,7 +1371,8 @@ class CodexExecutionSettingsTests(unittest.TestCase):
                 for step in document["steps"]
                 if step["instance_id"] == FINAL_REVIEW_STEP_ID
             )
-            final_review["codex_settings"] = {
+            final_review["execution_settings"] = {
+                "backend": "CODEX_CLI",
                 "model": "gpt-5.6-terra",
                 "reasoning_effort": "high",
                 "fast": "ON",
@@ -843,8 +1392,13 @@ class CodexExecutionSettingsTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            restored.step(FINAL_REVIEW_STEP_ID).codex_settings.as_tuple(),
-            ("gpt-5.6-terra", "high", FastPreference.ON),
+            restored.step(FINAL_REVIEW_STEP_ID).execution_settings.as_tuple(),
+            (
+                ExecutionBackendId.CODEX_CLI,
+                "gpt-5.6-terra",
+                "high",
+                FastPreference.ON,
+            ),
         )
         self.assertEqual(restored, workflow)
 

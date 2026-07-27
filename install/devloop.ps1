@@ -313,7 +313,7 @@ function Install-PortableRuntime {
     if ($LASTEXITCODE -ne 0) {
         throw 'devloop-install: error: portable runtime dependency installation failed'
     }
-    & $nextPython -c 'import textual; raise SystemExit(0 if textual.__version__ == "8.2.8" else 1)'
+    & $nextPython -c "import textual; raise SystemExit(0 if textual.__version__ == '8.2.8' else 1)"
     if ($LASTEXITCODE -ne 0) {
         throw 'devloop-install: error: portable runtime validation failed'
     }

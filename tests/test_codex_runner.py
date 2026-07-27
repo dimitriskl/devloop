@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import json
 import os
 import sys
 import tempfile
-import time
 import time
 import unittest
 from contextlib import redirect_stdout
@@ -16,12 +14,18 @@ from unittest import mock
 from devloop import codex_runner
 from devloop.codex_events import render_safe_codex_activity
 from devloop.issue_pack import Issue
+from devloop.portable_execution_backend import (
+    ExecutionBackendId,
+    StepActivityEvent,
+    StepActivityKind,
+    codex_cli,
+)
 from devloop.portable_workflow import (
     FINAL_REVIEW_STEP_ID,
     SECURITY_REVIEW_STEP_ID,
-    CodexExecutionSettings,
     ExecutionBudget,
     FastPreference,
+    StepExecutionSettings,
 )
 from devloop.state import recover_role_passes
 from devloop.statusui import Stage
@@ -35,11 +39,11 @@ from tests.terminal_safety import (
 class ResolveCodexExecutableTests(unittest.TestCase):
     def test_uses_shutil_which_when_available(self) -> None:
         with mock.patch.object(
-            codex_runner.shutil,
+            codex_cli.shutil,
             "which",
             return_value="C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd",
         ):
-            result = codex_runner.resolve_codex_executable("codex")
+            result = codex_cli.resolve_codex_executable("codex")
 
         self.assertEqual(result, "C:/Users/Dimitris/AppData/Roaming/npm/codex.cmd")
 
@@ -51,10 +55,10 @@ class ResolveCodexExecutableTests(unittest.TestCase):
             codex_cmd = npm_dir / "codex.cmd"
             codex_cmd.write_text("@echo off\n", encoding="utf-8")
 
-            with mock.patch.object(codex_runner.shutil, "which", return_value=None), \
-                 mock.patch.object(codex_runner.sys, "platform", "win32"), \
+            with mock.patch.object(codex_cli.shutil, "which", return_value=None), \
+                 mock.patch.object(codex_cli.sys, "platform", "win32"), \
                  mock.patch.dict(os.environ, {"APPDATA": str(appdata)}):
-                result = codex_runner.resolve_codex_executable("codex")
+                result = codex_cli.resolve_codex_executable("codex")
 
         self.assertEqual(result, str(codex_cmd.resolve()))
 
@@ -62,7 +66,7 @@ class ResolveCodexExecutableTests(unittest.TestCase):
 class CodexCommandSettingsTests(unittest.TestCase):
     def test_command_explicitly_overrides_model_effort_and_fast_on_or_off(self) -> None:
         with tempfile.TemporaryDirectory() as raw, mock.patch.object(
-            codex_runner,
+            codex_cli,
             "uses_legacy_approval_flag",
             return_value=False,
         ):
@@ -80,9 +84,10 @@ class CodexCommandSettingsTests(unittest.TestCase):
                 (FastPreference.OFF, 'service_tier="default"', "--disable"),
             ):
                 with self.subTest(fast=fast):
-                    command = codex_runner.build_codex_exec_command(
+                    command = codex_cli.build_codex_exec_command(
                         **common,
-                        codex_settings=CodexExecutionSettings(
+                        execution_settings=StepExecutionSettings(
+                            ExecutionBackendId.CODEX_CLI,
                             "gpt-5.6-sol",
                             "xhigh",
                             fast,
@@ -101,7 +106,7 @@ class CodexCommandSettingsTests(unittest.TestCase):
 
     def test_streaming_command_enforces_the_step_execution_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            result = codex_runner.run_streaming_codex_command(
+            result = codex_cli.run_streaming_codex_command(
                 [sys.executable, "-c", "import time; time.sleep(5)"],
                 input_text="",
                 cwd=Path(raw),
@@ -130,7 +135,7 @@ class CodexCommandSettingsTests(unittest.TestCase):
             "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)"
         )
         with tempfile.TemporaryDirectory() as raw:
-            result = codex_runner.run_streaming_codex_command(
+            result = codex_cli.run_streaming_codex_command(
                 [sys.executable, "-c", script],
                 input_text="",
                 cwd=Path(raw),
@@ -155,7 +160,7 @@ class CodexCommandSettingsTests(unittest.TestCase):
             "time.sleep(5)"
         )
         with tempfile.TemporaryDirectory() as raw:
-            result = codex_runner.run_streaming_codex_command(
+            result = codex_cli.run_streaming_codex_command(
                 [sys.executable, "-c", script],
                 input_text="",
                 cwd=Path(raw),
@@ -179,11 +184,11 @@ class CodexCommandSettingsTests(unittest.TestCase):
             "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)"
         )
         with tempfile.TemporaryDirectory() as raw, mock.patch.object(
-            codex_runner,
+            codex_cli,
             "reap_process_after_terminal_event",
             side_effect=lambda _process: time.sleep(0.4),
         ):
-            result = codex_runner.run_streaming_codex_command(
+            result = codex_cli.run_streaming_codex_command(
                 [sys.executable, "-c", script],
                 input_text="",
                 cwd=Path(raw),
@@ -201,7 +206,7 @@ class CodexCommandSettingsTests(unittest.TestCase):
     def test_streaming_budget_kills_child_retaining_inherited_pipes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             started_at = time.monotonic()
-            result = codex_runner.run_streaming_codex_command(
+            result = codex_cli.run_streaming_codex_command(
                 [
                     sys.executable,
                     "-c",
@@ -231,32 +236,34 @@ class CodexCommandSettingsTests(unittest.TestCase):
             runner.repo_root = root
             runner.log_root = root / ".loop.logs"
             runner.ensure_log_root()
-            retryable = codex_runner.subprocess.CompletedProcess(
+            retryable = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 1,
                 stdout="",
                 stderr="failed to connect to websocket\n",
             )
-            successful = codex_runner.subprocess.CompletedProcess(
+            successful = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 0,
                 stdout='{"status":"PASS"}\n',
                 stderr="",
             )
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "CODEX_CONNECTION_RETRY_DELAY_SECONDS",
                 0.15,
             ), mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "run_streaming_codex_command",
                 side_effect=(retryable, retryable, successful),
             ) as execute:
-                result = runner.run_codex_exec_with_connection_retries(
+                result = codex_cli.run_codex_exec_with_connection_retries(
                     command=["codex"],
                     prompt="Implement the issue.",
                     stdout_path=runner.log_root / "stdout.jsonl",
                     stderr_path=runner.log_root / "stderr.txt",
+                    cwd=root,
+                    write_log=runner.write_log_text,
                     execution_budget=ExecutionBudget(
                         timeout_seconds=0.2,
                         checkpoint_seconds=0.2,
@@ -437,21 +444,19 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"reviewer": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 return_value=["codex"],
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
-                return_value=codex_runner.subprocess.CompletedProcess(
+                return_value=codex_cli.subprocess.CompletedProcess(
                     ["codex"],
                     0,
                     stdout='{"status":"PASS"}',
@@ -506,21 +511,19 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"reviewer": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 return_value=["codex"],
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
-                return_value=codex_runner.subprocess.CompletedProcess(
+                return_value=codex_cli.subprocess.CompletedProcess(
                     ["codex"],
                     0,
                     stdout='{"status":"PASS"}',
@@ -632,7 +635,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                 step_display_name="Security Review",
             )
 
-        self.assertIn("# Codex Dev Loop Senior Review", prompt)
+        self.assertIn("# Dev Loop Senior Review", prompt)
         self.assertIn("skills/codex/senior-code-reviewer/SKILL.md", prompt)
         self.assertIn("agents/codex/senior-code-reviewer.md", prompt)
         self.assertIn("Workflow step: `Security Review`", prompt)
@@ -699,14 +702,12 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"reviewer": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
             issue = Issue("0001", "Review identity", issue_path, False)
-            completed = codex_runner.subprocess.CompletedProcess(
+            completed = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 0,
                 stdout='{"status":"PASS"}',
@@ -714,11 +715,11 @@ class RolePromptIdentityTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 return_value=["codex"],
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 return_value=completed,
             ):
@@ -770,9 +771,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"reviewer": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
@@ -782,14 +781,14 @@ class RolePromptIdentityTests(unittest.TestCase):
             def build_command(**arguments: object) -> list[str]:
                 return ["codex", "-o", str(arguments["message_path"])]
 
-            def execute(command: list[str], **_: object) -> codex_runner.subprocess.CompletedProcess[str]:
+            def execute(command: list[str], **_: object) -> codex_cli.subprocess.CompletedProcess[str]:
                 marker = next(attempts)
                 message_path = Path(command[command.index("-o") + 1])
                 message_path.write_text(
                     json.dumps({"status": "PASS", "summary": marker}),
                     encoding="utf-8",
                 )
-                return codex_runner.subprocess.CompletedProcess(
+                return codex_cli.subprocess.CompletedProcess(
                     command,
                     0,
                     stdout=f"stdout-{marker}\n",
@@ -797,11 +796,11 @@ class RolePromptIdentityTests(unittest.TestCase):
                 )
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 side_effect=build_command,
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 side_effect=execute,
             ):
@@ -877,9 +876,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"coder": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
@@ -923,7 +920,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                     '{"type":"turn.completed","usage":{}}',
                 ]
             )
-            completed = codex_runner.subprocess.CompletedProcess(
+            completed = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 0,
                 stdout=stdout,
@@ -935,11 +932,11 @@ class RolePromptIdentityTests(unittest.TestCase):
                 return ["codex"]
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 side_effect=build_command,
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 return_value=completed,
             ):
@@ -984,15 +981,13 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"coder": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = log_root
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
 
             captured_message_path: list[Path] = []
-            completed = codex_runner.subprocess.CompletedProcess(
+            completed = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 0,
                 stdout='{"status":"PASS","summary":"implemented"}',
@@ -1016,11 +1011,11 @@ class RolePromptIdentityTests(unittest.TestCase):
                 return original_write_text(path, text, *args, **kwargs)
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 side_effect=build_command,
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 return_value=completed,
             ), mock.patch.object(
@@ -1081,13 +1076,11 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"security/review": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
-            completed = codex_runner.subprocess.CompletedProcess(
+            completed = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 0,
                 stdout='{"status":"PASS"}',
@@ -1095,11 +1088,11 @@ class RolePromptIdentityTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 return_value=["codex"],
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 return_value=completed,
             ):
@@ -1205,9 +1198,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                 required_docs=[],
                 roles={"coder": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
@@ -1229,7 +1220,7 @@ class RolePromptIdentityTests(unittest.TestCase):
                 },
             }
 
-            completed = codex_runner.subprocess.CompletedProcess(
+            completed = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 0,
                 stdout='{"status":"PASS"}',
@@ -1237,11 +1228,11 @@ class RolePromptIdentityTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 return_value=["codex"],
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 return_value=completed,
             ):
@@ -1286,13 +1277,11 @@ class StreamingCodexRunnerTests(unittest.TestCase):
                 required_docs=[],
                 roles={"coder": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
-            completed = codex_runner.subprocess.CompletedProcess(
+            completed = codex_cli.subprocess.CompletedProcess(
                 ["codex"],
                 124,
                 stdout="",
@@ -1300,11 +1289,11 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 return_value=["codex"],
             ), mock.patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 return_value=completed,
             ):
@@ -1329,10 +1318,17 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             result.summary,
         )
         self.assertIn(
-            "Changes already written remain in the worktree",
+            "Changes already written remain in the workspace",
             result.summary,
         )
         self.assertIn("Rerun the unfinished issue", result.summary)
+        # The summary names the Execution Backend that actually ran, so a
+        # mixed-backend Workflow never reports the wrong provider.
+        self.assertIn(
+            "The Codex CLI Backend did not return a final role result",
+            result.summary,
+        )
+        self.assertNotIn("Claude", result.summary)
         self.assertNotIn("failed with exit code 124", result.summary)
 
     def test_every_delivery_role_maps_to_its_visible_phase(self) -> None:
@@ -1423,21 +1419,23 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             def kill(self) -> None:
                 self.returncode = -9
 
-        runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
-        runner.repo_root = Path("/tmp/repository")
+        retry_logs: list[Path] = []
         with mock.patch.object(
-                 codex_runner.subprocess,
+                 codex_cli.subprocess,
                  "Popen",
                  return_value=FakeProcess(),
              ) as popen, redirect_stdout(StringIO()) as stdout:
-            result = runner.run_codex_exec_with_connection_retries(
+            result = codex_cli.run_codex_exec_with_connection_retries(
                 command=["codex", "exec", "--json", "-"],
                 prompt="Implement the issue.",
                 stdout_path=Path("stdout.jsonl"),
                 stderr_path=Path("stderr.txt"),
+                cwd=Path("/tmp/repository"),
+                write_log=lambda path, _text: retry_logs.append(path),
             )
 
         self.assertEqual(result.returncode, 0)
+        self.assertEqual(retry_logs, [])
         popen.assert_called_once()
         rendered = stdout.getvalue()
         self.assertIn(
@@ -1474,13 +1472,13 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             def kill(self) -> None:
                 self.returncode = -9
 
-        activities: list[str | None] = []
+        activities: list[StepActivityEvent | None] = []
         with mock.patch.object(
-            codex_runner.subprocess,
+            codex_cli.subprocess,
             "Popen",
             return_value=FakeProcess(),
         ), redirect_stdout(StringIO()) as stdout:
-            result = codex_runner.run_streaming_codex_command(
+            result = codex_cli.run_streaming_codex_command(
                 ["codex", "exec", "--json", "-"],
                 input_text="Implement the issue.",
                 cwd=Path("/tmp/repository"),
@@ -1489,7 +1487,13 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Codex update: Checking the catalog.", activities)
+        self.assertIn(
+            StepActivityEvent(
+                kind=StepActivityKind.MESSAGE,
+                activity="Codex update: Checking the catalog.",
+            ),
+            activities,
+        )
         self.assertEqual(stdout.getvalue(), "")
 
 

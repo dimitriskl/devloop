@@ -20,9 +20,14 @@ from .issue_scheduler import (
 from .lineeditor import LineEditor
 from .model_catalog import (
     CatalogDiscoveryError,
-    CodexModelCatalog,
-    CodexModelCatalogAdapter,
+    ModelCatalog,
 )
+from .portable_execution_backend import (
+    BackendModelCatalogAccess,
+    BackendModelCatalogLoader,
+    RunWideBlocker,
+)
+from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
 from .product_scope import require_portable_target
 from .portable_component_catalog import build_portable_component_catalog
 from .portable_workflow import (
@@ -36,7 +41,7 @@ from .portable_workflow import (
     default_portable_workflow,
     load_portable_workflow,
     parse_issue_status,
-    preflight_codex_execution_settings,
+    preflight_step_execution_settings,
     refresh_resumable_execution_preferences,
 )
 from .run_review import (
@@ -68,7 +73,10 @@ from .workflow_defaults import (
     WorkflowDefaultStore,
     portable_planner_configuration_path,
 )
-from .workflow_editor import run_workflow_editor
+from .workflow_editor import (
+    backend_model_catalog_loader,
+    run_workflow_editor,
+)
 from . import statusui
 from .statusui import Stage
 
@@ -104,6 +112,24 @@ def renew_exhausted_scheduler_for_explicit_start(
         issue.number for issue in issues
     )
     return True
+
+
+def render_run_pause_notice(blocker: RunWideBlocker, *, stream=None) -> str:
+    """Announce a run-wide pause as one line, distinctly from any Issue status.
+
+    One rendering serves every surface. The interactive TTY and the append-only
+    Plain Mode read the same words, and the colour decision belongs to the stream
+    rather than to the caller, so a redirected or `NO_COLOR` run shows the
+    identical sentence without escape sequences.
+
+    Both parts after the label come from the classified blocker: its kind and the
+    backend's own Dev Loop wording for that condition. Neither is provider output,
+    so the notice can carry no credential and no raw provider payload.
+    """
+    return (
+        f"{statusui.render_run_paused_label(stream=stream)} · "
+        f"{blocker.kind.value} · {blocker.summary}"
+    )
 
 
 def execute_dependency_schedule(
@@ -522,15 +548,18 @@ def _run_devloop_attempt(
     preset = load_preset(resolve_bundle_path(bundle.root, args.preset))
     component_catalog = build_portable_component_catalog(bundle.root, preset.roles)
     state_writer = LoopStateWriter(issues_index_in_repo)
+    execution_backend = CodexCliExecutionBackend.resolved(
+        args.codex,
+        sandbox=args.sandbox,
+        approval_policy=args.approval_policy,
+    )
     runner = CodexRunner(
         bundle=bundle,
         repo_root=repo_root,
         prd_path=prd_in_repo,
         issues_index=issues_index_in_repo,
         preset=preset,
-        codex=args.codex,
-        sandbox=args.sandbox,
-        approval_policy=args.approval_policy,
+        execution_backend=execution_backend,
         dry_run=args.dry_run,
         use_self_improvement_wiki=args.self_improvement_wiki,
     )
@@ -548,20 +577,20 @@ def _run_devloop_attempt(
                 state_writer,
                 component_catalog,
                 user_workflow_path=portable_planner_configuration_path(),
-                model_catalog_loader=CodexModelCatalogAdapter(
-                    runner.codex,
+                catalog_access=BackendModelCatalogAccess(
                     cwd=repo_root,
-                ).discover,
+                    codex=args.codex,
+                ),
                 read_line=read_prompt,
                 write=print,
                 workflow_snapshot=workflow_snapshot,
                 allow_interactive_repair=not args.non_interactive,
             )
             if resolved_workflow is None:
-                print("Run cancelled before Codex Execution Settings were authorized.")
+                print("Run cancelled before Step Execution Settings were authorized.")
                 return 0
     except ValueError as exc:
-        parser.error(f"Codex Execution Settings preflight failed: {exc}")
+        parser.error(f"Step Execution Settings preflight failed: {exc}")
     if renew_exhausted_scheduler_for_explicit_start(
         state_writer,
         issues,
@@ -720,10 +749,8 @@ def _run_devloop_attempt(
         )
     except RunWideBlockerError as error:
         state_writer.record_run_paused(error.blocker)
-        paused_status = statusui.render_status("BLOCKED", stream=sys.stderr)
         print(
-            f"RUN PAUSED · {paused_status} · {error.blocker.kind.value} · "
-            f"{error.blocker.summary}",
+            render_run_pause_notice(error.blocker, stream=sys.stderr),
             file=sys.stderr,
         )
     finally:
@@ -1379,10 +1406,17 @@ def resolve_run_workflow(
     catalog: PortableStepComponentCatalog,
     *,
     user_workflow_path: Path | None = None,
-    live_model_catalog: CodexModelCatalog | None = None,
-    require_codex_preflight: bool = False,
+    model_catalog_loader: BackendModelCatalogLoader | None = None,
+    preflight_cwd: Path | None = None,
+    require_preflight: bool = False,
     workflow_snapshot: WorkflowDefinition | None = None,
 ) -> WorkflowDefinition:
+    """Resolve the exact Workflow a run will use, authorizing it when required.
+
+    ``model_catalog_loader`` is asked for a catalog only for the Execution
+    Backends the resolved Workflow actually references, so a run that uses one
+    provider never reaches for the other.
+    """
     saved_default = (
         WorkflowDefaultStore(user_workflow_path, catalog).load_saved()
         if user_workflow_path is not None
@@ -1403,13 +1437,12 @@ def resolve_run_workflow(
                 ).to_dict(),
                 catalog,
             )
-        if require_codex_preflight:
-            if live_model_catalog is None:
-                raise ValueError("A fresh live Codex Model Catalog is required.")
-            preflight_codex_execution_settings(
+        if require_preflight:
+            _authorize_run_workflow(
                 workflow,
                 catalog,
-                live_model_catalog,
+                model_catalog_loader,
+                preflight_cwd,
             )
         if workflow != current_workflow and preferred_workflow is not None:
             workflow = state_writer.refresh_resolved_workflow_execution_preferences(
@@ -1429,15 +1462,33 @@ def resolve_run_workflow(
             )
     else:
         workflow = saved_default or default_portable_workflow()
-    if require_codex_preflight:
-        if live_model_catalog is None:
-            raise ValueError("A fresh live Codex Model Catalog is required.")
-        preflight_codex_execution_settings(
+    if require_preflight:
+        _authorize_run_workflow(
             workflow,
             catalog,
-            live_model_catalog,
+            model_catalog_loader,
+            preflight_cwd,
         )
     return state_writer.record_resolved_workflow(workflow, catalog)
+
+
+def _authorize_run_workflow(
+    workflow: WorkflowDefinition,
+    catalog: PortableStepComponentCatalog,
+    model_catalog_loader: BackendModelCatalogLoader | None,
+    preflight_cwd: Path | None,
+) -> None:
+    if model_catalog_loader is None:
+        raise ValueError(
+            "A fresh live Model Catalog is required for every Execution Backend "
+            "this Workflow references."
+        )
+    preflight_step_execution_settings(
+        workflow,
+        catalog,
+        model_catalog_loader,
+        cwd=preflight_cwd,
+    )
 
 
 def resolve_run_workflow_with_repair(
@@ -1445,28 +1496,46 @@ def resolve_run_workflow_with_repair(
     catalog: PortableStepComponentCatalog,
     *,
     user_workflow_path: Path,
-    model_catalog_loader: Callable[[], CodexModelCatalog],
+    model_catalog_loader: Callable[[], ModelCatalog] | None = None,
     read_line: Callable[[str], str] | None = None,
     write: Callable[[str], None] | None = None,
     workflow_snapshot: WorkflowDefinition | None = None,
     allow_interactive_repair: bool = True,
+    catalog_access: BackendModelCatalogAccess | None = None,
 ) -> WorkflowDefinition | None:
-    """Authorize and snapshot a run, with a reachable terminal repair loop."""
+    """Authorize and snapshot a run, with a reachable terminal repair loop.
+
+    ``catalog_access`` is the full per-backend access a normal session has: every
+    referenced backend's Model Catalog, one verification call per model, and
+    Backend Availability. It authorizes the run and is what `/options` opened
+    from this loop uses. Without it, this loop reaches only the Codex catalog
+    ``model_catalog_loader`` supplies, and a Workflow Step naming another backend
+    is reported unavailable rather than served Codex's models.
+
+    Each turn of the loop reloads the catalog of every backend the Workflow
+    references, so the retry action refreshes all of them rather than only the
+    one that failed.
+    """
     reader = read_line or input
     writer = write or print
+    load_backend_catalog = backend_model_catalog_loader(
+        catalog_access,
+        model_catalog_loader,
+    )
+    preflight_cwd = catalog_access.cwd if catalog_access is not None else None
     has_current_snapshot = workflow_snapshot is not None or (
         "resolved_workflow" in state_writer.state
         or "resolved_workflow_hash" in state_writer.state
     )
     while True:
         try:
-            live_model_catalog = model_catalog_loader()
             return resolve_run_workflow(
                 state_writer,
                 catalog,
                 user_workflow_path=user_workflow_path,
-                live_model_catalog=live_model_catalog,
-                require_codex_preflight=True,
+                model_catalog_loader=load_backend_catalog,
+                preflight_cwd=preflight_cwd,
+                require_preflight=True,
                 workflow_snapshot=workflow_snapshot,
             )
         except (CatalogDiscoveryError, ValueError) as error:
@@ -1476,17 +1545,20 @@ def resolve_run_workflow_with_repair(
                     f"{safe_error} Retry after restoring live catalog availability or "
                     "repair the User Workflow Default before starting the command."
                 ) from error
-            writer(f"Codex Execution Settings preflight failed: {safe_error}")
+            writer(f"Step Execution Settings preflight failed: {safe_error}")
             if has_current_snapshot:
                 writer(
-                    "The Current Run structure is fixed. /options can update model, "
-                    "reasoning effort, Fast, and capabilities for the resumed attempt; "
-                    "retry-catalog retries live discovery; /quit stops the run."
+                    "The Current Run structure is fixed. /options can update "
+                    "capabilities for the resumed attempt, and model, effort, Fast "
+                    "only if the Execution Backend matches; retry-catalog retries "
+                    "live discovery for every backend this Workflow references; "
+                    "/quit stops the run."
                 )
             else:
                 writer(
                     "Recovery: /options opens the Workflow Editor; retry-catalog "
-                    "retries live discovery; /quit stops the run."
+                    "retries live discovery for every backend this Workflow "
+                    "references; /quit stops the run."
                 )
         action = reader(
             "Preflight action [/options/retry-catalog/quit]: "
@@ -1512,7 +1584,13 @@ def resolve_run_workflow_with_repair(
                 ),
                 catalog=catalog,
                 current_workflow=current_workflow,
-                model_catalog_loader=model_catalog_loader,
+                model_catalog_loader=load_backend_catalog,
+                verify_model=(
+                    catalog_access.verify_model if catalog_access is not None else None
+                ),
+                backend_availability=(
+                    catalog_access.availability if catalog_access is not None else None
+                ),
             )
         elif action in {"retry-catalog", "/retry-catalog"}:
             continue

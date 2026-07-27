@@ -16,9 +16,13 @@ from .codex_runner import (
     PORTABLE_STEP_INSTANCE_ID_PATTERN,
     RoleResult,
 )
-from .codex_events import RunWideBlocker, RunWideBlockerKind
 from .issue_pack import Issue
 from .issue_scheduler import SchedulingPhase
+from .portable_execution_backend import (
+    RunWideBlocker,
+    RunWideBlockerKind,
+    parse_execution_backend_id,
+)
 from .portable_workflow import (
     DataContractId,
     InterruptedStepAttemptRecord,
@@ -31,6 +35,7 @@ from .portable_workflow import (
     StepOutcome,
     StepRuntimeState,
     StepRuntimeStatus,
+    SupersededWorkflowSchemaError,
     TypedStepOutput,
     WorkflowDefinition,
     canonical_workflow_document_hash,
@@ -40,7 +45,11 @@ from .portable_workflow import (
     refresh_resumable_execution_preferences,
     step_attempt_record_to_dict,
 )
-from .step_configuration import StepAttemptContext, StepCapabilityProfile
+from .step_configuration import (
+    StepAttemptContext,
+    StepAttemptProvenance,
+    StepCapabilityProfile,
+)
 
 
 class ResumeRole(str, Enum):
@@ -129,7 +138,16 @@ class LoopStateWriter:
         document = self.state.get("resolved_workflow")
         if not isinstance(document, dict):
             raise ValueError("Loop state has no resolved portable workflow.")
-        workflow = load_portable_workflow(document, catalog)
+        try:
+            workflow = load_portable_workflow(document, catalog)
+        except SupersededWorkflowSchemaError as error:
+            raise ValueError(
+                f"{error} This unfinished Workflow Run cannot be resumed: its "
+                f"resolved workflow in {self.state_path.name} predates the "
+                "Execution Backend. Finish it with the previous Dev Loop "
+                f"version, or delete {self.state_path.name} to start this PRD "
+                "again from its first Workflow Step."
+            ) from error
         expected_hash = self.state.get("resolved_workflow_hash")
         actual_hash = canonical_workflow_document_hash(document)
         if expected_hash != actual_hash:
@@ -1425,7 +1443,43 @@ def step_attempt_record_from_state(data: Any) -> StepAttemptRecord:
         failure_reason=optional_state_string(data.get("failure_reason")),
         rework_attempt_id=optional_state_string(data.get("rework_attempt_id")),
         attempt_context=attempt_context,
+        provenance=_step_attempt_provenance_from_state(data.get("provenance")),
     )
+
+
+def _step_attempt_provenance_from_state(value: Any) -> StepAttemptProvenance | None:
+    """Read one attempt's recorded backend and model provenance back.
+
+    The stored ``model_mismatch`` flag is recomputed and checked rather than
+    trusted. It is derived from the two model identifiers beside it, so a document
+    in which it disagrees with them has either been edited or was written by
+    something that does not understand the record — and in both cases the one thing
+    that must not happen is a real provider substitution being read back as clean.
+    Refusing the document is the only outcome that cannot lose it silently.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Portable step attempt provenance must be an object or null.")
+    raw_backend = value.get("backend")
+    provenance = StepAttemptProvenance(
+        backend=(
+            None if raw_backend is None else parse_execution_backend_id(raw_backend)
+        ),
+        requested_model=optional_state_string(value.get("requested_model")),
+        serving_model=optional_state_string(value.get("serving_model")),
+        cost_usd=value.get("cost_usd"),
+        turn_count=value.get("turn_count"),
+    )
+    recorded_mismatch = value.get("model_mismatch")
+    if recorded_mismatch is not None and bool(recorded_mismatch) != (
+        provenance.model_mismatch
+    ):
+        raise ValueError(
+            "Portable step attempt provenance records a requested-versus-serving "
+            "model mismatch that disagrees with the models it names."
+        )
+    return provenance
 
 
 def _step_attempt_context_from_state(

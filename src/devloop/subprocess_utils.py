@@ -12,10 +12,12 @@ from typing import Sequence
 PROCESS_EXIT_GRACE_SECONDS = 1.0
 PROCESS_TERMINATE_GRACE_SECONDS = 5.0
 BUDGET_POLL_SECONDS = 0.05
+# The exit status every Execution Backend reports when an attempt was terminated
+# because its Execution Budget expired. It lives beside the budget itself so both
+# backends and the role runner read one convention rather than each repeating the
+# number.
+EXECUTION_BUDGET_EXPIRY_RETURNCODE = 124
 PROCESS_TREE_ATTRIBUTE = "_devloop_process_group_id"
-CHECKPOINT_PAUSING_ITEM_TYPES = frozenset(
-    {"command_execution", "mcp_tool_call", "web_search"}
-)
 _ACTIVE_PROCESS_TREES: set[subprocess.Popen[str]] = set()
 _ACTIVE_PROCESS_TREES_LOCK = threading.RLock()
 
@@ -129,37 +131,6 @@ class ProcessExecutionBudget:
                 continue
             terminate_process(self._process)
             return
-
-
-def update_checkpoint_for_backend_event(
-    budget: ProcessExecutionBudget | None,
-    event: dict[str, object] | None,
-    active_items: set[str],
-) -> None:
-    """Pause inactivity expiry while Codex reports an active backend operation."""
-    if budget is None or event is None:
-        return
-    event_type = event.get("type")
-    if event_type not in {"item.started", "item.completed"}:
-        return
-    item = event.get("item")
-    if not isinstance(item, dict):
-        return
-    item_type = item.get("type")
-    if item_type not in CHECKPOINT_PAUSING_ITEM_TYPES:
-        return
-    item_id = item.get("id")
-    key = f"{item_type}:{item_id if isinstance(item_id, str) else item_type}"
-    was_active = bool(active_items)
-    if event_type == "item.started":
-        active_items.add(key)
-    else:
-        active_items.discard(key)
-    is_active = bool(active_items)
-    if not was_active and is_active:
-        budget.pause_checkpoint()
-    elif was_active and not is_active:
-        budget.resume_checkpoint()
 
 
 def run_captured_text(

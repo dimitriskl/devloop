@@ -312,14 +312,29 @@ the active issue when known, and last activity. The same catalog is available
 through `/resume` during planning. Chat with Codex to sharpen a new change; when
 the PRD and issue pack are written, press Enter on the summary screen to start
 development. Type `/options` at any prompt to open the Workflow Editor for
-workflow defaults, including independent `model`, `reasoning`, and `fast`
-choices for each Codex-backed step and a separate `budget` timeout/checkpoint
-for every step. Its `capabilities` command still lets you
+workflow defaults, including an independent `backend` choice for each
+agent-backed step, `model`, `reasoning`, and `fast` choices scoped to that
+backend, and a separate `budget` timeout/checkpoint for every step. The
+`backend` menu annotates each Execution Backend with whether it is installed
+here, and changing a step's backend moves its model and reasoning effort to that
+backend's component defaults. Because a step is only ever offered its own
+backend's models, the model list names that backend and carries a `backend` entry
+that moves the step to the other backend and re-opens on its models, so a Claude
+model is two selections away from a Codex CLI list. Selecting a Claude model
+verifies it against your
+own account once before it is saved, and a short alias is stored as the pinned
+identifier it resolves to. Starting a run authorizes it against every Execution
+Backend the workflow uses and no other, verifying each distinct Claude model once
+more, so authorizing a run and executing its Workflow Step attempts never need a
+provider the workflow does not name. The post-run self-improvement wiki compiler
+is the one exception: it still runs on Codex, so a fully Codex-free run needs
+`--no-self-improvement-wiki`. Its `capabilities` command still lets you
 search and toggle agents and skills for the selected Step Instance, reset that
 profile to its component defaults, or install new ones from GitHub. Required
 capabilities stay enabled and show the component-contract reason. Applying the
-draft makes model, effort, Fast, and capability changes available to matching
-steps when unfinished work is resumed; it never changes a Codex turn already
+draft makes capability changes available to matching steps when unfinished work
+is resumed, and model, effort, and Fast changes available only to steps that keep
+their snapshotted Execution Backend; it never changes an agent turn already
 in progress. Structural, budget, and guidance edits apply to new runs. Use `guidance`
 for bounded multiline instructions specific to the selected step; the editor
 shows that contracts, execution policy, permissions, safety, and output rules
@@ -351,11 +366,11 @@ sensible defaults (all pending issues, a dedicated worktree, the
 self-improvement wiki always on). Type `/run-options` to change the start issue,
 worktree parent path, worktree folder name, or branch first. Type `/options` to
 edit the User Workflow Default and, when resuming an existing implementation
-worktree, inspect its read-only Current Run. Matching model, effort, Fast, and
-capability changes are adopted before the next resumed attempt; the active
-workflow structure remains fixed. When a
-run finishes successfully, the runner asks whether to merge the implementation
-branch or worktree into another branch.
+worktree, inspect its read-only Current Run. Capability changes are adopted
+before the next resumed attempt; model, effort, and Fast changes are adopted
+only when they keep that step's Execution Backend. The active workflow structure
+remains fixed. When a run finishes successfully, the runner asks whether to
+merge the implementation branch or worktree into another branch.
 
 The final handoff command is equivalent to:
 

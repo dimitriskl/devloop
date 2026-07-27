@@ -15,16 +15,17 @@ from unittest import mock
 
 from devloop import chat_loop
 from devloop.chat_loop import ChatCallbacks, ChatConfig, ChatSession
+from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
-    CodexExecutionSettings,
     ExecutionBudget,
     FastPreference,
+    StepExecutionSettings,
     StepRuntimeState,
     StepRuntimeStatus,
-    default_codex_execution_settings,
     default_portable_component_catalog,
     default_portable_workflow,
+    default_step_execution_settings,
 )
 from devloop.statusui import (
     DashboardStatus,
@@ -132,7 +133,7 @@ class ResumeCommandTests(unittest.TestCase):
                     codex="codex",
                     repo_root=Path(raw),
                     bundle_root=Path(raw),
-                    codex_settings=default_codex_execution_settings("analysis"),
+                    execution_settings=default_step_execution_settings("analysis"),
                 ),
                 initial_prompt="PLAN",
                 callbacks=callbacks,
@@ -164,7 +165,7 @@ class ResumeCommandTests(unittest.TestCase):
                     codex="codex",
                     repo_root=Path(raw),
                     bundle_root=Path(raw),
-                    codex_settings=default_codex_execution_settings("analysis"),
+                    execution_settings=default_step_execution_settings("analysis"),
                 ),
                 initial_prompt="PLAN",
                 callbacks=callbacks,
@@ -193,7 +194,7 @@ class ResumeCommandTests(unittest.TestCase):
                     codex="codex",
                     repo_root=Path(raw),
                     bundle_root=Path(raw),
-                    codex_settings=default_codex_execution_settings("analysis"),
+                    execution_settings=default_step_execution_settings("analysis"),
                 ),
                 initial_prompt="PLAN",
                 callbacks=callbacks,
@@ -212,7 +213,7 @@ class BuildTurnCommandTests(unittest.TestCase):
             codex="codex",
             repo_root=Path("C:/repo"),
             bundle_root=Path("F:/devloop"),
-            codex_settings=default_codex_execution_settings("analysis"),
+            execution_settings=default_step_execution_settings("analysis"),
         )
         return ChatSession(config=config)
 
@@ -254,7 +255,8 @@ class BuildTurnCommandTests(unittest.TestCase):
                 codex="codex",
                 repo_root=Path("C:/repo"),
                 bundle_root=Path("F:/devloop"),
-                codex_settings=CodexExecutionSettings(
+                execution_settings=StepExecutionSettings(
+                    ExecutionBackendId.CODEX_CLI,
                     "gpt-5.6-sol",
                     "xhigh",
                     FastPreference.OFF,
@@ -732,7 +734,7 @@ class RunPlanningChatTests(unittest.TestCase):
             codex="codex",
             repo_root=repo,
             bundle_root=repo / "bundle",
-            codex_settings=default_codex_execution_settings("analysis"),
+            execution_settings=default_step_execution_settings("analysis"),
         )
 
     def test_planning_surface_renders_the_shared_workflow_projection(self) -> None:
@@ -774,7 +776,10 @@ class RunPlanningChatTests(unittest.TestCase):
         self.assertIn("WORKFLOW", output.getvalue())
         self.assertIn("ISSUE STEPS", output.getvalue())
         self.assertIn(
-            "ACTIVE Analysis · model gpt-5.6-sol · effort xhigh · Fast OFF",
+            # The Execution Backend leads the active step's settings; at this
+            # width the bounded frame truncates the Fast preference after it.
+            "ACTIVE Analysis · backend Codex CLI · model gpt-5.6-sol"
+            " · effort xhigh · Fast",
             output.getvalue(),
         )
 

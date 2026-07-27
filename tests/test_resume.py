@@ -10,6 +10,7 @@ from unittest.mock import patch
 from devloop import cli, codex_runner
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue
+from devloop.portable_execution_backend import codex_cli
 from devloop.portable_workflow import (
     DEVELOPMENT_STEP_ID,
     FINAL_REVIEW_STEP_ID,
@@ -53,9 +54,7 @@ class LoopStateLoadingTests(unittest.TestCase):
                 required_docs=[],
                 roles={"security/reviewer": {"skills": [], "agents": []}},
             )
-            runner.codex = "codex"
-            runner.sandbox = "workspace-write"
-            runner.approval_policy = "never"
+            runner.execution_backend = codex_cli.CodexCliExecutionBackend()
             runner.log_root = root / ".loop.logs"
             runner.use_self_improvement_wiki = False
             runner.ensure_log_root()
@@ -69,13 +68,13 @@ class LoopStateLoadingTests(unittest.TestCase):
             def execute(
                 command: list[str],
                 **_: object,
-            ) -> codex_runner.subprocess.CompletedProcess[str]:
+            ) -> codex_cli.subprocess.CompletedProcess[str]:
                 message_path = Path(command[command.index("-o") + 1])
                 message_path.write_text(
                     json.dumps({"status": "PASS", "summary": "portable"}),
                     encoding="utf-8",
                 )
-                return codex_runner.subprocess.CompletedProcess(
+                return codex_cli.subprocess.CompletedProcess(
                     command,
                     0,
                     stdout='{"status":"PASS"}',
@@ -83,11 +82,11 @@ class LoopStateLoadingTests(unittest.TestCase):
                 )
 
             with patch.object(
-                codex_runner,
+                codex_cli,
                 "build_codex_exec_command",
                 side_effect=build_command,
             ), patch.object(
-                runner,
+                codex_cli,
                 "run_codex_exec_with_connection_retries",
                 side_effect=execute,
             ):
