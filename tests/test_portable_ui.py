@@ -198,6 +198,67 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             "session-restored",
         )
 
+    async def test_sessions_tab_drops_a_reconciled_synthetic_candidate(self) -> None:
+        checkout = Path.cwd()
+        real_session = PortableSessionSnapshot(
+            session_id="planning-session",
+            checkout=checkout,
+            status=PortableSessionStatus.RUNNING,
+        )
+        synthetic_candidate = PortableSessionSnapshot(
+            session_id="synthetic-candidate",
+            checkout=checkout,
+            status=PortableSessionStatus.READY,
+            prd_path=checkout / "change.md",
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.sessions = (real_session, synthetic_candidate)
+                self.events: list[PortableSessionEvent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return self.sessions
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            self.assertEqual(menu.option_count, 3)
+
+            published = PortableSessionSnapshot(
+                session_id=real_session.session_id,
+                checkout=checkout,
+                status=PortableSessionStatus.READY,
+                prd_path=synthetic_candidate.prd_path,
+            )
+            supervisor.sessions = (published,)
+            supervisor.events.append(PortableSessionEvent(published))
+            await pilot.pause()
+
+            self.assertEqual(menu.option_count, 2)
+            self.assertIn(
+                "change [READY]",
+                str(menu.get_option_at_index(1).prompt),
+            )
+
     async def test_ctrl_c_during_an_active_session_preserves_interrupted_exit_code(
         self,
     ) -> None:

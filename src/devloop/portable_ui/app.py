@@ -627,6 +627,13 @@ class PortableApplicationShell(App[None]):
         )
 
     def _refresh_sessions_menu(self) -> OptionList:
+        if self._session_supervisor is not None:
+            list_sessions = getattr(self._session_supervisor, "list_sessions", None)
+            if callable(list_sessions):
+                self._session_snapshots = {
+                    snapshot.session_id: snapshot
+                    for snapshot in list_sessions()
+                }
         menu = self.query_one("#portable-navigation", OptionList)
         selected_id = None
         if menu.highlighted is not None and menu.highlighted < menu.option_count:

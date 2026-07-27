@@ -90,20 +90,36 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
             catalog = PortableSessionCatalog(root / "catalog.sqlite3")
             catalog.create_session(launch)
+            candidate = SimpleNamespace(
+                candidate_id="published-workflow-candidate",
+                checkout=checkout.resolve(),
+                prd_path=prd.resolve(),
+            )
             supervisor = PortableSessionSupervisor(
                 worker_launcher=launch_worker,
                 catalog=catalog,
-                resume_candidates_loader=lambda: (
-                    SimpleNamespace(prd_path=prd.resolve()),
-                ),
+                resume_candidates=(candidate,),
+                resume_candidates_loader=lambda: (candidate,),
             )
+            self.assertEqual(len(supervisor.list_sessions()), 2)
 
             supervisor.resume_session(launch.session_id)
-            self._wait_for_status(
+            published = self._wait_for_status(
                 supervisor,
                 launch.session_id,
                 PortableSessionStatus.READY,
             )
+            self.assertEqual(published.prd_path, prd.resolve())
+            self.assertEqual(
+                [snapshot.session_id for snapshot in supervisor.list_sessions()],
+                [launch.session_id],
+            )
+            self.assertEqual(
+                [record.session_id for record in catalog.list_sessions()],
+                [launch.session_id],
+            )
+            with self.assertRaisesRegex(ValueError, "Unknown portable session"):
+                supervisor.snapshot(candidate.candidate_id)
             resumed = supervisor.resume_session(launch.session_id)
             self.assertEqual(resumed.status, PortableSessionStatus.RUNNING)
             self._wait_for_status(

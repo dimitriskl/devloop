@@ -728,17 +728,22 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker completion exit_code must be an integer."
                     )
+                planning_session_is_unfinished = False
+                if (
+                    exit_code == 0
+                    and self._launches[session_id].operation
+                    is PortableWorkflowOperation.PLANNING
+                ):
+                    planning_session_is_unfinished = (
+                        self._reconcile_planning_publication(session_id)
+                    )
+                    snapshot = self._snapshots[session_id]
                 completion_status = (
                     PortableSessionStatus.COMPLETED
                     if exit_code == 0
                     else PortableSessionStatus.FAILED
                 )
-                if (
-                    exit_code == 0
-                    and self._launches[session_id].operation
-                    is PortableWorkflowOperation.PLANNING
-                    and self._planning_session_is_unfinished(session_id)
-                ):
+                if planning_session_is_unfinished:
                     completion_status = PortableSessionStatus.READY
                 updated = replace(
                     snapshot,
@@ -765,7 +770,7 @@ class PortableSessionSupervisor:
             self._publish(updated)
             self._condition.notify_all()
 
-    def _planning_session_is_unfinished(self, session_id: str) -> bool:
+    def _reconcile_planning_publication(self, session_id: str) -> bool:
         if self._catalog is None:
             return False
         try:
@@ -780,6 +785,21 @@ class PortableSessionSupervisor:
             self._unfinished_prd_paths = {
                 candidate.prd_path.resolve() for candidate in candidates
             }
+        self._snapshots[session_id] = replace(
+            self._snapshots[session_id],
+            prd_path=record.prd_path,
+        )
+        duplicate_candidate_ids = tuple(
+            candidate_id
+            for candidate_id in self._candidate_launches
+            if candidate_id != session_id
+            and self._snapshots[candidate_id].prd_path is not None
+            and self._snapshots[candidate_id].prd_path.resolve() == prd_path
+        )
+        for candidate_id in duplicate_candidate_ids:
+            self._candidate_launches.pop(candidate_id, None)
+            self._launches.pop(candidate_id, None)
+            self._snapshots.pop(candidate_id, None)
         return prd_path in self._unfinished_prd_paths
 
     def _fail_session(
