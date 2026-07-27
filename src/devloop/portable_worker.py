@@ -124,14 +124,14 @@ class PortableWorkerRuntimeBridge:
         )
 
     def _send(self, kind: WorkerMessageKind, payload: Mapping[str, Any]) -> None:
-        frame = PortableProtocolFrame(
-            version=PORTABLE_PROTOCOL_VERSION,
-            session_id=self._session_id,
-            sequence=next(self._event_sequences),
-            kind=kind.value,
-            payload=payload,
-        )
         with self._write_lock:
+            frame = PortableProtocolFrame(
+                version=PORTABLE_PROTOCOL_VERSION,
+                session_id=self._session_id,
+                sequence=next(self._event_sequences),
+                kind=kind.value,
+                payload=payload,
+            )
             self._event_stream.write(frame.to_json_line() + "\n")
             self._event_stream.flush()
 

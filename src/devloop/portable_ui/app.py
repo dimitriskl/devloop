@@ -463,6 +463,11 @@ class PortableApplicationShell(App[None]):
 
     def on_unmount(self) -> None:
         if self._session_supervisor is not None:
+            if self.operation_result is None and any(
+                not snapshot.status.terminal
+                for snapshot in self._session_snapshots.values()
+            ):
+                self.operation_result = 130
             self._session_supervisor.shutdown()
             return
         self._stop_operation()
@@ -585,18 +590,7 @@ class PortableApplicationShell(App[None]):
         self.query_one("#portable-input", Input).display = False
         self.query_one("#portable-header", Static).update("Dev Loop > Sessions")
         self.query_one("#portable-tabs", Static).update("Sessions")
-        menu = self.query_one("#portable-navigation", OptionList)
-        menu.clear_options()
-        menu.add_option(Option("+ New Session", id=NEW_SESSION_ID))
-        for snapshot in self._session_snapshots.values():
-            checkout_name = snapshot.checkout.name or str(snapshot.checkout)
-            menu.add_option(
-                Option(
-                    f"{checkout_name} [{snapshot.status.value}]",
-                    id=snapshot.session_id,
-                )
-            )
-        menu.highlighted = 0
+        menu = self._refresh_sessions_menu()
         menu.focus()
         launch = self._session_launch
         checkout = str(launch.checkout) if launch is not None else ""
@@ -611,6 +605,31 @@ class PortableApplicationShell(App[None]):
             "+ New Session | Enter Select | F2 Primary | Esc Stay"
         )
 
+    def _refresh_sessions_menu(self) -> OptionList:
+        menu = self.query_one("#portable-navigation", OptionList)
+        selected_id = None
+        if menu.highlighted is not None and menu.highlighted < menu.option_count:
+            selected_id = menu.get_option_at_index(menu.highlighted).id
+        menu.clear_options()
+        menu.add_option(Option("+ New Session", id=NEW_SESSION_ID))
+        for snapshot in self._session_snapshots.values():
+            checkout_name = snapshot.checkout.name or str(snapshot.checkout)
+            menu.add_option(
+                Option(
+                    f"{checkout_name} [{snapshot.status.value}]",
+                    id=snapshot.session_id,
+                )
+            )
+        menu.highlighted = next(
+            (
+                index
+                for index in range(menu.option_count)
+                if menu.get_option_at_index(index).id == selected_id
+            ),
+            0,
+        )
+        return menu
+
     def _start_selected_session(self) -> None:
         assert self._session_supervisor is not None
         assert self._session_launch is not None
@@ -618,6 +637,7 @@ class PortableApplicationShell(App[None]):
             return
         existing = self._session_snapshots.get(self._session_launch.session_id)
         if existing is not None:
+            self._active_session_id = existing.session_id
             self._show_session_snapshot(existing)
             return
         intent = PortableSessionIntent(
@@ -630,9 +650,11 @@ class PortableApplicationShell(App[None]):
 
     def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
         self._session_snapshots[snapshot.session_id] = snapshot
-        if self._active_session_id not in (None, snapshot.session_id):
+        if self._active_session_id is None:
+            self._refresh_sessions_menu()
             return
-        self._active_session_id = snapshot.session_id
+        if self._active_session_id != snapshot.session_id:
+            return
         checkout_name = sanitize_terminal_text(
             snapshot.checkout.name or str(snapshot.checkout),
             preserve_newlines=False,
@@ -937,6 +959,7 @@ class PortableApplicationShell(App[None]):
             elif option_id == SESSIONS_TAB_ID:
                 self._show_sessions_tab()
             elif option_id in self._session_snapshots:
+                self._active_session_id = option_id
                 self._show_session_snapshot(self._session_snapshots[option_id])
             elif (
                 self._active_session_id is not None

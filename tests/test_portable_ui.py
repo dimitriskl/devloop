@@ -29,6 +29,124 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ctrl_c_during_an_active_session_preserves_interrupted_exit_code(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.shutdown_called = False
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        supervisor = FakeSupervisor()
+        launch = PortableSessionLaunch(
+            session_id="session-interrupted",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+        self.assertEqual(app.operation_result, 130)
+        self.assertTrue(supervisor.shutdown_called)
+
+    async def test_background_session_updates_sessions_list_without_stealing_focus(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.events: list[PortableSessionEvent] = []
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        launch = PortableSessionLaunch(
+            session_id="session-background",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            supervisor.events.append(
+                PortableSessionEvent(
+                    PortableSessionSnapshot(
+                        session_id=launch.session_id,
+                        checkout=launch.checkout,
+                        status=PortableSessionStatus.WAITING_FOR_INPUT,
+                        activity=("Background worker needs attention",),
+                    )
+                )
+            )
+            for _ in range(20):
+                await pilot.pause()
+                menu = app.query_one("#portable-navigation", OptionList)
+                if (
+                    menu.option_count == 2
+                    and "WAITING_FOR_INPUT"
+                    in str(menu.get_option_at_index(1).prompt)
+                ):
+                    break
+
+            self.assertEqual(
+                str(app.query_one("#portable-tabs", Static).render()),
+                "Sessions",
+            )
+            self.assertIn(
+                "WAITING_FOR_INPUT",
+                str(menu.get_option_at_index(1).prompt),
+            )
+
     async def test_sessions_tab_is_passive_until_new_session_is_selected(
         self,
     ) -> None:
