@@ -402,6 +402,10 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker sent an invalid session status."
                     ) from error
+                if status.terminal:
+                    raise PortableProtocolError(
+                        "Worker STATUS cannot claim a terminal session status."
+                    )
                 updated = replace(snapshot, status=status)
             elif kind is WorkerMessageKind.INPUT_REQUEST:
                 try:
@@ -442,7 +446,7 @@ class PortableSessionSupervisor:
                 )
             elif kind is WorkerMessageKind.COMPLETION:
                 exit_code = frame.payload.get("exit_code")
-                if not isinstance(exit_code, int):
+                if not isinstance(exit_code, int) or isinstance(exit_code, bool):
                     raise PortableProtocolError(
                         "Worker completion exit_code must be an integer."
                     )

@@ -66,6 +66,10 @@ class PortableProtocolFrame:
         if not isinstance(value, dict):
             raise PortableProtocolError("Worker frame must be a JSON object.")
         version = value.get("version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise PortableProtocolError(
+                "Worker protocol version must be an integer."
+            )
         if version != PORTABLE_PROTOCOL_VERSION:
             raise PortableProtocolError(
                 f"Unsupported worker protocol version: {version!r}."
@@ -77,7 +81,11 @@ class PortableProtocolFrame:
                 f"expected {expected_session_id!r}."
             )
         sequence = value.get("sequence")
-        if not isinstance(sequence, int) or sequence < 1:
+        if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence < 1
+        ):
             raise PortableProtocolError("Worker frame sequence must be a positive integer.")
         if expected_sequence is not None and sequence != expected_sequence:
             raise PortableProtocolError(

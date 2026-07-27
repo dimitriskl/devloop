@@ -200,6 +200,28 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
         )
 
+    def test_boolean_protocol_versions_are_rejected_as_non_integers(self) -> None:
+        for version in (True, False):
+            with self.subTest(version=version):
+                completed = self._run_invalid_worker_frame(
+                    json.dumps(
+                        {
+                            "version": version,
+                            "session_id": "session-invalid",
+                            "sequence": 1,
+                            "kind": "HELLO",
+                            "payload": {},
+                        }
+                    )
+                )
+
+                self.assertEqual(completed.status, PortableSessionStatus.FAILED)
+                self.assertEqual(completed.result, 1)
+                self.assertIn(
+                    "Worker protocol version must be an integer.",
+                    completed.diagnostics,
+                )
+
     def test_wrong_worker_session_identity_fails_clearly(self) -> None:
         completed = self._run_invalid_worker_frame(
             '{"version":1,"session_id":"another-session","sequence":1,'
@@ -214,11 +236,79 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
         )
 
+    def test_boolean_worker_sequences_are_rejected_as_non_integers(self) -> None:
+        for sequence in (True, False):
+            with self.subTest(sequence=sequence):
+                completed = self._run_invalid_worker_frame(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "session_id": "session-invalid",
+                            "sequence": sequence,
+                            "kind": "HELLO",
+                            "payload": {},
+                        }
+                    )
+                )
+
+                self.assertEqual(completed.status, PortableSessionStatus.FAILED)
+                self.assertEqual(completed.result, 1)
+                self.assertIn(
+                    "Worker frame sequence must be a positive integer.",
+                    completed.diagnostics,
+                )
+
     def test_malformed_worker_frame_fails_clearly(self) -> None:
         completed = self._run_invalid_worker_frame("not-json")
 
         self.assertEqual(completed.status, PortableSessionStatus.FAILED)
         self.assertIn("Worker sent malformed JSON.", completed.diagnostics)
+
+    def test_status_frame_cannot_claim_a_terminal_session_result(self) -> None:
+        for status in ("COMPLETED", "FAILED", "CANCELLED"):
+            with self.subTest(status=status):
+                completed = self._run_invalid_worker_frame(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "session_id": "session-invalid",
+                            "sequence": 1,
+                            "kind": "STATUS",
+                            "payload": {"status": status},
+                        }
+                    )
+                )
+
+                self.assertEqual(completed.status, PortableSessionStatus.FAILED)
+                self.assertEqual(completed.result, 1)
+                self.assertTrue(
+                    any(
+                        "terminal session status" in diagnostic
+                        for diagnostic in completed.diagnostics
+                    )
+                )
+
+    def test_boolean_completion_exit_codes_are_rejected_as_non_integers(self) -> None:
+        for exit_code in (True, False):
+            with self.subTest(exit_code=exit_code):
+                completed = self._run_invalid_worker_frame(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "session_id": "session-invalid",
+                            "sequence": 1,
+                            "kind": "COMPLETION",
+                            "payload": {"exit_code": exit_code},
+                        }
+                    )
+                )
+
+                self.assertEqual(completed.status, PortableSessionStatus.FAILED)
+                self.assertEqual(completed.result, 1)
+                self.assertIn(
+                    "Worker completion exit_code must be an integer.",
+                    completed.diagnostics,
+                )
 
     def test_worker_standard_error_is_captured_as_session_diagnostics(self) -> None:
         worker_source = textwrap.dedent(
@@ -266,6 +356,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             completed = supervisor.snapshot(launch.session_id)
 
         self.assertEqual(completed.status, PortableSessionStatus.FAILED)
+        self.assertEqual(completed.result, 1)
         self.assertIn("isolated worker diagnostic", completed.diagnostics)
         self.assertIn("worker failed", completed.diagnostics)
 
