@@ -24,6 +24,7 @@ from devloop.portable_execution_backend import (
 from devloop.portable_execution_backend.codex_cli import (
     codex_execution_settings_args,
 )
+from devloop.portable_runtime import PortableRuntimeBridge, portable_runtime_session
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
     DEVELOPMENT_STEP_ID,
@@ -1100,6 +1101,52 @@ class StepExecutionSettingsTests(unittest.TestCase):
         editor.assert_called_once()
         self.assertEqual(discovery_count, 3)
         self.assertIn("resolved_workflow", writer.state)
+
+    def test_cli_preflight_repair_uses_application_menu_when_runtime_active(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            issue_index = root / "README.md"
+            issue_index.write_text("", encoding="utf-8")
+            discoveries = iter(
+                (
+                    CatalogDiscoveryError("temporary failure"),
+                    self._live_catalog(),
+                )
+            )
+
+            def discover() -> ModelCatalog:
+                result = next(discoveries)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            bridge = PortableRuntimeBridge()
+            with mock.patch.object(
+                bridge,
+                "choose",
+                return_value="retry-catalog",
+            ) as choose:
+                with portable_runtime_session(bridge):
+                    workflow = cli.resolve_run_workflow_with_repair(
+                        LoopStateWriter(issue_index),
+                        default_portable_component_catalog(),
+                        user_workflow_path=root / "devloop-plan.json",
+                        model_catalog_loader=discover,
+                        read_line=lambda _prompt: self.fail(
+                            "Application mode must not request free-text preflight input."
+                        ),
+                        write=lambda _message: None,
+                    )
+
+        self.assertEqual(workflow, default_portable_workflow())
+        self.assertEqual(
+            tuple(key for key, _label in choose.call_args.args[0]),
+            ("/options", "retry-catalog", "/quit"),
+        )
+        self.assertEqual(choose.call_args.kwargs["default_key"], "/options")
+        self.assertEqual(choose.call_args.kwargs["cancel_key"], "/quit")
 
     def test_existing_run_preflight_repair_adopts_edited_execution_preferences(
         self,

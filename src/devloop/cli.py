@@ -1560,9 +1560,30 @@ def resolve_run_workflow_with_repair(
                     "retries live discovery for every backend this Workflow "
                     "references; /quit stops the run."
                 )
-        action = reader(
-            "Preflight action [/options/retry-catalog/quit]: "
-        ).strip().casefold()
+        from .portable_runtime import active_portable_runtime
+
+        if active_portable_runtime() is not None:
+            action = choose_menu_option(
+                (
+                    ("/options", "Edit workflow options"),
+                    ("retry-catalog", "Retry model catalog discovery"),
+                    ("/quit", "Quit development"),
+                ),
+                default_key="/options",
+                cancel_key="/quit",
+                render=lambda selected: render_app_screen(
+                    "Dev Loop > Preflight Recovery\n\n"
+                    f"Step Execution Settings preflight failed: {safe_error}\n\n"
+                    f"Selected: {selected}\n\n"
+                    "Choose how to recover before development starts."
+                ),
+                fallback=lambda: "/quit",
+            )
+        else:
+            action = reader(
+                "Preflight action [/options/retry-catalog/quit]: "
+            )
+        action = action.strip().casefold()
         if action == "/options":
             current_workflow = workflow_snapshot
             if state_writer.has_resolved_workflow():
