@@ -1274,12 +1274,15 @@ def run_portable_application(operation: Callable[[], int]) -> int:
 
 def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
     """Run a passive Sessions tab that explicitly launches an isolated worker."""
-    from ..portable_session_catalog import PortableSessionCatalog
+    from ..portable_session_catalog import (
+        PortableResumeCandidate,
+        PortableSessionCatalog,
+    )
     from ..interactive_runner import find_resume_candidates
 
     bridge = PortableRuntimeBridge()
     catalog = PortableSessionCatalog()
-    def load_resume_candidates():
+    def load_resume_candidates() -> tuple[PortableResumeCandidate, ...]:
         return catalog.discover_resume_candidates(find_resume_candidates)
 
     supervisor = PortableSessionSupervisor(

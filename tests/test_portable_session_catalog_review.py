@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import threading
@@ -19,6 +20,7 @@ from devloop.portable_protocol import (
     WorkerMessageKind,
 )
 from devloop.portable_session_catalog import (
+    PortablePlanningSettings,
     PortableSessionCatalog,
     PortableSessionCatalogError,
 )
@@ -31,6 +33,141 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
+    def test_catalog_open_rejects_negative_schema_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "catalog.sqlite3"
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("PRAGMA user_version = -1")
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "unsupported schema version -1",
+            ):
+                PortableSessionCatalog(database)
+
+    def test_catalog_open_rejects_orphaned_session_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="orphaned-session",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("PRAGMA foreign_keys = OFF")
+                connection.execute("DELETE FROM saved_projects")
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "foreign key check failed",
+            ):
+                PortableSessionCatalog(database)
+
+    def test_catalog_open_rejects_surplus_planning_setting_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            persisted_settings = PortablePlanningSettings(
+                backend="codex",
+                model="gpt-5",
+                reasoning_effort="high",
+                fast="off",
+                timeout_seconds=60,
+                checkpoint_seconds=30,
+            ).to_dict()
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="surplus-settings",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                ),
+                PortablePlanningSettings.from_mapping(persisted_settings),
+            )
+            persisted_settings["api_token"] = "must-not-be-accepted"
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET planning_settings_json = ?
+                    """,
+                    (json.dumps(persisted_settings, separators=(",", ":")),),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "planning settings are corrupt",
+            ):
+                PortableSessionCatalog(database)
+
+    def test_catalog_open_rejects_non_finite_planning_numbers(self) -> None:
+        for field_name in ("timeout_seconds", "checkpoint_seconds"):
+            for invalid_number in (float("nan"), float("inf")):
+                with self.subTest(
+                    field_name=field_name,
+                    invalid_number=invalid_number,
+                ):
+                    self._assert_non_finite_planning_number_rejected(
+                        field_name,
+                        invalid_number,
+                    )
+
+    def _assert_non_finite_planning_number_rejected(
+        self,
+        field_name: str,
+        invalid_number: float,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="non-finite-settings",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            persisted_settings = {
+                "backend": "codex",
+                "model": "gpt-5",
+                "reasoning_effort": "high",
+                "fast": "off",
+                "timeout_seconds": 60,
+                "checkpoint_seconds": 30,
+            }
+            persisted_settings[field_name] = invalid_number
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET planning_settings_json = ?
+                    """,
+                    (json.dumps(persisted_settings, separators=(",", ":")),),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "planning settings are corrupt",
+            ):
+                PortableSessionCatalog(database)
+
     def test_catalog_writes_do_not_require_sqlite_unixepoch_subsec(self) -> None:
         real_connect = sqlite3.connect
 
@@ -476,6 +613,88 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
             self.assertEqual(
                 catalog.get_session("unfinished-summary").status,
                 PortableSessionStatus.READY,
+            )
+
+    def test_authoritative_absence_retires_stale_published_session(self) -> None:
+        for stale_status in (
+            PortableSessionStatus.READY,
+            PortableSessionStatus.FAILED,
+        ):
+            with self.subTest(stale_status=stale_status):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    prd = checkout / "change.md"
+                    issues = checkout / "README.md"
+                    prd.write_text("# Change\n", encoding="utf-8")
+                    issues.write_text("# Issues\n", encoding="utf-8")
+                    catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+                    catalog.create_session(
+                        PortableSessionLaunch(
+                            session_id="stale-published",
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        )
+                    )
+                    catalog.publish_workflow(
+                        "stale-published",
+                        prd_path=prd,
+                        issues_index_path=issues,
+                        activity_summary="previous discovery",
+                    )
+                    catalog.update_session_status(
+                        "stale-published",
+                        stale_status,
+                    )
+
+                    supervisor = PortableSessionSupervisor(
+                        worker_launcher=lambda _launch: self.fail(
+                            "must remain passive"
+                        ),
+                        catalog=PortableSessionCatalog(catalog.path),
+                        resume_candidates=(),
+                        resume_candidates_loader=lambda: (),
+                    )
+
+                    self.assertEqual(
+                        supervisor.list_sessions()[0].status,
+                        PortableSessionStatus.COMPLETED,
+                    )
+                    self.assertEqual(
+                        catalog.get_session("stale-published").status,
+                        PortableSessionStatus.COMPLETED,
+                    )
+
+    def test_authoritative_reconciliation_preserves_pre_prd_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="pre-prd-planning",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: self.fail("must remain passive"),
+                catalog=PortableSessionCatalog(catalog.path),
+                resume_candidates=(),
+                resume_candidates_loader=lambda: (),
+            )
+
+            self.assertEqual(
+                supervisor.list_sessions()[0].status,
+                PortableSessionStatus.READY,
+            )
+            self.assertIsNone(
+                catalog.get_session("pre-prd-planning").prd_path,
             )
 
     def test_zero_exit_before_prd_keeps_planning_session_resumable(self) -> None:

@@ -526,6 +526,10 @@ def run_planning_chat(
             )
             if returncode != 0:
                 session.consecutive_failures += 1
+                _print_planning_turn_failure(
+                    returncode,
+                    exact_saved_thread=True,
+                )
 
         while True:
             artifacts = callbacks.probe_artifacts()
@@ -587,15 +591,22 @@ def run_planning_chat(
                         message=text,
                     )
                 elif session.consecutive_failures >= 1:
-                    # The previous resume turn failed. Rather than resuming the same
-                    # failing session again, start a fresh `codex exec` session with
-                    # the complete planning contract plus the continuation message.
-                    continuation = build_recovery_prompt(initial_prompt, text)
-                    returncode, output = _run_fresh_turn(
-                        session,
-                        active_turn_runner,
-                        continuation,
-                    )
+                    if resume_session_id is not None:
+                        returncode, output = _run_turn(
+                            session,
+                            active_turn_runner,
+                            message=text,
+                        )
+                    else:
+                        # A thread first created in this live planning run may be
+                        # replaced with a fresh recovery turn. A catalog-restored
+                        # thread may not: its identity is durable user state.
+                        continuation = build_recovery_prompt(initial_prompt, text)
+                        returncode, output = _run_fresh_turn(
+                            session,
+                            active_turn_runner,
+                            continuation,
+                        )
                 else:
                     returncode, output = _run_turn(
                         session,
@@ -609,9 +620,9 @@ def run_planning_chat(
 
             if returncode != 0:
                 session.consecutive_failures += 1
-                print(
-                    f"Codex turn failed (exit {returncode}). Retry, rephrase, or /quit.",
-                    file=sys.stderr,
+                _print_planning_turn_failure(
+                    returncode,
+                    exact_saved_thread=resume_session_id is not None,
                 )
                 continue
             session.consecutive_failures = 0
@@ -714,6 +725,25 @@ def _run_fresh_turn(
         session.session_id = parse_session_id(output)
         session.started = True
     return returncode, output
+
+
+def _print_planning_turn_failure(
+    returncode: int,
+    *,
+    exact_saved_thread: bool,
+) -> None:
+    if exact_saved_thread:
+        print(
+            f"Saved planning thread resume failed (exit {returncode}). "
+            "Its identity remains unchanged; retry or /quit. "
+            "Dev Loop will not start a replacement thread.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"Codex turn failed (exit {returncode}). Retry, rephrase, or /quit.",
+        file=sys.stderr,
+    )
 
 
 def _print_planning_submission() -> None:

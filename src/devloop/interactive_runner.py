@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from . import catalog as catalog_module
 from . import statusui
@@ -91,6 +91,12 @@ from .workflow_defaults import (
     portable_planner_configuration_path,
 )
 
+if TYPE_CHECKING:
+    from .portable_session_catalog import (
+        PortableCatalogSession,
+        PortableSessionCatalog,
+    )
+
 PLAN_STATE_FILE = PORTABLE_PLANNER_CONFIGURATION_FILE
 TARGET_REPO_STATE_KEY = "target_repo"
 TARGET_REPO_CONFIRMED_KEY = "target_repo_confirmed"
@@ -103,7 +109,9 @@ _PROMPT_EDITOR: LineEditor | None = None
 ARTIFACT_FRESHNESS_SLACK_SECONDS = 5
 
 
-def _active_catalog_session():
+def _active_catalog_session() -> (
+    tuple[PortableSessionCatalog, PortableCatalogSession | None, bool] | None
+):
     catalog_path = os.environ.get("DEVLOOP_PORTABLE_SESSION_CATALOG")
     session_id = os.environ.get("DEVLOOP_PORTABLE_SESSION_ID")
     if not catalog_path or not session_id:

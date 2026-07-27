@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -113,6 +113,55 @@ class AnalysisExecutionBudgetTests(unittest.TestCase):
 
 
 class ResumeCommandTests(unittest.TestCase):
+    def test_failed_saved_thread_resume_never_starts_or_binds_replacement(
+        self,
+    ) -> None:
+        turns: list[list[str]] = []
+        bound_threads: list[str] = []
+        saved_thread_id = "0198c0de-1111-2222-3333-444455556666"
+
+        def turn_runner(command, cwd):
+            del cwd
+            turns.append(list(command))
+            if len(turns) == 1:
+                return 1, "saved thread is temporarily unavailable"
+            return 0, "session id: 0198aaaa-1111-2222-3333-444455556666\nok\n"
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=lambda: "ARTIFACTS" if len(turns) >= 2 else None,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        errors = StringIO()
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            redirect_stderr(errors),
+        ):
+            result = chat_loop.run_planning_chat(
+                config=ChatConfig(
+                    codex="codex",
+                    repo_root=Path(raw),
+                    bundle_root=Path(raw),
+                    execution_settings=default_step_execution_settings("analysis"),
+                ),
+                initial_prompt="MUST NOT BE REPLAYED",
+                callbacks=callbacks,
+                resume_session_id=saved_thread_id,
+                on_session_bound=bound_threads.append,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["first attempt", "explicit retry"]),
+            )
+
+        self.assertEqual(result, "ARTIFACTS")
+        self.assertEqual(len(turns), 2)
+        for command in turns:
+            resume_index = command.index("resume")
+            self.assertEqual(command[resume_index + 1], saved_thread_id)
+            self.assertNotIn("MUST NOT BE REPLAYED", command)
+        self.assertEqual(bound_threads, [saved_thread_id])
+        self.assertIn("will not start a replacement thread", errors.getvalue())
+
     def test_saved_planning_thread_resumes_without_replaying_initial_prompt(
         self,
     ) -> None:

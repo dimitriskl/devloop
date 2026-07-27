@@ -237,6 +237,28 @@ class PortableSessionSupervisor:
         self._unfinished_prd_paths = {
             candidate.prd_path.resolve() for candidate in candidates
         }
+        if catalog is not None and resume_candidates_loader is not None:
+            for snapshot in tuple(self._snapshots.values()):
+                if (
+                    snapshot.prd_path is not None
+                    and snapshot.prd_path.resolve() not in self._unfinished_prd_paths
+                    and snapshot.status
+                    in {
+                        PortableSessionStatus.READY,
+                        PortableSessionStatus.FAILED,
+                    }
+                ):
+                    completed = replace(
+                        snapshot,
+                        status=PortableSessionStatus.COMPLETED,
+                        result=0,
+                    )
+                    self._snapshots[completed.session_id] = completed
+                    catalog.update_session_status(
+                        completed.session_id,
+                        PortableSessionStatus.COMPLETED,
+                        activity_summary="Project workflow is no longer unfinished",
+                    )
         for candidate in candidates:
             candidate_path = candidate.prd_path.resolve()
             matching_session = next(

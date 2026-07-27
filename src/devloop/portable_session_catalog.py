@@ -65,6 +65,7 @@ class PortablePlanningSettings:
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
+                or not math.isfinite(value)
                 or value <= 0
             ):
                 raise ValueError(
@@ -76,6 +77,18 @@ class PortablePlanningSettings:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PortablePlanningSettings:
+        expected_keys = {
+            "backend",
+            "model",
+            "reasoning_effort",
+            "fast",
+            "timeout_seconds",
+            "checkpoint_seconds",
+        }
+        if set(value) != expected_keys:
+            raise PortableSessionCatalogError(
+                "Portable planning settings are corrupt."
+            )
         try:
             return cls(
                 backend=_required_text(value, "backend"),
@@ -634,6 +647,11 @@ class PortableSessionCatalog:
                         f"{version} is newer than supported version "
                         f"{CATALOG_SCHEMA_VERSION}."
                     )
+                if version < 0:
+                    raise PortableSessionCatalogError(
+                        "Portable Session Catalog has unsupported schema version "
+                        f"{version}."
+                    )
                 if version == 0:
                     connection.executescript(
                         """
@@ -723,6 +741,13 @@ class PortableSessionCatalog:
         if integrity != "ok":
             raise PortableSessionCatalogError(
                 f"Portable Session Catalog integrity check failed: {integrity}"
+            )
+        foreign_key_violation = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchone()
+        if foreign_key_violation is not None:
+            raise PortableSessionCatalogError(
+                "Portable Session Catalog foreign key check failed."
             )
         expected_tables = {"saved_projects", "sessions"}
         tables = {
