@@ -41,6 +41,12 @@ execution state; it does not use CodexCLI Workflow Runs.
 changes presentation ownership only; it does not adopt CodexCLI state, App
 Server execution, or Workflow Runs.
 
+**Accepted next-generation design:** [Portable Dev Loop v3](portable-v3-multi-session-design.md)
+targets release `0.3.1` with an in-application multi-session shell and adoption
+of existing portable projects. The currently implemented version remains
+`0.2.1` until that design is delivered and validated; v3 does not adopt
+CodexCLI Workflow Runs.
+
 ## CodexCLI
 
 **Product name:** `codexcli`

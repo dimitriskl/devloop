@@ -12,6 +12,12 @@ Portable Application Shell, while execution remains based on Codex exec role
 sessions and PRD-local `*.loop.state.json` state.
 _Avoid_: CodexCLI, App Server Workflow Run
 
+**Portable Dev Loop v3**:
+The third product generation of Portable Dev Loop, introduced by release
+`0.3.1`, that adds the machine-wide session catalog and multi-session Portable
+Application Shell while retaining existing project-local workflow state.
+_Avoid_: CodexCLI, semantic version 3.0.0, new workflow-state format
+
 **CodexCLI**:
 The separately installed `codexcli` Textual application built around Codex App
 Server, `.devloop/runs/`, component locks, and its own Workflow Run model. It is
@@ -19,17 +25,93 @@ not the backend or next phase of Portable Dev Loop.
 _Avoid_: devloop-plan, portable wrapper, Markdown issue runner
 
 **Portable Resume Candidate**:
-An unfinished Portable Dev Loop PRD and linked issue pack listed at
+One unfinished Portable Dev Loop PRD and linked issue pack within a Portable
+Saved Project. Each unfinished PRD and issue pack is listed independently at
 `devloop-plan` startup or by its `/resume` command. Selecting it opens the
 development handoff; the issue runner then restores its exact unfinished
 role/pass from PRD-local loop state.
 _Avoid_: CodexCLI Resume Candidate, App Server thread
 
+**Portable Saved Project**:
+A specific Git checkout root that Portable Dev Loop remembers by its canonical
+folder path as an available place to start or resume work. Two worktrees of the
+same repository are separate Portable Saved Projects. Portable Dev Loop
+automatically registers each checkout it successfully opens as a target or
+creates or reuses as an implementation worktree; it does not discover projects
+by scanning unrelated folders. A saved project with multiple unfinished PRDs
+contains multiple Portable Resume Candidates; one without unfinished work
+remains available for starting a new change.
+_Avoid_: Portable Resume Candidate, Workflow Run, recent folder
+
+**Portable Workflow Session**:
+One independently running or resumable Portable Dev Loop workflow bound to one
+Portable Saved Project. It owns its planning and issue-workflow context
+independently of sibling sessions, becomes durable when its worktree is selected,
+and remains resumable before or after a PRD exists. Exiting the application
+pauses running sessions instead of leaving them active without the shell, and
+concurrent sessions must target different Git worktrees.
+_Avoid_: CodexCLI Workflow Run, App Server thread, terminal tab
+
+**Portable Session Status**:
+The lifecycle state of a Portable Workflow Session: `READY`, `QUEUED`, `RUNNING`,
+`WAITING_FOR_INPUT`, `PAUSING`, `PAUSED`, `INTERRUPTED`, `COMPLETED`, `FAILED`,
+`CANCELLED`, or `UNAVAILABLE`.
+_Avoid_: Issue Status, Workflow Run Status, tab label
+
+**Portable Worktree Lease**:
+The exclusive live ownership of one canonical Git worktree path by one Portable
+Workflow Session on the machine. Another session must use a different worktree
+until the lease is released.
+_Avoid_: Workflow lock, branch ownership, CodexCLI Run Lease
+
+**Portable Session Catalog**:
+The machine-local, user-wide index of Portable Saved Projects and Portable
+Workflow Sessions. It owns discovery summaries and planning state before a PRD
+exists; after publication it points to the authoritative worktree-local loop
+state instead of copying it.
+_Avoid_: PRD loop state, repository configuration, CodexCLI Run Store
+
+**Portable Session Concurrency Limit**:
+The user-wide maximum number of Portable Workflow Sessions that may actively
+execute at once. Its default is two and it is editable through Options;
+paused and waiting-for-input sessions do not consume capacity, while excess
+sessions remain visibly queued.
+_Avoid_: Fixed worker count, Codex rate limit, number of open tabs
+
+**Portable Session Tab**:
+The in-application tab through which the user observes and controls one Portable
+Workflow Session from the supervising Portable Application Shell. Switching
+tabs replaces the contained session view without changing or stopping other
+sessions, closing a tab only hides it, and one session failure does not stop
+sibling sessions. Its label identifies the worktree and exposes lifecycle
+status plus unseen activity so background progress remains visible. Pause,
+cancellation, and termination are separate explicit session actions.
+_Avoid_: Windows Terminal tab, appended screen, shared workflow session
+
+**Portable Sessions Tab**:
+The permanent, non-closable management tab in the Portable Application Shell
+that lists running, paused, and unfinished Portable Workflow Sessions across
+Portable Saved Projects and provides the entry point for starting, opening, or
+focusing a session. It is the only tab opened initially, starts no session
+worker automatically, and requires an explicit Resume action before unfinished
+work continues. Its session list provides fuller progress and latest-activity
+details than the compact tab labels. Starting a session may use an available
+saved worktree, register an existing checkout, or create a new Git worktree from
+a saved repository and branch; choosing a leased worktree focuses its existing
+session instead.
+_Avoid_: Portable Session Tab, startup prompt, Windows Terminal tab
+
+**Portable Project Adoption**:
+The idempotent registration of an existing Portable Dev Loop worktree and its
+unfinished PRD workflows in the Portable Session Catalog without moving,
+rewriting, or taking ownership away from project-local state.
+_Avoid_: CodexCLI legacy import, project conversion, workflow-state migration
+
 **Portable Application Shell**:
-The single persistent full-screen TTY surface that owns every interactive
-Portable Dev Loop view from planning startup through issue-runner completion.
-Its outer frame remains consistent across every Workflow Step and while work is
-running; transitions replace only the contained view while keeping context,
+The single persistent full-screen TTY surface that hosts one or more Portable
+Workflow Sessions through Portable Session Tabs. Its outer frame remains
+consistent from planning startup through issue-runner completion and while work
+is running; transitions replace only the contained view while keeping context,
 actions, activity, and status within the same bounded screen.
 _Avoid_: Console transcript, printed panel sequence, CodexCLI Application Shell
 
