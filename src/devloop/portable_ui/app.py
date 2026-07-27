@@ -39,6 +39,7 @@ from ..portable_sessions import (
     PortableSessionStatus,
     PortableSessionSupervisor,
     PortableWorktreeLeaseConflict,
+    PortableWorkflowOperation,
 )
 from ..portable_session_targets import (
     ExistingCheckoutTarget,
@@ -780,6 +781,10 @@ class PortableApplicationShell(App[None]):
         except (RuntimeError, ValueError) as error:
             self._show_new_session_error(str(error))
             return
+        for notice in target.notices:
+            self._publish_activity(
+                sanitize_terminal_text(notice, preserve_newlines=True)
+            )
         snapshot = self._launch_new_session_at_checkout(target.checkout)
         if snapshot is None:
             return
@@ -796,14 +801,10 @@ class PortableApplicationShell(App[None]):
         session_id = self._session_launch.session_id
         if session_id in self._session_snapshots:
             session_id = str(uuid.uuid4())
-        launch = replace(
+        launch = _launch_for_checkout(
             self._session_launch,
             session_id=session_id,
             checkout=checkout,
-            arguments=_arguments_for_checkout(
-                self._session_launch.arguments,
-                checkout,
-            ),
         )
         try:
             return self._session_supervisor.handle_intent(
@@ -817,6 +818,9 @@ class PortableApplicationShell(App[None]):
                 "That worktree is active in another Dev Loop application.\n\n"
                 f"Owner: {error.owner_id}\nSession: {error.session_id}"
             )
+            return None
+        except (OSError, RuntimeError, ValueError) as error:
+            self._show_new_session_error(str(error))
             return None
 
     def _show_new_session_error(self, message: str) -> None:
@@ -835,6 +839,9 @@ class PortableApplicationShell(App[None]):
             f"Session was not started.\n\n{safe_message}"
         )
         self.query_one("#portable-status", Static).update("NOT STARTED")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Back | Esc Cancel | F4 Logs"
+        )
 
     def _refresh_saved_projects(self) -> None:
         if self._session_supervisor is None:
@@ -1577,13 +1584,74 @@ def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
     return app.operation_result if app.operation_result is not None else 0
 
 
-def _arguments_for_checkout(
-    arguments: tuple[str, ...],
+def _launch_for_checkout(
+    supplied: PortableSessionLaunch,
+    *,
+    session_id: str,
     checkout: Path,
-) -> tuple[str, ...]:
-    from ..portable_session_catalog import PortableLaunchSettings
-
-    return PortableLaunchSettings.from_arguments(arguments).to_arguments(
-        checkout=checkout,
-        prd_path=None,
+) -> PortableSessionLaunch:
+    canonical_checkout = checkout.resolve()
+    if canonical_checkout == supplied.checkout.resolve():
+        return replace(
+            supplied,
+            session_id=session_id,
+            checkout=canonical_checkout,
+        )
+    return PortableSessionLaunch(
+        session_id=session_id,
+        checkout=canonical_checkout,
+        operation=PortableWorkflowOperation.PLANNING,
+        arguments=_new_planning_arguments(
+            supplied.arguments,
+            checkout=canonical_checkout,
+            supplied_operation=supplied.operation,
+        ),
     )
+
+
+def _new_planning_arguments(
+    arguments: tuple[str, ...],
+    *,
+    checkout: Path,
+    supplied_operation: PortableWorkflowOperation,
+) -> tuple[str, ...]:
+    if supplied_operation is PortableWorkflowOperation.PLANNING:
+        retargeted: list[str] = []
+        target_inserted = False
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument in {"--repo", "--prd"}:
+                if not target_inserted:
+                    retargeted.extend(("--repo", str(checkout)))
+                    target_inserted = True
+                index += 2
+                continue
+            if argument.startswith("--repo=") or argument.startswith("--prd="):
+                if not target_inserted:
+                    retargeted.extend(("--repo", str(checkout)))
+                    target_inserted = True
+                index += 1
+                continue
+            retargeted.append(argument)
+            index += 1
+        if not target_inserted:
+            retargeted[0:0] = ("--repo", str(checkout))
+        return tuple(retargeted)
+
+    planning_arguments: list[str] = ["--repo", str(checkout)]
+    value_options = {"--codex", "--sandbox", "--approval-policy"}
+    flag_options = {"--native-editor"}
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in value_options and index + 1 < len(arguments):
+            planning_arguments.extend((argument, arguments[index + 1]))
+            index += 2
+            continue
+        if any(argument.startswith(option + "=") for option in value_options):
+            planning_arguments.append(argument)
+        elif argument in flag_options:
+            planning_arguments.append(argument)
+        index += 1
+    return tuple(planning_arguments)

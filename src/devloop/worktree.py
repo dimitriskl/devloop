@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def resolve_worktree(
     branch_name: str | None,
     interactive: bool,
     dry_run: bool,
+    notice: Callable[[str], None] = print,
 ) -> WorktreeSelection:
     if create_worktree and no_worktree:
         raise ValueError("Use only one of --create-worktree or --no-worktree.")
@@ -63,11 +65,16 @@ def resolve_worktree(
 
     sanitized_branch_name = sanitize_branch_name(branch_name)
     if sanitized_branch_name != branch_name:
-        print(f"Using branch name: {sanitized_branch_name}")
+        notice(f"Using branch name: {sanitized_branch_name}")
     branch_name = sanitized_branch_name
 
     worktree_path = worktree_path.resolve()
-    existing_worktree = resolve_existing_worktree(source_repo, worktree_path, branch_name)
+    existing_worktree = resolve_existing_worktree(
+        source_repo,
+        worktree_path,
+        branch_name,
+        notice=notice,
+    )
     if existing_worktree is not None:
         return WorktreeSelection(repo_root=existing_worktree, created=False)
 
@@ -87,20 +94,26 @@ def resolve_worktree(
     return WorktreeSelection(repo_root=worktree_path.resolve(), created=True)
 
 
-def resolve_existing_worktree(source_repo: Path, worktree_path: Path, branch_name: str) -> Path | None:
+def resolve_existing_worktree(
+    source_repo: Path,
+    worktree_path: Path,
+    branch_name: str,
+    *,
+    notice: Callable[[str], None] = print,
+) -> Path | None:
     existing_worktree = find_existing_worktree(source_repo, worktree_path)
     if existing_worktree is None:
         return None
 
     if existing_worktree.branch and not branch_matches(existing_worktree.branch, branch_name):
-        print(
+        notice(
             "Using existing worktree: "
             f"{existing_worktree.repo_root} "
             f"(branch {display_branch(existing_worktree.branch)}; requested {branch_name})"
         )
         return existing_worktree.repo_root
 
-    print(f"Using existing worktree: {existing_worktree.repo_root}")
+    notice(f"Using existing worktree: {existing_worktree.repo_root}")
     return existing_worktree.repo_root
 
 

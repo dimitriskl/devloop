@@ -4,6 +4,8 @@ import multiprocessing
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from devloop.portable_session_catalog import PortableSessionCatalog
@@ -111,12 +113,19 @@ class PortableSessionWorktreeTests(unittest.TestCase):
             )
 
             created = resolver.resolve(request)
-            reused = resolver.resolve(request)
+            output = StringIO()
+            with redirect_stdout(output):
+                reused = resolver.resolve(request)
 
         self.assertEqual(created.checkout, worktree.resolve())
         self.assertTrue(created.created)
         self.assertEqual(reused.checkout, worktree.resolve())
         self.assertFalse(reused.created)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(
+            reused.notices,
+            (f"Using existing worktree: {worktree.resolve()}",),
+        )
 
     def test_distinct_worktrees_of_one_repository_have_independent_leases(
         self,
@@ -287,11 +296,11 @@ class PortableSessionWorktreeTests(unittest.TestCase):
             with self.assertRaises(LaunchObserved):
                 supervisor.start_session(launch)
 
-            session = catalog.get_session(launch.session_id)
+            sessions = catalog.list_sessions()
             projects = catalog.list_saved_projects()
             remaining_lease = catalog.get_worktree_lease(checkout)
 
-        self.assertEqual(session.status, PortableSessionStatus.FAILED)
+        self.assertEqual(sessions, ())
         self.assertEqual([project.checkout for project in projects], [checkout.resolve()])
         self.assertIsNone(remaining_lease)
 

@@ -588,6 +588,46 @@ class PortableSessionCatalog:
             ) from error
         return cursor.rowcount == 1
 
+    def rollback_session_start(self, session_id: str, *, owner_id: str) -> None:
+        """Remove a newly claimed session whose worker never started."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                lease = connection.execute(
+                    """
+                    SELECT owner_id FROM worktree_leases
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if lease is None:
+                    raise PortableSessionCatalogError(
+                        "Portable session start rollback has no active lease."
+                    )
+                if lease["owner_id"] != owner_id:
+                    raise PortableSessionCatalogError(
+                        "Portable session start rollback does not own its lease."
+                    )
+                connection.execute(
+                    """
+                    DELETE FROM worktree_leases
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                )
+                connection.execute(
+                    "DELETE FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+        except PortableSessionCatalogError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+
     def bind_or_create_session(
         self,
         launch: PortableSessionLaunch,

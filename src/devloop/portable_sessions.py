@@ -208,6 +208,13 @@ class PortableSessionCatalogController(Protocol):
         activity_summary: str = "",
     ) -> None: ...
 
+    def rollback_session_start(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+    ) -> None: ...
+
 
 @dataclass
 class _RunningSession:
@@ -362,6 +369,7 @@ class PortableSessionSupervisor:
                 normalized_launch,
                 SupervisorMessageKind.START,
                 {},
+                rollback_new_session=True,
             )
 
     def resume_session(self, session_id: str) -> PortableSessionSnapshot:
@@ -381,6 +389,7 @@ class PortableSessionSupervisor:
                     launch,
                     SupervisorMessageKind.START,
                     {},
+                    rollback_new_session=True,
                 )
             payload: dict[str, object] = {}
             command_kind = SupervisorMessageKind.RESUME
@@ -410,12 +419,16 @@ class PortableSessionSupervisor:
         launch: PortableSessionLaunch,
         command_kind: SupervisorMessageKind,
         command_payload: dict[str, object],
+        *,
+        rollback_new_session: bool = False,
     ) -> PortableSessionSnapshot:
         try:
             process = self._worker_launcher(launch)
         except BaseException:
-            self._mark_launch_failed(launch.session_id)
-            self._release_session_lease(launch.session_id)
+            self._handle_launch_failure(
+                launch.session_id,
+                rollback_new_session=rollback_new_session,
+            )
             raise
         try:
             if process.stdin is None or process.stdout is None or process.stderr is None:
@@ -472,8 +485,10 @@ class PortableSessionSupervisor:
             except subprocess.TimeoutExpired:
                 process.terminate()
                 process.wait(timeout=1)
-            self._mark_launch_failed(launch.session_id)
-            self._release_session_lease(launch.session_id)
+            self._handle_launch_failure(
+                launch.session_id,
+                rollback_new_session=rollback_new_session,
+            )
             raise
         stdout_thread = Thread(
             target=self._read_worker_stdout,
@@ -692,20 +707,27 @@ class PortableSessionSupervisor:
             if kind is WorkerMessageKind.HELLO:
                 updated = snapshot
             elif kind is WorkerMessageKind.CONTEXT:
+                context = PortableRunContext(
+                    project_root=_payload_text(frame, "project_root"),
+                    implementation_branch=_payload_text(
+                        frame,
+                        "implementation_branch",
+                    ),
+                    implementation_worktree=_payload_text(
+                        frame,
+                        "implementation_worktree",
+                    ),
+                    prd_path=_payload_text(frame, "prd_path"),
+                )
+                checkout = self._synchronize_catalog_checkout(
+                    session_id,
+                    snapshot,
+                    context,
+                )
                 updated = replace(
                     snapshot,
-                    context=PortableRunContext(
-                        project_root=_payload_text(frame, "project_root"),
-                        implementation_branch=_payload_text(
-                            frame,
-                            "implementation_branch",
-                        ),
-                        implementation_worktree=_payload_text(
-                            frame,
-                            "implementation_worktree",
-                        ),
-                        prd_path=_payload_text(frame, "prd_path"),
-                    ),
+                    checkout=checkout,
+                    context=context,
                 )
             elif kind is WorkerMessageKind.ACTIVITY:
                 updated = replace(
@@ -819,6 +841,36 @@ class PortableSessionSupervisor:
                 self._retire_running_session(session_id, running)
             self._publish(updated)
             self._condition.notify_all()
+
+    def _synchronize_catalog_checkout(
+        self,
+        session_id: str,
+        snapshot: PortableSessionSnapshot,
+        context: PortableRunContext,
+    ) -> Path:
+        if self._catalog is None:
+            return snapshot.checkout
+        context_checkout = Path(context.implementation_worktree).expanduser().resolve()
+        if context_checkout == snapshot.checkout.resolve():
+            return snapshot.checkout
+        from .worktree import find_git_checkout
+
+        git_checkout = find_git_checkout(context_checkout)
+        if (
+            git_checkout is None
+            or git_checkout.repo_root.resolve() != context_checkout
+        ):
+            raise PortableProtocolError(
+                "Worker implementation worktree is not an exact Git checkout."
+            )
+        record = self._catalog.get_session(session_id)
+        if record.checkout.resolve() != context_checkout:
+            raise PortableProtocolError(
+                "Worker implementation worktree does not match the catalog lease."
+            )
+        self._launches[session_id] = record.launch
+        self._saved_projects = tuple(self._catalog.list_saved_projects())
+        return record.checkout
 
     def _reconcile_planning_publication(self, session_id: str) -> bool:
         if self._catalog is None:
@@ -968,6 +1020,24 @@ class PortableSessionSupervisor:
             )
         except KeyError:
             return
+
+    def _handle_launch_failure(
+        self,
+        session_id: str,
+        *,
+        rollback_new_session: bool,
+    ) -> None:
+        if rollback_new_session and self._catalog is not None:
+            rollback = getattr(self._catalog, "rollback_session_start", None)
+            if callable(rollback):
+                rollback(session_id, owner_id=self._owner_id)
+                self._snapshots.pop(session_id, None)
+                self._launches.pop(session_id, None)
+                self._running.pop(session_id, None)
+                self._saved_projects = tuple(self._catalog.list_saved_projects())
+                return
+        self._mark_launch_failed(session_id)
+        self._release_session_lease(session_id)
 
 
 def _payload_text(frame: PortableProtocolFrame, key: str) -> str:

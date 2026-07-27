@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import tempfile
+import textwrap
 import threading
 import unittest
 from pathlib import Path
@@ -10,6 +14,8 @@ from textual.containers import Horizontal
 from textual.widgets import Input, OptionList, Static
 
 from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
+from devloop.portable_session_catalog import PortableSessionCatalog
+from devloop.portable_session_targets import PortableSessionTarget
 from devloop.portable_sessions import (
     PortableSessionIntent,
     PortableSessionIntentKind,
@@ -19,6 +25,7 @@ from devloop.portable_sessions import (
     PortableSessionLaunch,
     PortableSessionSnapshot,
     PortableSessionStatus,
+    PortableSessionSupervisor,
     PortableWorkflowOperation,
 )
 from devloop.issue_pack import Issue
@@ -29,10 +36,68 @@ from devloop.portable_ui.app import (
     PortableApplicationShell,
     PortableLogOverlay,
     PortableTextOverlay,
+    _launch_for_checkout,
 )
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_launch_retargeting_preserves_supplied_work_and_isolates_new_work(
+        self,
+    ) -> None:
+        source = Path("source-checkout").resolve()
+        target = Path("new-worktree").resolve()
+        planning_arguments = (
+            "--repo",
+            str(source),
+            "--goal",
+            "preserve this exact planning goal",
+            "--codex=custom-codex",
+        )
+        delivery_arguments = (
+            "--prd",
+            "prd/change.md",
+            "--issues",
+            "prd/change/issues/README.md",
+            "--all",
+            "--codex",
+            "custom-codex",
+        )
+
+        supplied_planning = _launch_for_checkout(
+            PortableSessionLaunch(
+                session_id="planning-source",
+                checkout=source,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=planning_arguments,
+            ),
+            session_id="planning-selected",
+            checkout=source,
+        )
+        new_from_delivery = _launch_for_checkout(
+            PortableSessionLaunch(
+                session_id="delivery-source",
+                checkout=source,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=delivery_arguments,
+            ),
+            session_id="planning-new-worktree",
+            checkout=target,
+        )
+
+        self.assertEqual(supplied_planning.arguments, planning_arguments)
+        self.assertEqual(
+            supplied_planning.operation,
+            PortableWorkflowOperation.PLANNING,
+        )
+        self.assertEqual(
+            new_from_delivery.operation,
+            PortableWorkflowOperation.PLANNING,
+        )
+        self.assertEqual(
+            new_from_delivery.arguments,
+            ("--repo", str(target), "--codex", "custom-codex"),
+        )
+
     async def test_new_session_action_offers_all_worktree_target_kinds(self) -> None:
         class FakeSupervisor:
             def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
@@ -144,6 +209,69 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Session was not started", detail)
         self.assertIn("git worktree add failed", detail)
 
+    async def test_target_resolution_notices_are_projected_inside_the_shell(
+        self,
+    ) -> None:
+        notice = "Using existing worktree: resolved-checkout"
+
+        class NoticingResolver:
+            def resolve(self, request):
+                del request
+                return PortableSessionTarget(
+                    checkout=Path.cwd(),
+                    created=False,
+                    notices=(notice,),
+                )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return ()
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="notice-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(Path.cwd())),
+            ),
+            session_target_resolver=NoticingResolver(),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("+")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            app.query_one("#portable-input", Input).value = str(Path.cwd())
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertIn(notice, [item.message for item in app._activity_feed.items])
+
     async def test_saved_project_launch_does_not_inherit_another_projects_prd(
         self,
     ) -> None:
@@ -220,11 +348,14 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
         launch = supervisor.intents[0].launch
         assert launch is not None
         self.assertEqual(launch.checkout, Path("saved-project").resolve())
+        self.assertEqual(launch.operation, PortableWorkflowOperation.PLANNING)
         self.assertEqual(
             launch.arguments,
             (
                 "--repo",
                 str(launch.checkout),
+                "--goal",
+                "change that belongs only to project A",
                 "--codex",
                 "custom-codex",
                 "--sandbox",
@@ -234,6 +365,263 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 "--native-editor",
             ),
         )
+
+    async def test_supplied_delivery_launch_keeps_every_original_argument(self) -> None:
+        supplied_checkout = Path.cwd()
+        supplied_arguments = (
+            "--prd",
+            "prd/change.md",
+            "--issues",
+            "prd/change/issues/README.md",
+            "--all",
+            "--start-issue",
+            "0003",
+            "--no-self-improvement-wiki",
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intent: PortableSessionIntent | None = None
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return (
+                    SimpleNamespace(
+                        project_id="supplied-checkout",
+                        checkout=supplied_checkout,
+                    ),
+                )
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intent = intent
+                assert intent.launch is not None
+                return PortableSessionSnapshot(
+                    session_id=intent.launch.session_id,
+                    checkout=intent.launch.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="delivery-session",
+                checkout=supplied_checkout,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=supplied_arguments,
+            ),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert supervisor.intent is not None
+        assert supervisor.intent.launch is not None
+        self.assertEqual(
+            supervisor.intent.launch.operation,
+            PortableWorkflowOperation.DELIVERY,
+        )
+        self.assertEqual(supervisor.intent.launch.arguments, supplied_arguments)
+
+    async def test_post_resolution_launch_error_renders_not_started(self) -> None:
+        class FailingSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return (
+                    SimpleNamespace(
+                        project_id="failing-project",
+                        checkout=Path.cwd(),
+                    ),
+                )
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                del intent
+                raise RuntimeError("Portable worker launch failed")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FailingSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="launch-error",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(Path.cwd()), "--goal", "keep me"),
+            ),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            detail = str(app.query_one("#portable-detail", Static).render())
+            status = str(app.query_one("#portable-status", Static).render())
+
+        self.assertIn("Session was not started", detail)
+        self.assertIn("Portable worker launch failed", detail)
+        self.assertEqual(status, "NOT STARTED")
+
+    async def test_supervisor_checkout_transfer_reaches_active_and_sessions_views(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            worktree = root / "implementation"
+            source.mkdir()
+            worktree.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "shell-transfer-ui"
+            worker_source = textwrap.dedent(
+                f"""
+                import json
+                import sys
+
+                session_id = sys.argv[1]
+                json.loads(sys.stdin.readline())
+                for sequence, kind, payload in (
+                    (1, "HELLO", {{}}),
+                    (2, "CONTEXT", {{
+                        "project_root": {str(source)!r},
+                        "implementation_branch": "feature/transfer",
+                        "implementation_worktree": {str(worktree)!r},
+                        "prd_path": "",
+                    }}),
+                    (3, "INPUT_REQUEST", {{
+                        "request_kind": "TEXT",
+                        "prompt": "Keep worker alive",
+                        "options": [],
+                        "default_key": "",
+                        "cancel_key": None,
+                    }}),
+                ):
+                    print(json.dumps({{
+                        "version": 1,
+                        "session_id": session_id,
+                        "sequence": sequence,
+                        "kind": kind,
+                        "payload": payload,
+                    }}), flush=True)
+                sys.stdin.readline()
+                """
+            )
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                catalog.bind_session_checkout(
+                    launch.session_id,
+                    worktree,
+                    owner_id=owner_id,
+                )
+                return subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                    cwd=worktree,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            app = PortableApplicationShell(
+                PortableRuntimeBridge(),
+                session_supervisor=supervisor,
+                session_launch=PortableSessionLaunch(
+                    session_id="session-transfer-ui",
+                    checkout=source,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=("--repo", str(source), "--goal", "transfer"),
+                ),
+            )
+            fake_git_checkout = SimpleNamespace(repo_root=worktree.resolve())
+
+            with mock.patch(
+                "devloop.worktree.find_git_checkout",
+                return_value=fake_git_checkout,
+            ):
+                async with app.run_test(size=(110, 32)) as pilot:
+                    snapshot = app._launch_new_session_at_checkout(source)
+                    assert snapshot is not None
+                    app._active_session_id = snapshot.session_id
+                    app._show_session_snapshot(snapshot)
+                    for _attempt in range(100):
+                        await pilot.pause()
+                        transferred = supervisor.snapshot(snapshot.session_id)
+                        if transferred.context is not None:
+                            break
+                    else:
+                        self.fail("Worker context did not reach the supervisor")
+
+                    app._show_session_snapshot(transferred)
+                    active_detail = str(
+                        app.query_one("#portable-detail", Static).render()
+                    )
+                    app._show_sessions_tab()
+                    menu = app.query_one("#portable-navigation", OptionList)
+                    prompts = [
+                        str(menu.get_option_at_index(index).prompt)
+                        for index in range(menu.option_count)
+                    ]
+                    source_lease = catalog.get_worktree_lease(source)
+                    worktree_lease = catalog.get_worktree_lease(worktree)
+                    cached_launch = supervisor._launches[snapshot.session_id]
+
+            self.assertEqual(transferred.checkout, worktree.resolve())
+            self.assertIn(f"Checkout: {worktree.resolve()}", active_detail)
+            self.assertIn(f"Worktree: {worktree.resolve()}", active_detail)
+            self.assertIsNone(source_lease)
+            self.assertIsNotNone(worktree_lease)
+            self.assertEqual(cached_launch.checkout, worktree.resolve())
+            self.assertEqual(
+                cached_launch.arguments[:2],
+                ("--repo", str(worktree.resolve())),
+            )
+            self.assertTrue(
+                any(
+                    prompt == f"{worktree.name} [SAVED PROJECT]"
+                    for prompt in prompts
+                )
+            )
+            self.assertTrue(
+                any(
+                    prompt == f"{worktree.name} [WAITING_FOR_INPUT]"
+                    for prompt in prompts
+                )
+            )
 
     async def test_restored_session_requires_explicit_resume_from_sessions_tab(
         self,

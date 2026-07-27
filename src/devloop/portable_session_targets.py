@@ -33,6 +33,7 @@ PortableSessionTargetRequest = (
 class PortableSessionTarget:
     checkout: Path
     created: bool
+    notices: tuple[str, ...] = ()
 
 
 class PortableSessionTargetController(Protocol):
@@ -48,6 +49,7 @@ class PortableSessionTargetResolver:
     def resolve(self, request: PortableSessionTargetRequest) -> PortableSessionTarget:
         if isinstance(request, NewWorktreeTarget):
             repository = self._canonical_checkout(request.repository)
+            notices: list[str] = []
             selection = resolve_worktree(
                 source_repo=repository,
                 create_worktree=True,
@@ -56,10 +58,12 @@ class PortableSessionTargetResolver:
                 branch_name=request.branch,
                 interactive=False,
                 dry_run=False,
+                notice=notices.append,
             )
             return PortableSessionTarget(
                 checkout=self._canonical_checkout(selection.repo_root),
                 created=selection.created,
+                notices=tuple(notices),
             )
         return PortableSessionTarget(
             checkout=self._canonical_checkout(request.checkout),
