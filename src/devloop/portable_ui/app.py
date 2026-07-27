@@ -692,6 +692,13 @@ class PortableApplicationShell(App[None]):
     def on_key(self, event: events.Key) -> None:
         input_widget = self.query_one("#portable-input", Input)
         if self.focused is not input_widget or not input_widget.display:
+            if (
+                event.key.isascii()
+                and event.key.isdecimal()
+                and self._respond_to_shortcut(event.key)
+            ):
+                event.prevent_default()
+                event.stop()
             return
         if event.key == "up" and self._input_history:
             self._input_history_position = max(

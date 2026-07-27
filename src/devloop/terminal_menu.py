@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from .cli_ui import (
     render_choice_menu,
@@ -11,6 +12,9 @@ from .cli_ui import (
     terminal_dimensions,
 )
 from .terminal_editor import TerminalKeySource, open_key_source, prepare_terminal_output
+
+if TYPE_CHECKING:
+    from .portable_runtime import PortableRuntimeBridge
 
 
 class NavigationKey(str, Enum):
@@ -47,13 +51,59 @@ class MenuAction:
     command: str
 
 
+class WorkflowOptionsPage(str, Enum):
+    VIEW = "__workflow_options_view__"
+    STEP = "__workflow_options_step__"
+    STRUCTURE = "__workflow_options_structure__"
+    SAVE_OR_RESET = "__workflow_options_save_or_reset__"
+
+
+@dataclass(frozen=True)
+class WorkflowOptionsPageDefinition:
+    page: WorkflowOptionsPage
+    label: str
+    action_groups: tuple[str, ...]
+
+
 RenderSelection = Callable[[str], None]
 FallbackChoice = Callable[[], str]
 FallbackCommand = Callable[[str], str]
 
+_WORKFLOW_PREVIOUS_STEP_COMMAND = "__previous_step__"
+_WORKFLOW_NEXT_STEP_COMMAND = "__next_step__"
+_WORKFLOW_OPTIONS_BACK_COMMAND = "__workflow_options_back__"
+_WORKFLOW_OPTIONS_PAGES: tuple[WorkflowOptionsPageDefinition, ...] = (
+    WorkflowOptionsPageDefinition(
+        WorkflowOptionsPage.VIEW,
+        "View options",
+        ("View",),
+    ),
+    WorkflowOptionsPageDefinition(
+        WorkflowOptionsPage.STEP,
+        "Step options",
+        ("Step",),
+    ),
+    WorkflowOptionsPageDefinition(
+        WorkflowOptionsPage.STRUCTURE,
+        "Structure options",
+        ("Structure",),
+    ),
+    WorkflowOptionsPageDefinition(
+        WorkflowOptionsPage.SAVE_OR_RESET,
+        "Save or reset options",
+        ("Draft", "Catalog", "Finish"),
+    ),
+)
+_WORKFLOW_OPTIONS_ROOT: tuple[tuple[str, str], ...] = (
+    (_WORKFLOW_PREVIOUS_STEP_COMMAND, "Previous step"),
+    (_WORKFLOW_NEXT_STEP_COMMAND, "Next step"),
+    ("help", "Help"),
+    *((definition.page.value, definition.label) for definition in _WORKFLOW_OPTIONS_PAGES),
+)
+
 _WORKFLOW_KEY_COMMANDS = {
-    NavigationKey.UP: "__previous_step__",
-    NavigationKey.DOWN: "__next_step__",
+    NavigationKey.UP: _WORKFLOW_PREVIOUS_STEP_COMMAND,
+    NavigationKey.DOWN: _WORKFLOW_NEXT_STEP_COMMAND,
     NavigationKey.F1: "help",
     NavigationKey.F2: "apply",
     NavigationKey.F3: "graph",
@@ -170,17 +220,33 @@ def read_workflow_command(
 
     portable_runtime = active_portable_runtime()
     if portable_runtime is not None:
-        workflow_options = (
-            ("__previous_step__", "Previous workflow step"),
-            ("__next_step__", "Next workflow step"),
-            *((action.command, f"{action.group} · {action.label}") for action in actions),
-        )
-        return portable_runtime.choose(
-            workflow_options,
-            default_key=workflow_options[0][0],
-            cancel_key="cancel",
-            render=lambda _selected: None,
-        )
+        while True:
+            numbered_options = _numbered_workflow_options(_WORKFLOW_OPTIONS_ROOT)
+            selected = portable_runtime.choose(
+                numbered_options,
+                default_key=numbered_options[0][0],
+                cancel_key=_WORKFLOW_OPTIONS_BACK_COMMAND,
+                render=_render_workflow_options_root,
+                shortcuts={
+                    str(index): command
+                    for index, (command, _label) in enumerate(
+                        _WORKFLOW_OPTIONS_ROOT,
+                        start=1,
+                    )
+                },
+            )
+            if selected == _WORKFLOW_OPTIONS_BACK_COMMAND:
+                return ""
+            page_definition = _workflow_options_page(selected)
+            if page_definition is None:
+                return selected
+            selected = _choose_workflow_options_page(
+                portable_runtime,
+                actions,
+                page_definition,
+            )
+            if selected != _WORKFLOW_OPTIONS_BACK_COMMAND:
+                return selected
     if portable_plain_mode_active():
         return fallback(prompt)
     keys = _open_navigation_source()
@@ -204,6 +270,151 @@ def read_workflow_command(
     finally:
         keys.close()
         _set_cursor_visible(True)
+
+
+def _render_workflow_options_root(selected_key: str) -> None:
+    width, height = terminal_dimensions()
+    selected_position = next(
+        (
+            index
+            for index, (command, _label) in enumerate(_WORKFLOW_OPTIONS_ROOT, start=1)
+            if command == selected_key
+        ),
+        1,
+    )
+    render_app_screen(
+        render_choice_menu(
+            path=render_context_path("Workflow Editor", "Options"),
+            section_title="Choose an option",
+            choices=tuple(
+                (str(index), label)
+                for index, (_command, label) in enumerate(
+                    _WORKFLOW_OPTIONS_ROOT,
+                    start=1,
+                )
+            ),
+            footer=(),
+            selected_key=str(selected_position),
+            action_bar=(
+                ("1-7", "Shortcut"),
+                ("Up/Down", "Choose"),
+                ("Enter", "Open"),
+                ("Esc", "Back"),
+            ),
+            width=width,
+            height=height,
+        )
+    )
+
+
+def _choose_workflow_options_page(
+    portable_runtime: PortableRuntimeBridge,
+    actions: Sequence[MenuAction],
+    definition: WorkflowOptionsPageDefinition,
+) -> str:
+    page_actions = _workflow_options_page_actions(actions, definition)
+    action_options = tuple(
+        (action.command, _workflow_options_action_label(action, definition))
+        for action in page_actions
+    )
+    numbered_options = _numbered_workflow_options(action_options)
+    options = (
+        *numbered_options,
+        (_WORKFLOW_OPTIONS_BACK_COMMAND, "B. Back to Options"),
+    )
+    return portable_runtime.choose(
+        options,
+        default_key=options[0][0],
+        cancel_key=_WORKFLOW_OPTIONS_BACK_COMMAND,
+        render=lambda selected_key: _render_workflow_options_page(
+            definition,
+            action_options,
+            selected_key,
+        ),
+    )
+
+
+def _render_workflow_options_page(
+    definition: WorkflowOptionsPageDefinition,
+    options: Sequence[tuple[str, str]],
+    selected_key: str,
+) -> None:
+    width, height = terminal_dimensions()
+    selected_position = next(
+        (
+            index
+            for index, (command, _label) in enumerate(options, start=1)
+            if command == selected_key
+        ),
+        len(options) + 1,
+    )
+    render_app_screen(
+        render_choice_menu(
+            path=render_context_path(
+                "Workflow Editor",
+                "Options",
+                definition.label,
+            ),
+            section_title=definition.label,
+            choices=tuple(
+                (str(index), label)
+                for index, (_command, label) in enumerate(options, start=1)
+            ),
+            footer=(("b", "Back to Options"),),
+            selected_key=(
+                "b"
+                if selected_key == _WORKFLOW_OPTIONS_BACK_COMMAND
+                else str(selected_position)
+            ),
+            action_bar=(
+                ("Up/Down", "Choose"),
+                ("Enter", "Select"),
+                ("Esc", "Back"),
+            ),
+            width=width,
+            height=height,
+        )
+    )
+
+
+def _numbered_workflow_options(
+    options: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (command, f"{index}. {label}")
+        for index, (command, label) in enumerate(options, start=1)
+    )
+
+
+def _workflow_options_page(
+    value: str,
+) -> WorkflowOptionsPageDefinition | None:
+    return next(
+        (
+            definition
+            for definition in _WORKFLOW_OPTIONS_PAGES
+            if definition.page.value == value
+        ),
+        None,
+    )
+
+
+def _workflow_options_page_actions(
+    actions: Sequence[MenuAction],
+    definition: WorkflowOptionsPageDefinition,
+) -> tuple[MenuAction, ...]:
+    return tuple(
+        action for action in actions if action.group in definition.action_groups
+    )
+
+
+def _workflow_options_action_label(
+    action: MenuAction,
+    definition: WorkflowOptionsPageDefinition,
+) -> str:
+    if len(definition.action_groups) > 1:
+        return f"{action.group} · {action.label}"
+    return action.label
 
 
 def read_navigation_key(source: TerminalKeySource) -> KeyEvent:
@@ -312,36 +523,41 @@ def _choose_action(
     keys: TerminalKeySource,
     actions: Sequence[MenuAction],
 ) -> str:
-    if not actions:
-        return ""
-    groups = tuple(dict.fromkeys(action.group for action in actions))
     selected = 0
-    active_group: str | None = None
+    active_page: WorkflowOptionsPageDefinition | None = None
     while True:
         width, height = terminal_dimensions()
-        if active_group is None:
-            visible_actions: Sequence[MenuAction] = ()
-            choices = tuple(
-                (
-                    str(index + 1),
-                    f"{group} ({sum(action.group == group for action in actions)})",
-                )
-                for index, group in enumerate(groups)
+        if active_page is None:
+            visible_commands = tuple(
+                command for command, _label in _WORKFLOW_OPTIONS_ROOT
             )
-            path = render_context_path("Workflow Editor", "Actions")
-            title = "Choose an action group"
+            choices = tuple(
+                (str(index), label)
+                for index, (_command, label) in enumerate(
+                    _WORKFLOW_OPTIONS_ROOT,
+                    start=1,
+                )
+            )
+            path = render_context_path("Workflow Editor", "Options")
+            title = "Choose an option"
             back_label = "Back to Workflow Editor"
         else:
-            visible_actions = tuple(
-                action for action in actions if action.group == active_group
-            )
+            visible_actions = _workflow_options_page_actions(actions, active_page)
+            visible_commands = tuple(action.command for action in visible_actions)
             choices = tuple(
-                (str(index + 1), action.label)
-                for index, action in enumerate(visible_actions)
+                (
+                    str(index),
+                    _workflow_options_action_label(action, active_page),
+                )
+                for index, action in enumerate(visible_actions, start=1)
             )
-            path = render_context_path("Workflow Editor", "Actions", active_group)
-            title = active_group
-            back_label = "Back to action groups"
+            path = render_context_path(
+                "Workflow Editor",
+                "Options",
+                active_page.label,
+            )
+            title = active_page.label
+            back_label = "Back to Options"
         selected_key = "b" if selected == len(choices) else str(selected + 1)
         render_app_screen(
             render_choice_menu(
@@ -350,7 +566,20 @@ def _choose_action(
                 choices=choices,
                 footer=(("b", back_label),),
                 selected_key=selected_key,
-                action_bar=(("Up/Down", "Choose"), ("Enter", "Open"), ("Esc", "Back")),
+                action_bar=(
+                    (
+                        ("1-7", "Shortcut"),
+                        ("Up/Down", "Choose"),
+                        ("Enter", "Open"),
+                        ("Esc", "Back"),
+                    )
+                    if active_page is None
+                    else (
+                        ("Up/Down", "Choose"),
+                        ("Enter", "Select"),
+                        ("Esc", "Back"),
+                    )
+                ),
                 width=width,
                 height=height,
             )
@@ -366,22 +595,42 @@ def _choose_action(
             selected = len(choices)
         elif event.key is NavigationKey.ENTER:
             if selected == len(choices):
-                if active_group is None:
+                if active_page is None:
                     return ""
-                active_group = None
-                selected = 0
-            elif active_group is None:
-                active_group = groups[selected]
+                active_page = None
                 selected = 0
             else:
-                return visible_actions[selected].command
+                command = visible_commands[selected]
+                page = _workflow_options_page(command)
+                if page is None:
+                    return command
+                active_page = page
+                selected = 0
         elif event.key is NavigationKey.ESCAPE:
-            if active_group is None:
+            if active_page is None:
                 return ""
-            active_group = None
+            active_page = None
             selected = 0
-        elif event.key is NavigationKey.TEXT and event.text.casefold() == "b":
-            if active_group is None:
-                return ""
-            active_group = None
+        elif event.key is NavigationKey.TEXT:
+            if event.text.casefold() == "b":
+                if active_page is None:
+                    return ""
+                active_page = None
+                selected = 0
+                continue
+            position = _number_shortcut_position(event.text, len(choices))
+            if position is None:
+                continue
+            command = visible_commands[position]
+            page = _workflow_options_page(command)
+            if page is None:
+                return command
+            active_page = page
             selected = 0
+
+
+def _number_shortcut_position(value: str, choice_count: int) -> int | None:
+    if not value.isascii() or not value.isdecimal():
+        return None
+    position = int(value) - 1
+    return position if 0 <= position < choice_count else None

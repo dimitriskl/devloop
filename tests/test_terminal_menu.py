@@ -137,7 +137,7 @@ class TerminalMenuTests(unittest.TestCase):
 
         with mock.patch(
             "devloop.terminal_menu._open_navigation_source",
-            return_value=IteratorKeySource(iter("\r\x1b[B\r\r")),
+            return_value=IteratorKeySource(iter("\r71")),
         ), mock.patch("devloop.terminal_menu.render_app_screen"):
             command = read_workflow_command(
                 "workflow> ",
@@ -170,6 +170,34 @@ class TerminalMenuTests(unittest.TestCase):
             )
 
         self.assertEqual(command, "")
+
+    def test_workflow_options_use_number_shortcuts_and_focused_pages(self) -> None:
+        actions = (
+            MenuAction("View", "Route map", "graph"),
+            MenuAction("Step", "Choose model", "model"),
+            MenuAction("Finish", "Apply", "apply"),
+        )
+        rendered: list[str] = []
+        with mock.patch(
+            "devloop.terminal_menu._open_navigation_source",
+            return_value=IteratorKeySource(iter("\r41")),
+        ), mock.patch(
+            "devloop.terminal_menu.render_app_screen",
+            side_effect=rendered.append,
+        ):
+            command = read_workflow_command(
+                "workflow> ",
+                fallback=lambda _prompt: "fallback",
+                actions=actions,
+            )
+
+        self.assertEqual(command, "graph")
+        self.assertIn("1. Previous step", rendered[0])
+        self.assertIn("7. Save or reset options", rendered[0])
+        self.assertIn("1. Route map", rendered[1])
+        self.assertIn("Back to Options", rendered[1])
+        self.assertNotIn("Choose model", rendered[1])
+        self.assertNotIn("Apply", rendered[1])
 
     def test_workflow_reader_uses_line_fallback_without_navigation_source(self) -> None:
         with mock.patch(

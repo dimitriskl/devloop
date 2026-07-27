@@ -9,12 +9,13 @@ from pathlib import Path
 from devloop import cli, interactive_runner
 from devloop.portable_runtime import (
     PortableRuntimeBridge,
+    PortableRuntimeEvent,
     PortableRuntimeEventKind,
     portable_plain_mode_active,
     portable_runtime_session,
 )
-from devloop.terminal_menu import MenuAction, read_workflow_command
-from devloop.workflow_editor import EditorResult, run_workflow_editor
+from devloop.terminal_menu import read_workflow_command
+from devloop.workflow_editor import EditorResult, WORKFLOW_ACTIONS, run_workflow_editor
 
 
 class PortableEntrypointTests(unittest.TestCase):
@@ -44,7 +45,9 @@ class PortableEntrypointTests(unittest.TestCase):
         self.assertTrue(planning.plain)
         self.assertTrue(delivery.plain)
 
-    def test_workflow_commands_are_selected_inside_the_application(self) -> None:
+    def test_workflow_options_have_seven_numbered_choices_inside_the_application(
+        self,
+    ) -> None:
         bridge = PortableRuntimeBridge()
         result: list[str] = []
 
@@ -54,9 +57,7 @@ class PortableEntrypointTests(unittest.TestCase):
                     read_workflow_command(
                         "Action: ",
                         fallback=lambda _prompt: "fallback",
-                        actions=(
-                            MenuAction("Workflow", "Apply changes", "apply"),
-                        ),
+                        actions=WORKFLOW_ACTIONS,
                     )
                 )
 
@@ -64,11 +65,145 @@ class PortableEntrypointTests(unittest.TestCase):
         worker.start()
         event = bridge.next_event(timeout=1)
 
-        self.assertIs(event.kind, PortableRuntimeEventKind.CHOICE_REQUESTED)
-        self.assertIn(("apply", "Workflow · Apply changes"), event.options)
-        bridge.respond(event.request_id, "apply")
-        worker.join(timeout=1)
+        try:
+            self.assertIs(event.kind, PortableRuntimeEventKind.CHOICE_REQUESTED)
+            self.assertEqual(
+                tuple(label for _key, label in event.options),
+                (
+                    "1. Previous step",
+                    "2. Next step",
+                    "3. Help",
+                    "4. View options",
+                    "5. Step options",
+                    "6. Structure options",
+                    "7. Save or reset options",
+                ),
+            )
+            previous_key = event.options[0][0]
+            bridge.respond(event.request_id, previous_key)
+            worker.join(timeout=1)
+        finally:
+            if worker.is_alive():
+                bridge.respond(event.request_id, "cancel")
+                worker.join(timeout=1)
 
+        self.assertEqual(result, ["__previous_step__"])
+
+    def test_workflow_option_groups_open_focused_pages_with_back_navigation(
+        self,
+    ) -> None:
+        bridge = PortableRuntimeBridge()
+        result: list[str] = []
+
+        def next_choice() -> PortableRuntimeEvent:
+            while True:
+                event = bridge.next_event(timeout=1)
+                if event.kind is PortableRuntimeEventKind.CHOICE_REQUESTED:
+                    return event
+
+        def choose() -> None:
+            with portable_runtime_session(bridge):
+                result.append(
+                    read_workflow_command(
+                        "Action: ",
+                        fallback=lambda _prompt: "fallback",
+                        actions=WORKFLOW_ACTIONS,
+                    )
+                )
+
+        worker = threading.Thread(target=choose)
+        worker.start()
+        try:
+            root = next_choice()
+            bridge.respond(root.request_id, root.options[3][0])
+            view = next_choice()
+            view_labels = tuple(label for _key, label in view.options)
+
+            bridge.respond(view.request_id, view.options[-1][0])
+            reopened_root = next_choice()
+            bridge.respond(reopened_root.request_id, reopened_root.options[4][0])
+            step = next_choice()
+            step_labels = tuple(label for _key, label in step.options)
+
+            bridge.respond(step.request_id, step.options[-1][0])
+            reopened_root = next_choice()
+            bridge.respond(reopened_root.request_id, reopened_root.options[5][0])
+            structure = next_choice()
+            structure_labels = tuple(label for _key, label in structure.options)
+
+            bridge.respond(structure.request_id, structure.options[-1][0])
+            reopened_root = next_choice()
+            bridge.respond(reopened_root.request_id, reopened_root.options[6][0])
+            save_or_reset = next_choice()
+            save_or_reset_labels = tuple(
+                label for _key, label in save_or_reset.options
+            )
+
+            apply_key = next(
+                key
+                for key, label in save_or_reset.options
+                if "Apply workflow preferences" in label
+            )
+            bridge.respond(save_or_reset.request_id, apply_key)
+            worker.join(timeout=1)
+        finally:
+            if worker.is_alive():
+                bridge.request_stop()
+                worker.join(timeout=1)
+
+        self.assertEqual(
+            view_labels,
+            (
+                "1. Inspect current run",
+                "2. Edit workflow default",
+                "3. Show or hide route map",
+                "4. Show or hide technical details",
+                "B. Back to Options",
+            ),
+        )
+        self.assertEqual(
+            step_labels,
+            (
+                "1. Select any workflow step",
+                "2. Rename selected step",
+                "3. Change component type",
+                "4. Choose execution backend",
+                "5. Choose model",
+                "6. Choose reasoning effort",
+                "7. Toggle Fast mode",
+                "8. Edit execution budget",
+                "9. Edit guidance",
+                "10. Manage capabilities",
+                "B. Back to Options",
+            ),
+        )
+        self.assertEqual(
+            structure_labels,
+            (
+                "1. Add step to the end",
+                "2. Insert step at a position",
+                "3. Duplicate selected step",
+                "4. Delete selected step",
+                "5. Move selected step earlier",
+                "6. Move selected step later",
+                "7. Move selected step to position",
+                "8. Edit outcome route",
+                "9. Edit input binding",
+                "B. Back to Options",
+            ),
+        )
+        self.assertEqual(
+            save_or_reset_labels,
+            (
+                "1. Draft · Undo last edit",
+                "2. Draft · Reset selected step",
+                "3. Draft · Reset entire workflow",
+                "4. Catalog · Retry model catalog",
+                "5. Finish · Apply workflow preferences",
+                "6. Finish · Cancel without saving",
+                "B. Back to Options",
+            ),
+        )
         self.assertEqual(result, ["apply"])
 
     def test_workflow_editor_exposes_steps_as_the_application_navigation(self) -> None:
@@ -100,8 +235,10 @@ class PortableEntrypointTests(unittest.TestCase):
             labels = [label for _key, label in choice.options]
             self.assertIn("1. Analysis", labels)
             self.assertIn("2. Development", labels)
+            self.assertIn("Options…", labels)
             self.assertIn(("f2", "apply"), choice.shortcuts)
             self.assertIn(("f3", "graph"), choice.shortcuts)
+            self.assertIn(("f9", "actions"), choice.shortcuts)
 
             development_key = next(
                 key for key, label in choice.options if label == "2. Development"

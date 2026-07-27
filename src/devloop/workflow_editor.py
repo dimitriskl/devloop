@@ -192,14 +192,14 @@ EDITOR_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 WORKFLOW_ACTION_BAR: tuple[tuple[str, str], ...] = (
     ("Up/Down", "Select step"),
-    ("Enter", "Actions"),
+    ("Enter", "Options"),
     ("F1", "Help"),
     ("F2", "Apply"),
     ("F3", "Route map"),
     ("F4", "Details"),
     ("F5", "Add"),
     ("F7", "Capabilities"),
-    ("F9", "Actions"),
+    ("F9", "Options"),
     ("Esc", "Cancel"),
 )
 
@@ -1133,7 +1133,7 @@ class _WorkflowEditorSession:
                 )
                 for index, step in enumerate(workflow_steps, start=1)
             ),
-            ("actions", "Actions…"),
+            ("actions", "Options…"),
             ("cancel", "Cancel workflow draft"),
         )
         command = portable_runtime.choose(
@@ -2865,7 +2865,7 @@ def render_workflow_help(
         body=(
             "Navigate",
             "  Up / Down      Select a workflow step",
-            "  Enter or F9   Open the complete action list",
+            "  Enter or F9   Open the grouped Options menu",
             "",
             "Common actions",
             "  F2 Apply      Save defaults and resumable execution preferences",
@@ -2878,6 +2878,7 @@ def render_workflow_help(
             "Compatibility",
             "  Number keys select steps. Terminals without raw-key support retain the",
             "  complete-word command prompt and the same workflow behavior.",
+            "  Inside Options, keys 1 through 7 open the matching top-level choice.",
         ),
         action_bar=(("Enter", "Back"),),
         width=terminal_width,

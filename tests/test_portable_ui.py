@@ -128,6 +128,35 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 str(app.query_one("#portable-detail", Static).render()),
             )
 
+    async def test_declared_number_shortcut_selects_the_matching_option(self) -> None:
+        bridge = PortableRuntimeBridge()
+
+        def operation() -> int:
+            selected = bridge.choose(
+                (("previous", "1. Previous step"), ("next", "2. Next step")),
+                default_key="previous",
+                cancel_key=None,
+                render=lambda _key: None,
+                shortcuts={"1": "previous", "2": "next"},
+            )
+            return 0 if selected == "next" else 1
+
+        app = PortableApplicationShell(bridge, operation)
+        async with app.run_test(size=(100, 30)) as pilot:
+            menu = app.query_one("#portable-navigation", OptionList)
+            for _ in range(20):
+                await pilot.pause()
+                if menu.option_count == 2:
+                    break
+
+            await pilot.press("2")
+            for _ in range(20):
+                await pilot.pause()
+                if app.operation_result is not None:
+                    break
+
+            self.assertEqual(app.operation_result, 0)
+
     async def test_committed_choice_replaces_stale_menu_and_escape_reports_progress(self) -> None:
         bridge = PortableRuntimeBridge()
         choice_received = threading.Event()
