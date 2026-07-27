@@ -173,6 +173,93 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
             ):
                 PortableSessionCatalog(database)
 
+    def test_catalog_open_rejects_planning_settings_key_array(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="settings-key-array",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET planning_settings_json = ?
+                    """,
+                    (
+                        json.dumps(
+                            [
+                                "backend",
+                                "model",
+                                "reasoning_effort",
+                                "fast",
+                                "timeout_seconds",
+                                "checkpoint_seconds",
+                            ],
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "planning settings are corrupt",
+            ):
+                PortableSessionCatalog(database)
+
+    def test_catalog_read_rejects_non_object_planning_settings(self) -> None:
+        for shape, persisted_settings in (
+            ("array", []),
+            ("string", "backend"),
+            ("number", 42),
+            ("boolean", True),
+            ("null", None),
+        ):
+            with self.subTest(shape=shape):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    database = root / "catalog.sqlite3"
+                    catalog = PortableSessionCatalog(database)
+                    catalog.create_session(
+                        PortableSessionLaunch(
+                            session_id=f"settings-{shape}",
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        )
+                    )
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            """
+                            UPDATE sessions
+                            SET planning_settings_json = ?
+                            """,
+                            (
+                                json.dumps(
+                                    persisted_settings,
+                                    separators=(",", ":"),
+                                ),
+                            ),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        PortableSessionCatalogError,
+                        "planning settings are corrupt",
+                    ):
+                        catalog.get_session(f"settings-{shape}")
+
     def test_catalog_open_rejects_unsupported_closed_planning_settings(self) -> None:
         for field_name, invalid_value, expected_error in (
             ("backend", "SHELL", "Unsupported Execution Backend"),

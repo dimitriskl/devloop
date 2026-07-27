@@ -912,11 +912,14 @@ def _session_from_row(row: sqlite3.Row) -> PortableCatalogSession:
         settings_text = row["planning_settings_json"]
         if settings_text is not None:
             _validate_catalog_text(settings_text, maximum_length=4096)
-        settings = (
-            PortablePlanningSettings.from_mapping(json.loads(settings_text))
-            if settings_text is not None
-            else None
-        )
+            settings_value = json.loads(settings_text)
+            if not isinstance(settings_value, dict):
+                raise PortableSessionCatalogError(
+                    "Portable planning settings are corrupt."
+                )
+            settings = PortablePlanningSettings.from_mapping(settings_value)
+        else:
+            settings = None
         activity_summary = row["activity_summary"]
         _validate_catalog_text(
             activity_summary,
