@@ -11,6 +11,7 @@ from textual.widgets import Input, OptionList, Static
 from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
 from devloop.portable_sessions import (
     PortableSessionIntent,
+    PortableSessionIntentKind,
     PortableSessionEvent,
     PortableSessionInputKind,
     PortableSessionInputRequest,
@@ -31,6 +32,80 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restored_session_requires_explicit_resume_from_sessions_tab(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+                self.restored = PortableSessionSnapshot(
+                    session_id="session-restored",
+                    checkout=Path.cwd(),
+                    status=PortableSessionStatus.READY,
+                )
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (self.restored,)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return PortableSessionSnapshot(
+                    session_id=intent.session_id,
+                    checkout=self.restored.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        launch = PortableSessionLaunch(
+            session_id="session-new",
+            checkout=Path.cwd(),
+            operation=PortableWorkflowOperation.PLANNING,
+            arguments=(),
+        )
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=launch,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            self.assertEqual(supervisor.intents, [])
+            self.assertEqual(menu.option_count, 2)
+
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(supervisor.intents, [])
+            resume_menu = app.query_one("#portable-navigation", OptionList)
+            self.assertEqual(
+                str(resume_menu.get_option_at_index(0).prompt),
+                "Resume",
+            )
+
+            await pilot.press("f2")
+            await pilot.pause()
+
+        self.assertEqual(len(supervisor.intents), 1)
+        self.assertEqual(
+            supervisor.intents[0].kind,
+            PortableSessionIntentKind.RESUME,
+        )
+        self.assertEqual(
+            supervisor.intents[0].session_id,
+            "session-restored",
+        )
+
     async def test_ctrl_c_during_an_active_session_preserves_interrupted_exit_code(
         self,
     ) -> None:

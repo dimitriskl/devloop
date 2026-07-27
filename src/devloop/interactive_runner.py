@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -29,8 +29,12 @@ from .portable_execution_backend import (
     ExecutionBackendId,
 )
 from .portable_workflow import (
+    ANALYSIS_STEP_ID,
+    ExecutionBudget,
+    FastPreference,
     IssueStatus,
     PortableStepComponentCatalog,
+    StepExecutionSettings,
     StepInstanceId,
     StepRuntimeState,
     StepRuntimeStatus,
@@ -96,6 +100,21 @@ _PROMPT_EDITOR: LineEditor | None = None
 # seconds of the moment planning started. Shared by find_artifacts (resolution
 # paths) and find_new_artifacts (the live probe).
 ARTIFACT_FRESHNESS_SLACK_SECONDS = 5
+
+
+def _active_catalog_session():
+    catalog_path = os.environ.get("DEVLOOP_PORTABLE_SESSION_CATALOG")
+    session_id = os.environ.get("DEVLOOP_PORTABLE_SESSION_ID")
+    if not catalog_path or not session_id:
+        return None
+    from .portable_session_catalog import PortableSessionCatalog
+
+    catalog = PortableSessionCatalog(Path(catalog_path))
+    return (
+        catalog,
+        catalog.get_session(session_id),
+        os.environ.get("DEVLOOP_PORTABLE_SESSION_RESUME") == "1",
+    )
 
 
 @dataclass(frozen=True)
@@ -205,6 +224,16 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error(str(exc))
 
         branch = current_branch(repo_root) or "unknown"
+        catalog_session = _active_catalog_session()
+        if catalog_session is not None:
+            session_catalog, session_record, _resume_catalog_session = catalog_session
+            session_catalog.bind_session_checkout(session_record.session_id, repo_root)
+            session_catalog.publish_workflow(
+                session_record.session_id,
+                prd_path=artifacts.prd_path,
+                issues_index_path=artifacts.issues_index,
+                activity_summary="Published workflow ready for delivery",
+            )
         publish_planning_run_context(
             project_root=repo_root,
             implementation_branch=branch,
@@ -262,6 +291,17 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             )
     project_root = repo_root
     repo_root = apply_branch_strategy(repo_root)
+    catalog_session = _active_catalog_session()
+    session_catalog = catalog_session[0] if catalog_session is not None else None
+    session_record = catalog_session[1] if catalog_session is not None else None
+    resume_catalog_session = (
+        catalog_session[2] if catalog_session is not None else False
+    )
+    if catalog_session is not None:
+        assert session_catalog is not None
+        assert session_record is not None
+        session_catalog.bind_session_checkout(session_record.session_id, repo_root)
+        session_record = session_catalog.get_session(session_record.session_id)
     publish_planning_run_context(
         project_root=project_root,
         implementation_branch=current_branch(repo_root) or "unknown",
@@ -280,12 +320,39 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     wiki_index = bundle.root / DEFAULT_SELF_IMPROVEMENT_WIKI_PATH / "index.md"
     component_catalog = build_portable_component_catalog(bundle.root)
     catalog_access = BackendModelCatalogAccess(cwd=repo_root, codex=args.codex)
+    resume_settings_override: StepExecutionSettings | None = None
+    resume_budget_override: ExecutionBudget | None = None
+    resume_thread_id: str | None = None
+    if resume_catalog_session:
+        assert session_record is not None
+        saved_settings = session_record.planning_settings
+        if session_record.planning_thread_id is None:
+            raise RuntimeError(
+                "The saved pre-PRD session has no planning thread identity."
+            )
+        if saved_settings is None:
+            raise RuntimeError(
+                "The saved pre-PRD session has no planning settings snapshot."
+            )
+        resume_settings_override = StepExecutionSettings(
+            backend=ExecutionBackendId(saved_settings.backend),
+            model=saved_settings.model,
+            reasoning_effort=saved_settings.reasoning_effort,
+            fast=FastPreference(saved_settings.fast),
+        )
+        resume_budget_override = ExecutionBudget(
+            timeout_seconds=saved_settings.timeout_seconds,
+            checkpoint_seconds=saved_settings.checkpoint_seconds,
+        )
+        resume_thread_id = session_record.planning_thread_id
     workflow_snapshot = preflight_analysis_workflow(
         bundle_root=bundle.root,
         state_path=state_path,
         selection=selection,
         component_catalog=component_catalog,
         catalog_access=catalog_access,
+        planning_settings_override=resume_settings_override,
+        planning_budget_override=resume_budget_override,
     )
     if workflow_snapshot is None:
         print("Planning aborted before Analysis execution.")
@@ -309,6 +376,24 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     )
     planning_settings = planning_step.execution_settings
     assert planning_settings is not None
+    planning_budget = planning_step.execution_budget
+    if catalog_session is not None:
+        assert session_catalog is not None
+        assert session_record is not None
+        if not resume_catalog_session:
+            from .portable_session_catalog import PortablePlanningSettings
+
+            session_catalog.save_planning_settings(
+                session_record.session_id,
+                PortablePlanningSettings(
+                    backend=planning_settings.backend.value,
+                    model=planning_settings.model,
+                    reasoning_effort=planning_settings.reasoning_effort,
+                    fast=planning_settings.fast.value,
+                    timeout_seconds=planning_budget.timeout_seconds,
+                    checkpoint_seconds=planning_budget.checkpoint_seconds,
+                ),
+            )
 
     config = ChatConfig(
         codex=args.codex,
@@ -317,7 +402,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
         execution_settings=planning_settings,
-        execution_budget=planning_step.execution_budget,
+        execution_budget=planning_budget,
         workflow_progress=statusui.project_workflow_progress(
             workflow_snapshot,
             component_catalog,
@@ -354,6 +439,15 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         initial_prompt=initial_prompt,
         callbacks=callbacks,
         collect_initial_message=collect_initial_message,
+        resume_session_id=resume_thread_id,
+        on_session_bound=(
+            lambda thread_id: session_catalog.save_planning_thread(
+                session_record.session_id,
+                thread_id,
+            )
+            if session_catalog is not None and session_record is not None
+            else None
+        ),
     )
     if artifacts is None:
         print("Planning aborted.")
@@ -362,6 +456,13 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if isinstance(artifacts, list):
         artifacts = _choose_artifacts(artifacts)
 
+    if session_catalog is not None and session_record is not None:
+        session_catalog.publish_workflow(
+            session_record.session_id,
+            prd_path=artifacts.prd_path,
+            issues_index_path=artifacts.issues_index,
+            activity_summary="Published workflow ready for delivery",
+        )
     print()
     print(f"PRD: {artifacts.prd_path}")
     print(f"Issue index: {artifacts.issues_index}")
@@ -385,6 +486,8 @@ def preflight_analysis_workflow(
     component_catalog: PortableStepComponentCatalog,
     model_catalog_loader: Callable[[], ModelCatalog] | None = None,
     catalog_access: BackendModelCatalogAccess | None = None,
+    planning_settings_override: StepExecutionSettings | None = None,
+    planning_budget_override: ExecutionBudget | None = None,
 ) -> WorkflowDefinition | None:
     """Return the exact workflow authorized for Analysis after interactive repair.
 
@@ -403,6 +506,24 @@ def preflight_analysis_workflow(
     while True:
         try:
             workflow = WorkflowDefaultStore(state_path, component_catalog).load()
+            if planning_settings_override is not None:
+                workflow = replace(
+                    workflow,
+                    steps=tuple(
+                        replace(
+                            step,
+                            execution_settings=planning_settings_override,
+                            execution_budget=(
+                                planning_budget_override
+                                if planning_budget_override is not None
+                                else step.execution_budget
+                            ),
+                        )
+                        if step.instance_id == ANALYSIS_STEP_ID
+                        else step
+                        for step in workflow.steps
+                    ),
+                )
             planning_step = planning_workflow_step(workflow, component_catalog)
             preflight_step_execution_settings(
                 workflow,

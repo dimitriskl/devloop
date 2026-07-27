@@ -12,6 +12,7 @@ PORTABLE_PROTOCOL_VERSION = 1
 
 class SupervisorMessageKind(str, Enum):
     START = "START"
+    RESUME = "RESUME"
     USER_INPUT = "USER_INPUT"
     SHUTDOWN = "SHUTDOWN"
 

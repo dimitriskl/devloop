@@ -4,7 +4,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -51,6 +51,7 @@ class PortableWorkflowOperation(str, Enum):
 
 class PortableSessionIntentKind(str, Enum):
     START = "START"
+    RESUME = "RESUME"
     PROVIDE_INPUT = "PROVIDE_INPUT"
 
 
@@ -94,6 +95,7 @@ class PortableSessionSnapshot:
     diagnostics: tuple[str, ...] = ()
     result: int | None = None
     input_request: PortableSessionInputRequest | None = None
+    prd_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,8 @@ class PortableSessionController(Protocol):
     ) -> PortableSessionSnapshot: ...
 
     def try_next_event(self) -> PortableSessionEvent | None: ...
+
+    def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]: ...
 
     def shutdown(self) -> None: ...
 
@@ -128,6 +132,48 @@ WorkerLauncher = Callable[[PortableSessionLaunch], PortableWorkerProcess]
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
+class PortablePlanningSettingsRecord(Protocol):
+    def to_dict(self) -> dict[str, object]: ...
+
+
+class PortableCatalogSessionRecord(Protocol):
+    session_id: str
+    checkout: Path
+    status: PortableSessionStatus
+    planning_thread_id: str | None
+    planning_settings: PortablePlanningSettingsRecord | None
+    prd_path: Path | None
+    launch: PortableSessionLaunch
+
+
+class PortableResumeCandidateRecord(Protocol):
+    candidate_id: str
+    checkout: Path
+    prd_path: Path
+
+
+class PortableSessionCatalogController(Protocol):
+    path: Path
+
+    def create_session(
+        self,
+        launch: PortableSessionLaunch,
+        planning_settings: PortablePlanningSettingsRecord | None = None,
+    ) -> PortableCatalogSessionRecord: ...
+
+    def get_session(self, session_id: str) -> PortableCatalogSessionRecord: ...
+
+    def list_sessions(self) -> tuple[PortableCatalogSessionRecord, ...]: ...
+
+    def update_session_status(
+        self,
+        session_id: str,
+        status: PortableSessionStatus,
+        *,
+        activity_summary: str = "",
+    ) -> None: ...
+
+
 @dataclass
 class _RunningSession:
     process: PortableWorkerProcess
@@ -138,12 +184,62 @@ class _RunningSession:
 class PortableSessionSupervisor:
     """Own isolated worker processes and project their protocol into session state."""
 
-    def __init__(self, *, worker_launcher: WorkerLauncher | None = None) -> None:
-        self._worker_launcher = worker_launcher or _launch_portable_worker
+    def __init__(
+        self,
+        *,
+        worker_launcher: WorkerLauncher | None = None,
+        catalog: PortableSessionCatalogController | None = None,
+        resume_candidates: Iterable[PortableResumeCandidateRecord] = (),
+    ) -> None:
+        self._catalog = catalog
+        self._worker_launcher = worker_launcher or (
+            lambda launch: _launch_portable_worker(
+                launch,
+                catalog_path=catalog.path if catalog is not None else None,
+            )
+        )
         self._snapshots: dict[str, PortableSessionSnapshot] = {}
+        self._launches: dict[str, PortableSessionLaunch] = {}
+        self._candidate_launches: dict[str, PortableSessionLaunch] = {}
         self._running: dict[str, _RunningSession] = {}
+        self._threads: list[Thread] = []
         self._events: Queue[PortableSessionEvent] = Queue()
         self._condition = Condition(RLock())
+        if catalog is not None:
+            for record in catalog.list_sessions():
+                self._snapshots[record.session_id] = PortableSessionSnapshot(
+                    session_id=record.session_id,
+                    checkout=record.checkout,
+                    status=record.status,
+                    prd_path=record.prd_path,
+                )
+                self._launches[record.session_id] = record.launch
+        known_prd_paths = {
+            snapshot.prd_path.resolve()
+            for snapshot in self._snapshots.values()
+            if snapshot.prd_path is not None
+        }
+        for candidate in resume_candidates:
+            if (
+                candidate.candidate_id in self._snapshots
+                or candidate.prd_path.resolve() in known_prd_paths
+            ):
+                continue
+            launch = PortableSessionLaunch(
+                session_id=candidate.candidate_id,
+                checkout=candidate.checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--prd", str(candidate.prd_path)),
+            )
+            self._snapshots[candidate.candidate_id] = PortableSessionSnapshot(
+                session_id=candidate.candidate_id,
+                checkout=candidate.checkout,
+                status=PortableSessionStatus.READY,
+                prd_path=candidate.prd_path,
+            )
+            self._launches[candidate.candidate_id] = launch
+            self._candidate_launches[candidate.candidate_id] = launch
+            known_prd_paths.add(candidate.prd_path.resolve())
 
     def start_session(
         self,
@@ -163,7 +259,51 @@ class PortableSessionSupervisor:
                     f"Portable session already exists: {launch.session_id}"
                 )
             normalized_launch = replace(launch, checkout=checkout)
-            process = self._worker_launcher(normalized_launch)
+            if self._catalog is not None:
+                self._catalog.create_session(normalized_launch)
+            return self._launch_session(
+                normalized_launch,
+                SupervisorMessageKind.START,
+                {},
+            )
+
+    def resume_session(self, session_id: str) -> PortableSessionSnapshot:
+        with self._condition:
+            if session_id in self._running:
+                raise ValueError(f"Portable session is already running: {session_id}")
+            try:
+                launch = self._launches[session_id]
+            except KeyError as error:
+                raise ValueError(f"Unknown portable session: {session_id}") from error
+            if session_id in self._candidate_launches:
+                if self._catalog is not None:
+                    self._catalog.create_session(launch)
+                del self._candidate_launches[session_id]
+                return self._launch_session(
+                    launch,
+                    SupervisorMessageKind.START,
+                    {},
+                )
+            payload: dict[str, object] = {}
+            if self._catalog is not None:
+                record = self._catalog.get_session(session_id)
+                payload["planning_thread_id"] = record.planning_thread_id
+                if record.planning_settings is not None:
+                    payload["planning_settings"] = record.planning_settings.to_dict()
+            return self._launch_session(
+                launch,
+                SupervisorMessageKind.RESUME,
+                payload,
+            )
+
+    def _launch_session(
+        self,
+        launch: PortableSessionLaunch,
+        command_kind: SupervisorMessageKind,
+        command_payload: dict[str, object],
+    ) -> PortableSessionSnapshot:
+        process = self._worker_launcher(launch)
+        try:
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 process.terminate()
                 raise RuntimeError(
@@ -171,36 +311,58 @@ class PortableSessionSupervisor:
                 )
             snapshot = PortableSessionSnapshot(
                 session_id=launch.session_id,
-                checkout=checkout,
+                checkout=launch.checkout,
                 status=PortableSessionStatus.RUNNING,
+                prd_path=self._snapshots.get(
+                    launch.session_id,
+                    PortableSessionSnapshot(
+                        session_id=launch.session_id,
+                        checkout=launch.checkout,
+                        status=PortableSessionStatus.READY,
+                    ),
+                ).prd_path,
             )
             self._snapshots[launch.session_id] = snapshot
+            self._launches[launch.session_id] = launch
             self._running[launch.session_id] = _RunningSession(process)
+            if self._catalog is not None:
+                self._catalog.update_session_status(
+                    launch.session_id,
+                    PortableSessionStatus.RUNNING,
+                )
             self._publish(snapshot)
             self._write_frame(
                 launch.session_id,
                 supervisor_frame(
                     launch.session_id,
                     1,
-                    SupervisorMessageKind.START,
+                    command_kind,
                     {
                         "operation": launch.operation.value,
                         "arguments": list(launch.arguments),
+                        **command_payload,
                     },
                 ),
             )
-        Thread(
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+            raise
+        stdout_thread = Thread(
             target=self._read_worker_stdout,
             args=(launch.session_id,),
             daemon=True,
             name=f"portable-session-{launch.session_id}-stdout",
-        ).start()
-        Thread(
+        )
+        stderr_thread = Thread(
             target=self._read_worker_stderr,
             args=(launch.session_id,),
             daemon=True,
             name=f"portable-session-{launch.session_id}-stderr",
-        ).start()
+        )
+        self._threads.extend((stdout_thread, stderr_thread))
+        stdout_thread.start()
+        stderr_thread.start()
         return snapshot
 
     def handle_intent(
@@ -211,6 +373,8 @@ class PortableSessionSupervisor:
             if intent.launch is None:
                 raise ValueError("START intent requires a session launch.")
             return self.start_session(intent.launch)
+        if intent.kind is PortableSessionIntentKind.RESUME:
+            return self.resume_session(intent.session_id)
         if intent.kind is PortableSessionIntentKind.PROVIDE_INPUT:
             return self.provide_input(intent.session_id, intent.value)
         raise ValueError(f"Unsupported portable session intent: {intent.kind}")
@@ -249,6 +413,10 @@ class PortableSessionSupervisor:
             except KeyError as error:
                 raise ValueError(f"Unknown portable session: {session_id}") from error
 
+    def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+        with self._condition:
+            return tuple(self._snapshots.values())
+
     def try_next_event(self) -> PortableSessionEvent | None:
         try:
             return self._events.get_nowait()
@@ -275,6 +443,9 @@ class PortableSessionSupervisor:
             session_ids = tuple(self._running)
         for session_id in session_ids:
             self._shutdown_session(session_id)
+        for thread in tuple(self._threads):
+            thread.join(timeout=1)
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
 
     def _shutdown_session(self, session_id: str) -> None:
         with self._condition:
@@ -306,6 +477,15 @@ class PortableSessionSupervisor:
                 if stream is not None:
                     stream.close()
             self._running.pop(session_id, None)
+            snapshot = self._snapshots[session_id]
+            if not snapshot.status.terminal:
+                ready = replace(
+                    snapshot,
+                    status=PortableSessionStatus.READY,
+                    input_request=None,
+                )
+                self._snapshots[session_id] = ready
+                self._persist_snapshot(ready)
 
     def _write_frame(self, session_id: str, frame: PortableProtocolFrame) -> None:
         process = self._running[session_id].process
@@ -470,6 +650,7 @@ class PortableSessionSupervisor:
                     )[-100:],
                 )
             self._snapshots[session_id] = updated
+            self._persist_snapshot(updated)
             self._publish(updated)
             self._condition.notify_all()
 
@@ -485,6 +666,7 @@ class PortableSessionSupervisor:
                 diagnostics=(*snapshot.diagnostics, message)[-100:],
             )
             self._snapshots[session_id] = updated
+            self._persist_snapshot(updated)
             self._publish(updated)
             self._condition.notify_all()
             running = self._running.get(session_id)
@@ -493,6 +675,26 @@ class PortableSessionSupervisor:
 
     def _publish(self, snapshot: PortableSessionSnapshot) -> None:
         self._events.put(PortableSessionEvent(snapshot))
+
+    def _persist_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
+        if self._catalog is None:
+            return
+        summary = snapshot.activity[-1] if snapshot.activity else ""
+        try:
+            self._catalog.update_session_status(
+                snapshot.session_id,
+                snapshot.status,
+                activity_summary=summary,
+            )
+        except RuntimeError as error:
+            current = self._snapshots[snapshot.session_id]
+            self._snapshots[snapshot.session_id] = replace(
+                current,
+                diagnostics=(
+                    *current.diagnostics,
+                    f"Portable Session Catalog update failed: {error}",
+                )[-100:],
+            )
 
 
 def _payload_text(frame: PortableProtocolFrame, key: str) -> str:
@@ -504,9 +706,14 @@ def _payload_text(frame: PortableProtocolFrame, key: str) -> str:
 
 def _launch_portable_worker(
     launch: PortableSessionLaunch,
+    *,
+    catalog_path: Path | None = None,
 ) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment["DEVLOOP_UI_MODE"] = "application"
+    environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
+    if catalog_path is not None:
+        environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog_path)
     return subprocess.Popen(
         [
             sys.executable,

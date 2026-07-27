@@ -449,6 +449,8 @@ def run_planning_chat(
     initial_prompt: str,
     callbacks: ChatCallbacks,
     collect_initial_message: bool = False,
+    resume_session_id: str | None = None,
+    on_session_bound: Callable[[str], None] | None = None,
     turn_runner: TurnRunner | None = None,
     editor: Any | None = None,
     capture_image: Callable[[Path], Path | None] = capture_clipboard_image,
@@ -463,8 +465,13 @@ def run_planning_chat(
             )
     else:
         active_turn_runner = turn_runner
-    session = ChatSession(config=config)
+    session = ChatSession(
+        config=config,
+        session_id=resume_session_id,
+        started=resume_session_id is not None,
+    )
     image_dir = Path(tempfile.mkdtemp(prefix="devloop-images-"))
+    collected_resume_message = ""
 
     def paste_hook() -> str | None:
         image = capture_image(image_dir)
@@ -490,21 +497,35 @@ def run_planning_chat(
             collected = _collect_initial_message(session, callbacks, editor, paste_hook)
             if collected.finished:
                 return collected.result
-            initial_prompt = append_initial_message(initial_prompt, collected.text)
+            if resume_session_id is None:
+                initial_prompt = append_initial_message(initial_prompt, collected.text)
+            else:
+                collected_resume_message = collected.text
 
-        returncode, output = _run_turn(
-            session,
-            active_turn_runner,
-            first_prompt=initial_prompt,
-        )
-        if returncode == 0:
-            session.started = True
-        else:
-            print(
-                f"Codex could not start (exit {returncode}). "
-                "Your next message will retry the planning session.",
-                file=sys.stderr,
+        if resume_session_id is None:
+            returncode, output = _run_turn(
+                session,
+                active_turn_runner,
+                first_prompt=initial_prompt,
             )
+            if returncode == 0:
+                session.started = True
+                if session.session_id is not None and on_session_bound is not None:
+                    on_session_bound(session.session_id)
+            else:
+                print(
+                    f"Codex could not start (exit {returncode}). "
+                    "Your next message will retry the planning session.",
+                    file=sys.stderr,
+                )
+        elif collected_resume_message:
+            returncode, output = _run_turn(
+                session,
+                active_turn_runner,
+                message=collected_resume_message,
+            )
+            if returncode != 0:
+                session.consecutive_failures += 1
 
         while True:
             artifacts = callbacks.probe_artifacts()
@@ -551,6 +572,11 @@ def run_planning_chat(
                     if returncode == 0:
                         session.started = True
                         session.consecutive_failures = 0
+                        if (
+                            session.session_id is not None
+                            and on_session_bound is not None
+                        ):
+                            on_session_bound(session.session_id)
                     else:
                         session.consecutive_failures += 1
                         continue
@@ -589,6 +615,8 @@ def run_planning_chat(
                 )
                 continue
             session.consecutive_failures = 0
+            if session.session_id is not None and on_session_bound is not None:
+                on_session_bound(session.session_id)
             session.pending_images.clear()
     finally:
         shutil.rmtree(image_dir, ignore_errors=True)

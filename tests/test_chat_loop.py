@@ -113,6 +113,57 @@ class AnalysisExecutionBudgetTests(unittest.TestCase):
 
 
 class ResumeCommandTests(unittest.TestCase):
+    def test_saved_planning_thread_resumes_without_replaying_initial_prompt(
+        self,
+    ) -> None:
+        turns: list[list[str]] = []
+        probes = 0
+
+        def turn_runner(command, cwd):
+            del cwd
+            turns.append(list(command))
+            return 0, '{"type":"turn.completed","usage":{}}\n'
+
+        def probe_artifacts():
+            nonlocal probes
+            probes += 1
+            return "ARTIFACTS" if turns else None
+
+        callbacks = ChatCallbacks(
+            probe_artifacts=probe_artifacts,
+            manual_artifacts=lambda: None,
+            open_options=lambda: None,
+            status_summary=lambda: "status",
+        )
+        thread_id = "0198c0de-1111-2222-3333-444455556666"
+        with tempfile.TemporaryDirectory() as raw:
+            result = chat_loop.run_planning_chat(
+                config=ChatConfig(
+                    codex="codex",
+                    repo_root=Path(raw),
+                    bundle_root=Path(raw),
+                    execution_settings=StepExecutionSettings(
+                        ExecutionBackendId.CODEX_CLI,
+                        "gpt-5.6-sol",
+                        "xhigh",
+                        FastPreference.OFF,
+                    ),
+                ),
+                initial_prompt="MUST NOT BE REPLAYED",
+                callbacks=callbacks,
+                resume_session_id=thread_id,
+                turn_runner=turn_runner,
+                editor=FakeEditor(["continue planning"]),
+            )
+
+        self.assertEqual(result, "ARTIFACTS")
+        self.assertEqual(probes, 2)
+        self.assertEqual(turns[0][:4], ["codex", "exec", "resume", thread_id])
+        self.assertEqual(turns[0][-1], "continue planning")
+        self.assertNotIn("MUST NOT BE REPLAYED", turns[0])
+        self.assertEqual(turns[0][turns[0].index("-m") + 1], "gpt-5.6-sol")
+        self.assertIn('model_reasoning_effort="xhigh"', turns[0])
+
     def test_resume_at_first_prompt_does_not_start_codex(self) -> None:
         turns: list[list[str]] = []
 

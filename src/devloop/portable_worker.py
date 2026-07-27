@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
@@ -160,7 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--session-id", required=True)
     options = parser.parse_args(argv)
     protocol_stdout = sys.stdout
-    start = _read_start_frame(options.session_id, sys.stdin)
+    start = _read_launch_frame(options.session_id, sys.stdin)
     bridge = PortableWorkerRuntimeBridge(
         options.session_id,
         command_stream=sys.stdin,
@@ -169,6 +170,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     sys.stdout = _ProtocolOutputStream(bridge, is_error=False)
     try:
         bridge.send_hello()
+        if start.kind == SupervisorMessageKind.RESUME.value:
+            os.environ["DEVLOOP_PORTABLE_SESSION_RESUME"] = "1"
         operation = PortableWorkflowOperation(start.payload.get("operation"))
         arguments = start.payload.get("arguments")
         if not isinstance(arguments, list) or not all(
@@ -189,20 +192,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     return result
 
 
-def _read_start_frame(
+def _read_launch_frame(
     session_id: str,
     command_stream: TextIO,
 ) -> PortableProtocolFrame:
     line = command_stream.readline()
     if not line:
-        raise PortableProtocolError("Supervisor did not send START.")
+        raise PortableProtocolError("Supervisor did not send START or RESUME.")
     frame = PortableProtocolFrame.parse(
         line,
         expected_session_id=session_id,
         expected_sequence=1,
     )
-    if frame.kind != SupervisorMessageKind.START.value:
-        raise PortableProtocolError(f"Expected START; received {frame.kind!r}.")
+    launch_kinds = {
+        SupervisorMessageKind.START.value,
+        SupervisorMessageKind.RESUME.value,
+    }
+    if frame.kind not in launch_kinds:
+        raise PortableProtocolError(
+            f"Expected START or RESUME; received {frame.kind!r}."
+        )
     return frame
 
 
