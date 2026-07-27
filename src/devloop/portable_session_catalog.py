@@ -732,7 +732,6 @@ class PortableSessionCatalog:
                                     AND updated_at >= 0)
                         );
                         PRAGMA user_version = 1;
-                        COMMIT;
                         """
                     )
                 self._validate_schema(connection)

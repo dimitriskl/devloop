@@ -204,6 +204,83 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
             ):
                 PortableSessionCatalog(database)
 
+    def test_version_zero_initialization_rolls_back_for_incompatible_schema(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "catalog.sqlite3"
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    "CREATE TABLE existing_data (record_id INTEGER PRIMARY KEY, value TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO existing_data (record_id, value) VALUES (1, 'original')"
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "schema is incompatible",
+            ):
+                PortableSessionCatalog(database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                tables = tuple(
+                    connection.execute(
+                        """
+                        SELECT name
+                        FROM sqlite_master
+                        WHERE type = 'table'
+                        ORDER BY name
+                        """
+                    )
+                )
+                records = tuple(
+                    connection.execute(
+                        "SELECT record_id, value FROM existing_data ORDER BY record_id"
+                    )
+                )
+
+        self.assertEqual(version, 0)
+        self.assertEqual(tables, (("existing_data",),))
+        self.assertEqual(records, ((1, "original"),))
+
+    def test_version_zero_initialization_rolls_back_if_record_validation_fails(
+        self,
+    ) -> None:
+        class CatalogWithFailingRecordValidation(PortableSessionCatalog):
+            @staticmethod
+            def _validate_records(connection: sqlite3.Connection) -> None:
+                raise PortableSessionCatalogError("forced record validation failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "catalog.sqlite3"
+            with closing(sqlite3.connect(database)):
+                pass
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "forced record validation failure",
+            ):
+                CatalogWithFailingRecordValidation(database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                schema = tuple(
+                    connection.execute(
+                        """
+                        SELECT type, name, sql
+                        FROM sqlite_master
+                        WHERE name NOT LIKE 'sqlite_%'
+                        ORDER BY type, name
+                        """
+                    )
+                )
+
+        self.assertEqual(version, 0)
+        self.assertEqual(schema, ())
+
     def test_catalog_open_rejects_orphaned_session_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
