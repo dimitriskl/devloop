@@ -53,4 +53,24 @@ Covers parent PRD user stories 8–18, 57, and 66–68.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Independent code review passed the complete Issue 0003 implementation from
+  `f9139aa` through `4ebceb3`, including all worktree selection, lease,
+  implementation-handoff, and delivery-transfer fixes.
+- Selected checkouts are canonicalized before an atomic machine-wide lease is
+  acquired; same-shell ownership focuses the existing session, external ownership
+  blocks a competing worker, and distinct worktrees from one repository remain
+  independently leasable and registered.
+- Planning-to-implementation handoff transfers the session and lease to the
+  confirmed implementation worktree, preserves the source-project relationship,
+  updates delivery pointers consistently, and rolls back partial transfer failures.
+- Independent QA passed 239 tests with 1 platform skip; compile, diff, and
+  product-boundary checks passed. One unchanged Windows path assertion failure was
+  confirmed unrelated to Issue 0003.
+- The repository virtual environment was unavailable, so pytest, Ruff, and mypy
+  could not run. Validation used the sandbox Python interpreter and the
+  standard-library unittest suite.
+- Stale-owner detection, lease heartbeats, and crashed-owner reclamation remain
+  intentionally excluded and are owned by
+  [Issue 0007](./0007-recover-crashed-workers-and-stale-leases.md).
