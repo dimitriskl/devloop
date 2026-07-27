@@ -1464,16 +1464,13 @@ def run_handoff(
     )
 
     while True:
+        # Handoff options describe a proposal. The supervisor may treat runtime
+        # checkout context as authoritative, so retain the leased source checkout
+        # until the delivery runner creates and atomically binds the worktree.
         publish_planning_run_context(
             project_root=repo_root,
-            implementation_branch=(
-                params.branch_name
-                if params.use_worktree
-                else current_branch(repo_root) or "unknown"
-            ),
-            implementation_worktree=(
-                params.worktree_path if params.use_worktree else repo_root
-            ),
+            implementation_branch=current_branch(repo_root) or "unknown",
+            implementation_worktree=repo_root,
             prd_path=artifacts.prd_path,
         )
         lines = [

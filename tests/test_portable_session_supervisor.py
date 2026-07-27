@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,220 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
+    def test_default_planning_handoff_confirms_worktree_only_after_start_transfer(
+        self,
+    ) -> None:
+        worker_bootstrap = textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+            from types import SimpleNamespace
+
+            from devloop import cli
+
+            cli.resolve_run_workflow_with_repair = lambda *_args, **_kwargs: object()
+            def complete_after_confirmed_transfer(**_kwargs):
+                cli.read_prompt("Hold the confirmed implementation-worktree lease")
+                return cli.DependencyScheduleResult(completed=True)
+
+            cli.execute_dependency_schedule = complete_after_confirmed_transfer
+            cli.offer_merge_followup = lambda **_kwargs: None
+            cli.choose_run_review_action = (
+                lambda *_args, **_kwargs: cli.RunReviewAction.EXIT
+            )
+            cli.resolve_self_improvement_wiki_path = (
+                lambda *_args, **_kwargs: Path(sys.argv[2])
+            )
+            cli.ensure_self_improvement_wiki = lambda *_args, **_kwargs: None
+            cli.write_self_improvement_context = (
+                lambda *_args, **_kwargs: Path(sys.argv[2]) / "context.json"
+            )
+            cli.CodexRunner.run_self_improvement_compiler = (
+                lambda *_args, **_kwargs: SimpleNamespace(
+                    status="PASS",
+                    summary="Skipped by planning handoff regression.",
+                    changed_files=[],
+                    findings=[],
+                    residual_risks=[],
+                )
+            )
+
+            from devloop.portable_worker import main
+
+            raise SystemExit(main(["--session-id", sys.argv[1]]))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(
+                ["git", "init"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (source / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Dev Loop Tests",
+                    "-c",
+                    "user.email=devloop-tests@example.invalid",
+                    "commit",
+                    "-m",
+                    "baseline",
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            issues = source / "prd" / "handoff-transfer" / "issues"
+            issues.mkdir(parents=True)
+            prd = issues.parent / "handoff-transfer.md"
+            index = issues / "README.md"
+            issue = issues / "0001-transfer.md"
+            prd.write_text(
+                "# Handoff Transfer\n\n"
+                "## Target Product\n\n"
+                "Product: devloop-plan + devloop\n",
+                encoding="utf-8",
+            )
+            index.write_text(
+                "- [Transfer planning delivery](./0001-transfer.md)\n",
+                encoding="utf-8",
+            )
+            issue.write_text(
+                "# Transfer planning delivery\n\n"
+                "## Target Product\n\n"
+                "Product: devloop-plan + devloop\n\n"
+                "Completed: [ ]\n",
+                encoding="utf-8",
+            )
+
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "planning-handoff-shell"
+
+            def launch_planning_worker(
+                selected: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                environment = os.environ.copy()
+                environment["APPDATA"] = str(root / "config")
+                environment["DEVLOOP_UI_MODE"] = "application"
+                environment["DEVLOOP_PORTABLE_SESSION_ID"] = selected.session_id
+                environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog.path)
+                environment["DEVLOOP_PORTABLE_SESSION_OWNER_ID"] = owner_id
+                source_path = str(Path(cli.__file__).resolve().parents[1])
+                existing_python_path = environment.get("PYTHONPATH")
+                environment["PYTHONPATH"] = (
+                    source_path
+                    if not existing_python_path
+                    else os.pathsep.join((source_path, existing_python_path))
+                )
+                return subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        worker_bootstrap,
+                        selected.session_id,
+                        str(root / "wiki"),
+                    ],
+                    cwd=selected.checkout,
+                    env=environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            launch = PortableSessionLaunch(
+                session_id="default-planning-handoff",
+                checkout=source,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--prd", str(prd)),
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_planning_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            supervisor.start_session(launch)
+
+            waiting = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            proposed_worktree = root / "source-handoff-transfer-dev"
+            self.assertFalse(proposed_worktree.exists())
+            self.assertEqual(waiting.checkout, source.resolve())
+            assert waiting.context is not None
+            self.assertEqual(
+                Path(waiting.context.implementation_worktree),
+                source.resolve(),
+            )
+            self.assertIsNone(catalog.get_worktree_lease(proposed_worktree))
+
+            supervisor.provide_input(launch.session_id, "start")
+            transferred_snapshot = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            transferred = catalog.get_session(launch.session_id)
+            implementation_prd = (
+                proposed_worktree
+                / "prd"
+                / "handoff-transfer"
+                / "handoff-transfer.md"
+            ).resolve()
+            implementation_index = (
+                proposed_worktree
+                / "prd"
+                / "handoff-transfer"
+                / "issues"
+                / "README.md"
+            ).resolve()
+            self.assertEqual(
+                transferred_snapshot.checkout,
+                proposed_worktree.resolve(),
+            )
+            assert transferred_snapshot.context is not None
+            self.assertEqual(
+                Path(transferred_snapshot.context.implementation_worktree),
+                proposed_worktree.resolve(),
+            )
+            self.assertEqual(transferred.checkout, proposed_worktree.resolve())
+            self.assertEqual(transferred.prd_path, implementation_prd)
+            self.assertEqual(transferred.issues_index_path, implementation_index)
+            self.assertIsNone(catalog.get_worktree_lease(source))
+            transferred_lease = catalog.get_worktree_lease(proposed_worktree)
+            assert transferred_lease is not None
+            self.assertEqual(transferred_lease.session_id, launch.session_id)
+
+            supervisor.provide_input(launch.session_id, "continue")
+            completed = supervisor.wait_for_terminal(launch.session_id, timeout=10)
+            supervisor.shutdown()
+            self.assertEqual(
+                completed.status,
+                PortableSessionStatus.COMPLETED,
+                completed.diagnostics,
+            )
+            self.assertIsNone(catalog.get_worktree_lease(proposed_worktree))
+
     def test_planning_delivery_transfer_resumes_only_from_implementation_worktree(
         self,
     ) -> None:

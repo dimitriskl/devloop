@@ -944,7 +944,9 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertIn("--no-worktree", launched_args)
         self.assertNotIn("--create-worktree", launched_args)
 
-    def test_handoff_publishes_project_branch_and_worktree_context(self) -> None:
+    def test_handoff_keeps_confirmed_checkout_context_while_worktree_is_proposed(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             artifacts = self.make_artifacts(root)
@@ -957,6 +959,15 @@ class BuildDevloopArgsTests(unittest.TestCase):
             worktree = root / "feature-dev"
             bridge = PortableRuntimeBridge()
 
+            def render_handoff_then_quit(
+                *_args: object,
+                render: object,
+                **_kwargs: object,
+            ) -> str:
+                assert callable(render)
+                render("Start development")
+                return "/quit"
+
             with portable_runtime_session(bridge), mock.patch.object(
                 interactive_runner,
                 "default_worktree_path",
@@ -964,7 +975,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
             ), mock.patch.object(
                 interactive_runner,
                 "choose_menu_option",
-                return_value="/quit",
+                side_effect=render_handoff_then_quit,
             ):
                 result = interactive_runner.run_handoff(
                     root,
@@ -975,6 +986,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
                 )
 
             event = bridge.next_event(timeout=1)
+            screen_event = bridge.next_event(timeout=1)
 
         self.assertEqual(result, 0)
         self.assertIs(
@@ -985,12 +997,18 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertEqual(event.run_context.project_root, str(root))
         self.assertEqual(
             event.run_context.implementation_branch,
-            "devloop/feature",
+            "unknown",
         )
         self.assertEqual(
             event.run_context.implementation_worktree,
-            str(worktree),
+            str(root),
         )
+        self.assertIs(
+            screen_event.kind,
+            PortableRuntimeEventKind.SCREEN_UPDATED,
+        )
+        self.assertIn(str(worktree), screen_event.content)
+        self.assertIn("devloop/feature", screen_event.content)
 
     def test_handoff_options_opens_workflow_editor_with_current_run_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
