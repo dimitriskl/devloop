@@ -69,6 +69,9 @@ class WorktreePromptTests(unittest.TestCase):
                 worktree,
                 "find_registered_worktree",
                 return_value={"branch": "refs/heads/Reset-Queue"},
+            ), mock.patch.object(
+                worktree,
+                "require_same_git_repository",
             ), mock.patch.object(worktree, "run_captured_text") as run_mock:
                 with redirect_stdout(StringIO()) as output:
                     result = worktree.resolve_worktree(
@@ -86,7 +89,7 @@ class WorktreePromptTests(unittest.TestCase):
         self.assertIn("Using existing worktree", output.getvalue())
         run_mock.assert_not_called()
 
-    def test_resolve_worktree_reuses_registered_path_even_when_requested_branch_differs(self) -> None:
+    def test_resolve_worktree_rejects_registered_path_on_a_different_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             target = root / "feature-dev"
@@ -94,9 +97,15 @@ class WorktreePromptTests(unittest.TestCase):
                 worktree,
                 "find_registered_worktree",
                 return_value={"branch": "refs/heads/ResetQueue"},
+            ), mock.patch.object(
+                worktree,
+                "require_same_git_repository",
             ), mock.patch.object(worktree, "run_captured_text") as run_mock:
-                with redirect_stdout(StringIO()) as output:
-                    result = worktree.resolve_worktree(
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "requested branch Reset-Queue",
+                ):
+                    worktree.resolve_worktree(
                         source_repo=root,
                         create_worktree=True,
                         no_worktree=False,
@@ -106,11 +115,34 @@ class WorktreePromptTests(unittest.TestCase):
                         dry_run=False,
                     )
 
-        self.assertEqual(result.repo_root, target.resolve())
-        self.assertFalse(result.created)
-        printed = output.getvalue()
-        self.assertIn("Using existing worktree", printed)
-        self.assertIn("branch ResetQueue; requested Reset-Queue", printed)
+        run_mock.assert_not_called()
+
+    def test_resolve_worktree_rejects_detached_registered_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "feature-dev"
+            with mock.patch.object(
+                worktree,
+                "find_registered_worktree",
+                return_value={},
+            ), mock.patch.object(
+                worktree,
+                "require_same_git_repository",
+            ), mock.patch.object(worktree, "run_captured_text") as run_mock:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "detached",
+                ):
+                    worktree.resolve_worktree(
+                        source_repo=root,
+                        create_worktree=True,
+                        no_worktree=False,
+                        worktree_path=target,
+                        branch_name="Reset Queue",
+                        interactive=False,
+                        dry_run=False,
+                    )
+
         run_mock.assert_not_called()
 
     def test_resolve_existing_worktree_reuses_git_checkout_on_requested_branch(self) -> None:
@@ -120,6 +152,7 @@ class WorktreePromptTests(unittest.TestCase):
             target.mkdir()
             (target / "README.md").write_text("leftover checkout", encoding="utf-8")
             with mock.patch.object(worktree, "find_registered_worktree", return_value=None), \
+                 mock.patch.object(worktree, "require_same_git_repository"), \
                  mock.patch.object(
                      worktree,
                      "run_captured_text",
@@ -163,6 +196,116 @@ class WorktreePromptTests(unittest.TestCase):
                  ):
                 with self.assertRaisesRegex(RuntimeError, "not an empty folder or Git checkout"):
                     worktree.resolve_existing_worktree(root, target, "Reset-Queue")
+
+    def test_resolve_existing_worktree_rejects_an_unrelated_git_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            target = root / "target"
+            for repository in (source, target):
+                subprocess.run(
+                    ["git", "init", "-b", "Reset-Queue", str(repository)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                (repository / "README.md").write_text(
+                    f"# {repository.name}\n",
+                    encoding="utf-8",
+                )
+                subprocess.run(
+                    ["git", "add", "."],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Dev Loop Tests",
+                        "-c",
+                        "user.email=devloop-tests@example.invalid",
+                        "commit",
+                        "-m",
+                        "baseline",
+                    ],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "different Git repository",
+            ):
+                worktree.resolve_existing_worktree(
+                    source,
+                    target,
+                    "Reset-Queue",
+                )
+
+    def test_resolve_existing_worktree_accepts_linked_worktree_on_exact_branch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            target = root / "target"
+            subprocess.run(
+                ["git", "init", "-b", "main", str(source)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (source / "README.md").write_text("# Source\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Dev Loop Tests",
+                    "-c",
+                    "user.email=devloop-tests@example.invalid",
+                    "commit",
+                    "-m",
+                    "baseline",
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    "Reset-Queue",
+                    str(target),
+                ],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            selected = worktree.resolve_existing_worktree(
+                source,
+                target,
+                "Reset-Queue",
+            )
+
+        self.assertEqual(selected, target.resolve())
 
     def test_build_worktree_add_command_uses_existing_branch_without_new_branch_flag(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

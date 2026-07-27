@@ -105,13 +105,12 @@ def resolve_existing_worktree(
     if existing_worktree is None:
         return None
 
-    if existing_worktree.branch and not branch_matches(existing_worktree.branch, branch_name):
-        notice(
-            "Using existing worktree: "
-            f"{existing_worktree.repo_root} "
-            f"(branch {display_branch(existing_worktree.branch)}; requested {branch_name})"
+    if not branch_matches(existing_worktree.branch, branch_name):
+        raise RuntimeError(
+            "Requested worktree is on branch "
+            f"{display_branch(existing_worktree.branch)}, not the requested branch "
+            f"{branch_name}: {existing_worktree.repo_root}"
         )
-        return existing_worktree.repo_root
 
     notice(f"Using existing worktree: {existing_worktree.repo_root}")
     return existing_worktree.repo_root
@@ -121,6 +120,7 @@ def find_existing_worktree(source_repo: Path, worktree_path: Path) -> ExistingWo
     worktree_path = worktree_path.resolve()
     registered_worktree = find_registered_worktree(source_repo, worktree_path)
     if registered_worktree is not None:
+        require_same_git_repository(source_repo, worktree_path)
         return ExistingWorktree(
             repo_root=worktree_path,
             branch=registered_worktree.get("branch", ""),
@@ -147,6 +147,7 @@ def find_existing_worktree(source_repo: Path, worktree_path: Path) -> ExistingWo
             "Requested worktree path is inside another Git checkout. "
             f"Use the checkout root instead: {checkout.repo_root}"
         )
+    require_same_git_repository(source_repo, checkout.repo_root)
 
     return checkout
 
@@ -160,6 +161,31 @@ def find_git_checkout(path: Path) -> ExistingWorktree | None:
     branch_result = run_captured_text(["git", "branch", "--show-current"], cwd=repo_root)
     branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
     return ExistingWorktree(repo_root=repo_root, branch=branch)
+
+
+def require_same_git_repository(source_repo: Path, worktree_path: Path) -> None:
+    source_identity = git_common_directory(source_repo)
+    target_identity = git_common_directory(worktree_path)
+    if source_identity != target_identity:
+        raise RuntimeError(
+            "Requested worktree belongs to a different Git repository: "
+            f"{worktree_path.resolve()}"
+        )
+
+
+def git_common_directory(checkout: Path) -> Path:
+    result = run_captured_text(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=checkout,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(
+            f"Requested worktree is not a usable Git checkout: {checkout.resolve()}"
+        )
+    common_directory = Path(result.stdout.strip())
+    if not common_directory.is_absolute():
+        common_directory = checkout / common_directory
+    return common_directory.resolve()
 
 
 def is_empty_directory(path: Path) -> bool:

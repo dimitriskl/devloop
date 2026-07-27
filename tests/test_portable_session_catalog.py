@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
+from devloop import cli
 from devloop.portable_session_catalog import (
     PortablePlanningSettings,
     PortableSessionCatalog,
@@ -313,6 +314,132 @@ class PortableSessionCatalogTests(unittest.TestCase):
         self.assertEqual(source_lease.session_id, launch.session_id)
         self.assertIsNone(implementation_lease)
 
+    def test_delivery_transfer_reserves_target_before_preparing_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            target = root / "target"
+            source.mkdir()
+            target.mkdir()
+            source_prd = source / "change.md"
+            source_index = source / "README.md"
+            source_prd.write_text("# Source PRD\n", encoding="utf-8")
+            source_index.write_text("# Source issues\n", encoding="utf-8")
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            source_launch = PortableSessionLaunch(
+                session_id="source-session",
+                checkout=source,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(source)),
+            )
+            target_launch = PortableSessionLaunch(
+                session_id="target-session",
+                checkout=target,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(target)),
+            )
+            catalog.create_session_with_lease(
+                source_launch,
+                owner_id="source-shell",
+            )
+            catalog.publish_workflow(
+                source_launch.session_id,
+                prd_path=source_prd,
+                issues_index_path=source_index,
+                activity_summary="Published in source",
+            )
+            catalog.create_session_with_lease(
+                target_launch,
+                owner_id="target-shell",
+            )
+            target_before = tuple(
+                (path.relative_to(target), path.read_bytes())
+                for path in sorted(target.rglob("*"))
+                if path.is_file()
+            )
+            prepare_calls = 0
+
+            def prepare_artifacts() -> None:
+                nonlocal prepare_calls
+                prepare_calls += 1
+                (target / "change.md").write_text("# Must not copy\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "already leased",
+            ):
+                catalog.bind_session_checkout(
+                    source_launch.session_id,
+                    target,
+                    owner_id="source-shell",
+                    prd_path=target / "change.md",
+                    issues_index_path=target / "README.md",
+                    prepare_checkout=prepare_artifacts,
+                )
+
+            source_record = catalog.get_session(source_launch.session_id)
+            target_after = tuple(
+                (path.relative_to(target), path.read_bytes())
+                for path in sorted(target.rglob("*"))
+                if path.is_file()
+            )
+
+        self.assertEqual(prepare_calls, 0)
+        self.assertEqual(target_after, target_before)
+        self.assertEqual(source_record.checkout, source.resolve())
+        self.assertEqual(source_record.prd_path, source_prd.resolve())
+        self.assertEqual(source_record.issues_index_path, source_index.resolve())
+
+    def test_planning_artifact_copy_rolls_back_when_pointer_commit_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            target = root / "target"
+            source_package = source / "prd" / "change"
+            target_package = target / "prd" / "change"
+            source_issues = source_package / "issues"
+            target_issues = target_package / "issues"
+            source_issues.mkdir(parents=True)
+            target_issues.mkdir(parents=True)
+            source_prd = source_package / "change.md"
+            source_index = source_issues / "README.md"
+            source_prd.write_text("# New PRD\n", encoding="utf-8")
+            source_index.write_text("# New issues\n", encoding="utf-8")
+            (source_issues / "0001.md").write_text("# New issue\n", encoding="utf-8")
+            (target_package / "keep.txt").write_text("keep\n", encoding="utf-8")
+            (target_issues / "README.md").write_text(
+                "# Existing issues\n",
+                encoding="utf-8",
+            )
+            target_before = tuple(
+                (path.relative_to(target), path.read_bytes())
+                for path in sorted(target.rglob("*"))
+                if path.is_file()
+            )
+
+            transfer = cli.PlanningArtifactTransfer(
+                prd_path=source_prd,
+                issues_index=source_index,
+                source_repo=source,
+                target_repo=target,
+            )
+            with self.assertRaisesRegex(RuntimeError, "pointer commit failed"):
+                with transfer:
+                    transfer.prepare()
+                    raise RuntimeError("pointer commit failed")
+
+            target_after = tuple(
+                (path.relative_to(target), path.read_bytes())
+                for path in sorted(target.rglob("*"))
+                if path.is_file()
+            )
+
+        self.assertEqual(target_after, target_before)
+
     def test_catalog_redacts_and_bounds_activity_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -450,6 +577,110 @@ class PortableSessionCatalogTests(unittest.TestCase):
         self.assertIsNone(sessions[0].planning_thread_id)
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0].checkout, checkout.resolve())
+
+    def test_direct_delivery_session_reconstructs_parser_context_after_restart(
+        self,
+    ) -> None:
+        class FakeWorker:
+            def __init__(self) -> None:
+                self.stdin = _WritableLines()
+                self.stdout = _ReadableLines()
+                self.stderr = _ReadableLines()
+                self._returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self._returncode
+
+            def terminate(self) -> None:
+                self._returncode = 1
+                self.stdout.close()
+                self.stderr.close()
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                return self._returncode or 0
+
+        launched: list[PortableSessionLaunch] = []
+        worker = FakeWorker()
+
+        def launch_worker(selected: PortableSessionLaunch) -> FakeWorker:
+            launched.append(selected)
+            return worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            issues = checkout / "prd" / "change" / "issues"
+            issues.mkdir(parents=True)
+            prd = issues.parent / "change.md"
+            index = issues / "README.md"
+            prd.write_text("# Change\n", encoding="utf-8")
+            index.write_text("# Issues\n", encoding="utf-8")
+            database = root / "portable-sessions.sqlite3"
+            launch = PortableSessionLaunch(
+                session_id="direct-delivery-restart",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(
+                    "--prd",
+                    str(prd),
+                    "--issues",
+                    str(index),
+                    "--all",
+                    "--start-issue",
+                    "0003",
+                    "--max-passes",
+                    "4",
+                    "--blocked-retry-rounds",
+                    "2",
+                    "--no-blocked-retry",
+                    "--no-worktree",
+                    "--non-interactive",
+                    "--plain",
+                    "--no-self-improvement-wiki",
+                    "--codex",
+                    "custom-codex",
+                    "--sandbox",
+                    "read-only",
+                    "--approval-policy",
+                    "on-request",
+                    "--goal",
+                    "Bearer must-not-survive",
+                ),
+            )
+            PortableSessionCatalog(database).create_session(launch)
+
+            restarted = PortableSessionCatalog(database).get_session(
+                launch.session_id
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=PortableSessionCatalog(database),
+                owner_id="restarted-shell",
+            )
+            supervisor.resume_session(launch.session_id)
+            worker.stdout.close()
+            worker.stderr.close()
+            supervisor.shutdown()
+            parsed = cli.build_parser().parse_args(launched[0].arguments)
+
+        self.assertEqual(restarted.operation, PortableWorkflowOperation.DELIVERY)
+        self.assertEqual(Path(parsed.prd), prd.resolve())
+        self.assertEqual(Path(parsed.issues), index.resolve())
+        self.assertTrue(parsed.all)
+        self.assertEqual(parsed.start_issue, "0003")
+        self.assertEqual(parsed.max_passes, 4)
+        self.assertEqual(parsed.blocked_retry_rounds, 2)
+        self.assertTrue(parsed.no_blocked_retry)
+        self.assertTrue(parsed.no_worktree)
+        self.assertTrue(parsed.non_interactive)
+        self.assertTrue(parsed.plain)
+        self.assertFalse(parsed.self_improvement_wiki)
+        self.assertEqual(parsed.codex, "custom-codex")
+        self.assertEqual(parsed.sandbox, "read-only")
+        self.assertEqual(parsed.approval_policy, "on-request")
+        self.assertEqual(launched[0].operation, PortableWorkflowOperation.DELIVERY)
+        self.assertNotIn("must-not-survive", " ".join(restarted.arguments))
 
     def test_restarted_supervisor_is_passive_until_explicit_resume(self) -> None:
         class FakeWorker:

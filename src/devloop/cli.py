@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -529,17 +530,28 @@ def _run_devloop_attempt(
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
     issues_index_in_repo = map_path_to_worktree(issues_index, source_repo, repo_root)
     if repo_root != source_repo and not args.dry_run:
-        ensure_planning_artifacts_in_worktree(
+        artifact_transfer = PlanningArtifactTransfer(
             prd_path=prd_path,
             issues_index=issues_index,
             source_repo=source_repo,
             target_repo=repo_root,
         )
-    bind_active_catalog_session_checkout(
-        repo_root,
-        prd_path=prd_in_repo,
-        issues_index_path=issues_index_in_repo,
-    )
+        with artifact_transfer:
+            bound_session = bind_active_catalog_session_checkout(
+                repo_root,
+                prd_path=prd_in_repo,
+                issues_index_path=issues_index_in_repo,
+                prepare_checkout=artifact_transfer.prepare,
+            )
+            if bound_session is None:
+                artifact_transfer.prepare()
+            artifact_transfer.commit()
+    else:
+        bind_active_catalog_session_checkout(
+            repo_root,
+            prd_path=prd_in_repo,
+            issues_index_path=issues_index_in_repo,
+        )
     publish_devloop_run_context(
         project_root=source_repo,
         implementation_branch=(
@@ -1927,13 +1939,130 @@ def ensure_planning_artifacts_in_worktree(
     source_repo: Path,
     target_repo: Path,
 ) -> None:
-    target_prd = map_path_to_worktree(prd_path, source_repo, target_repo)
-    target_issues_index = map_path_to_worktree(issues_index, source_repo, target_repo)
-    if target_prd.is_file() and target_issues_index.is_file():
-        return
+    transfer = PlanningArtifactTransfer(
+        prd_path=prd_path,
+        issues_index=issues_index,
+        source_repo=source_repo,
+        target_repo=target_repo,
+    )
+    with transfer:
+        transfer.prepare()
+        transfer.commit()
 
-    for source_path in planning_artifact_roots(prd_path, issues_index):
-        copy_path_to_worktree(source_path, source_repo, target_repo)
+
+class PlanningArtifactTransfer:
+    """Copy one planning package with exact rollback until its catalog commit."""
+
+    def __init__(
+        self,
+        *,
+        prd_path: Path,
+        issues_index: Path,
+        source_repo: Path,
+        target_repo: Path,
+    ) -> None:
+        self._prd_path = prd_path
+        self._issues_index = issues_index
+        self._source_repo = source_repo.resolve()
+        self._target_repo = target_repo.resolve()
+        self._backup_root: Path | None = None
+        self._snapshots: list[tuple[Path, Path | None]] = []
+        self._prepared = False
+        self._committed = False
+
+    def __enter__(self) -> PlanningArtifactTransfer:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object,
+    ) -> None:
+        if not self._committed:
+            self.rollback()
+        self._remove_backup_root()
+
+    def prepare(self) -> None:
+        if self._prepared:
+            return
+        target_prd = map_path_to_worktree(
+            self._prd_path,
+            self._source_repo,
+            self._target_repo,
+        )
+        target_issues_index = map_path_to_worktree(
+            self._issues_index,
+            self._source_repo,
+            self._target_repo,
+        )
+        if target_prd.is_file() and target_issues_index.is_file():
+            self._prepared = True
+            return
+
+        self._backup_root = Path(
+            tempfile.mkdtemp(
+                prefix=".devloop-planning-transfer-",
+                dir=self._target_repo.parent,
+            )
+        )
+        try:
+            for index, source_path in enumerate(
+                planning_artifact_roots(self._prd_path, self._issues_index)
+            ):
+                target_path = map_path_to_worktree(
+                    source_path,
+                    self._source_repo,
+                    self._target_repo,
+                )
+                backup_path: Path | None = None
+                if target_path.exists():
+                    backup_path = self._backup_root / str(index)
+                    _copy_path(target_path, backup_path)
+                self._snapshots.append((target_path, backup_path))
+                copy_path_to_worktree(
+                    source_path,
+                    self._source_repo,
+                    self._target_repo,
+                )
+        except BaseException:
+            self.rollback()
+            raise
+        self._prepared = True
+
+    def commit(self) -> None:
+        if not self._prepared:
+            raise RuntimeError("Planning artifacts must be prepared before commit.")
+        self._committed = True
+        self._remove_backup_root()
+
+    def rollback(self) -> None:
+        for target_path, backup_path in reversed(self._snapshots):
+            _remove_path(target_path)
+            if backup_path is not None and backup_path.exists():
+                _copy_path(backup_path, target_path)
+        self._snapshots.clear()
+        self._prepared = False
+
+    def _remove_backup_root(self) -> None:
+        if self._backup_root is not None:
+            _remove_path(self._backup_root)
+            self._backup_root = None
+
+
+def _copy_path(source_path: Path, target_path: Path) -> None:
+    if source_path.is_dir():
+        shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+    else:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
 
 
 def planning_artifact_roots(prd_path: Path, issues_index: Path) -> list[Path]:

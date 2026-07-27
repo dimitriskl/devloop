@@ -137,6 +137,9 @@ class PortableLaunchSettings:
     sandbox: str = "workspace-write"
     approval_policy: str = "never"
     native_editor: bool = False
+    delivery_prd_path: str | None = None
+    delivery_issues_path: str | None = None
+    delivery_options: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_bounded_secret_free_text(
@@ -150,6 +153,36 @@ class PortableLaunchSettings:
             raise ValueError("Portable launch approval policy is unsupported.")
         if not isinstance(self.native_editor, bool):
             raise ValueError("Portable native-editor setting must be boolean.")
+        if (self.delivery_prd_path is None) != (
+            self.delivery_issues_path is None
+        ):
+            raise ValueError(
+                "Portable delivery launch context requires both PRD and issues paths."
+            )
+        for field_name, path_text in (
+            ("delivery PRD path", self.delivery_prd_path),
+            ("delivery issues path", self.delivery_issues_path),
+        ):
+            if path_text is not None:
+                _validate_bounded_secret_free_text(
+                    path_text,
+                    field_name=field_name,
+                    maximum_length=4096,
+                )
+                if not Path(path_text).is_absolute():
+                    raise ValueError(
+                        f"Portable {field_name} must be an absolute path."
+                    )
+        if not isinstance(self.delivery_options, tuple):
+            raise ValueError("Portable delivery options must be an immutable sequence.")
+        for option in self.delivery_options:
+            _validate_bounded_secret_free_text(
+                option,
+                field_name="delivery option",
+                maximum_length=1024,
+            )
+        if sum(len(option) for option in self.delivery_options) > 2048:
+            raise ValueError("Portable delivery options are oversized.")
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -159,11 +192,36 @@ class PortableLaunchSettings:
         *,
         checkout: Path,
         prd_path: Path | None,
+        issues_index_path: Path | None,
+        operation: PortableWorkflowOperation,
     ) -> tuple[str, ...]:
-        arguments: list[str] = [
-            "--prd" if prd_path is not None else "--repo",
-            str(prd_path if prd_path is not None else checkout),
-        ]
+        if operation is PortableWorkflowOperation.DELIVERY:
+            delivery_prd = prd_path or (
+                Path(self.delivery_prd_path)
+                if self.delivery_prd_path is not None
+                else None
+            )
+            delivery_issues = issues_index_path or (
+                Path(self.delivery_issues_path)
+                if self.delivery_issues_path is not None
+                else None
+            )
+            if delivery_prd is None or delivery_issues is None:
+                raise PortableSessionCatalogError(
+                    "Portable delivery launch context is incomplete."
+                )
+            arguments: list[str] = [
+                "--prd",
+                str(delivery_prd),
+                "--issues",
+                str(delivery_issues),
+                *self.delivery_options,
+            ]
+        else:
+            arguments = [
+                "--prd" if prd_path is not None else "--repo",
+                str(prd_path if prd_path is not None else checkout),
+            ]
         if self.codex_launcher != "codex":
             arguments.extend(("--codex", self.codex_launcher))
         if self.sandbox != "workspace-write":
@@ -175,16 +233,47 @@ class PortableLaunchSettings:
         return tuple(arguments)
 
     @classmethod
-    def from_arguments(cls, arguments: Iterable[str]) -> PortableLaunchSettings:
+    def from_arguments(
+        cls,
+        arguments: Iterable[str],
+        *,
+        operation: PortableWorkflowOperation,
+        checkout: Path,
+    ) -> PortableLaunchSettings:
         values = tuple(arguments)
         selected: dict[str, object] = {}
+        delivery_prd_path: Path | None = None
+        delivery_issues_path: Path | None = None
+        delivery_options: list[str] = []
         index = 0
         value_options = {
             "--codex": "codex_launcher",
             "--sandbox": "sandbox",
             "--approval-policy": "approval_policy",
         }
-        ignored_value_options = {"--repo", "--prd", "--goal"}
+        delivery_value_options = {
+            "--preset",
+            "--start-issue",
+            "--max-passes",
+            "--blocked-retry-rounds",
+            "--blocked-retry-max-passes",
+            "--self-improvement-wiki-path",
+            "--self-improvement-max-lessons",
+            "--worktree-path",
+            "--branch-name",
+        }
+        delivery_flag_options = {
+            "--all",
+            "--no-blocked-retry",
+            "--dry-run",
+            "--plain",
+            "--self-improvement-wiki",
+            "--no-self-improvement-wiki",
+            "--create-worktree",
+            "--no-worktree",
+            "--non-interactive",
+        }
+        ignored_value_options = {"--repo", "--goal"}
         while index < len(values):
             argument = values[index]
             if argument in value_options:
@@ -206,6 +295,65 @@ class PortableLaunchSettings:
                 selected[field_name] = argument[len(option) + 1 :]
                 index += 1
                 continue
+            if operation is PortableWorkflowOperation.DELIVERY:
+                path_option = next(
+                    (
+                        option
+                        for option in ("--prd", "--issues")
+                        if argument == option or argument.startswith(option + "=")
+                    ),
+                    None,
+                )
+                if path_option is not None:
+                    if argument == path_option:
+                        if index + 1 >= len(values):
+                            raise ValueError(
+                                f"Portable launch option {argument} has no value."
+                            )
+                        path_value = values[index + 1]
+                        index += 2
+                    else:
+                        path_value = argument[len(path_option) + 1 :]
+                        index += 1
+                    resolved_path = Path(path_value).expanduser()
+                    if not resolved_path.is_absolute():
+                        resolved_path = checkout / resolved_path
+                    if path_option == "--prd":
+                        delivery_prd_path = resolved_path.resolve()
+                    else:
+                        delivery_issues_path = resolved_path.resolve()
+                    continue
+                delivery_value_option = next(
+                    (
+                        option
+                        for option in delivery_value_options
+                        if argument == option or argument.startswith(option + "=")
+                    ),
+                    None,
+                )
+                if delivery_value_option is not None:
+                    if argument == delivery_value_option:
+                        if index + 1 >= len(values):
+                            raise ValueError(
+                                f"Portable launch option {argument} has no value."
+                            )
+                        delivery_options.extend(
+                            (delivery_value_option, values[index + 1])
+                        )
+                        index += 2
+                    else:
+                        delivery_options.extend(
+                            (
+                                delivery_value_option,
+                                argument[len(delivery_value_option) + 1 :],
+                            )
+                        )
+                        index += 1
+                    continue
+                if argument in delivery_flag_options:
+                    delivery_options.append(argument)
+                    index += 1
+                    continue
             if argument in ignored_value_options:
                 index += 2
                 continue
@@ -218,26 +366,62 @@ class PortableLaunchSettings:
             if argument == "--native-editor":
                 selected["native_editor"] = True
             index += 1
+        if operation is PortableWorkflowOperation.DELIVERY:
+            if delivery_prd_path is None or delivery_issues_path is None:
+                raise ValueError(
+                    "Portable delivery launch requires --prd and --issues."
+                )
+            selected["delivery_prd_path"] = str(delivery_prd_path)
+            selected["delivery_issues_path"] = str(delivery_issues_path)
+            selected["delivery_options"] = tuple(delivery_options)
         return cls(**selected)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PortableLaunchSettings:
-        expected_keys = {
+        legacy_keys = {
             "codex_launcher",
             "sandbox",
             "approval_policy",
             "native_editor",
         }
-        if set(value) != expected_keys:
+        expected_keys = legacy_keys | {
+            "delivery_prd_path",
+            "delivery_issues_path",
+            "delivery_options",
+        }
+        if frozenset(value) not in {
+            frozenset(legacy_keys),
+            frozenset(expected_keys),
+        }:
             raise PortableSessionCatalogError(
                 "Portable launch settings are corrupt."
             )
         try:
+            delivery_options_value = value.get("delivery_options", ())
+            if not isinstance(delivery_options_value, (list, tuple)) or not all(
+                isinstance(option, str) for option in delivery_options_value
+            ):
+                raise TypeError
+            delivery_prd_value = value.get("delivery_prd_path")
+            delivery_issues_value = value.get("delivery_issues_path")
+            if delivery_prd_value is not None and not isinstance(
+                delivery_prd_value,
+                str,
+            ):
+                raise TypeError
+            if delivery_issues_value is not None and not isinstance(
+                delivery_issues_value,
+                str,
+            ):
+                raise TypeError
             return cls(
                 codex_launcher=_required_text(value, "codex_launcher"),
                 sandbox=_required_text(value, "sandbox"),
                 approval_policy=_required_text(value, "approval_policy"),
                 native_editor=_required_bool(value, "native_editor"),
+                delivery_prd_path=delivery_prd_value,
+                delivery_issues_path=delivery_issues_value,
+                delivery_options=tuple(delivery_options_value),
             )
         except (TypeError, ValueError) as error:
             raise PortableSessionCatalogError(
@@ -283,6 +467,8 @@ class PortableCatalogSession:
         return self.launch_settings.to_arguments(
             checkout=self.checkout,
             prd_path=self.prd_path,
+            issues_index_path=self.issues_index_path,
+            operation=self.operation,
         )
 
 
@@ -359,7 +545,11 @@ class PortableSessionCatalog:
             if planning_settings is not None
             else None
         )
-        launch_settings = PortableLaunchSettings.from_arguments(launch.arguments)
+        launch_settings = PortableLaunchSettings.from_arguments(
+            launch.arguments,
+            operation=launch.operation,
+            checkout=checkout,
+        )
         arguments_json = json.dumps(
             launch_settings.to_dict(),
             separators=(",", ":"),
@@ -425,7 +615,11 @@ class PortableSessionCatalog:
         _validate_process_id(active_process_id)
         project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, checkout.as_uri()))
         launch_settings_json = json.dumps(
-            PortableLaunchSettings.from_arguments(launch.arguments).to_dict(),
+            PortableLaunchSettings.from_arguments(
+                launch.arguments,
+                operation=launch.operation,
+                checkout=checkout,
+            ).to_dict(),
             separators=(",", ":"),
         )
         planning_settings_json = (
@@ -643,7 +837,11 @@ class PortableSessionCatalog:
             raise ValueError(f"Portable session checkout does not exist: {checkout}")
         project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, checkout.as_uri()))
         launch_settings_json = json.dumps(
-            PortableLaunchSettings.from_arguments(launch.arguments).to_dict(),
+            PortableLaunchSettings.from_arguments(
+                launch.arguments,
+                operation=launch.operation,
+                checkout=checkout,
+            ).to_dict(),
             separators=(",", ":"),
         )
         timestamp = time.time()
@@ -723,6 +921,7 @@ class PortableSessionCatalog:
         owner_id: str | None = None,
         prd_path: Path | None = None,
         issues_index_path: Path | None = None,
+        prepare_checkout: Callable[[], None] | None = None,
     ) -> None:
         if (prd_path is None) != (issues_index_path is None):
             raise ValueError(
@@ -735,8 +934,13 @@ class PortableSessionCatalog:
                 owner_id=owner_id,
                 prd_path=prd_path,
                 issues_index_path=issues_index_path,
+                prepare_checkout=prepare_checkout,
             )
             return
+        if prepare_checkout is not None:
+            raise ValueError(
+                "Portable checkout preparation requires the active worktree lease."
+            )
         if prd_path is not None:
             raise ValueError(
                 "Portable workflow pointers can change only with the active "
@@ -760,6 +964,7 @@ class PortableSessionCatalog:
         owner_id: str,
         prd_path: Path | None,
         issues_index_path: Path | None,
+        prepare_checkout: Callable[[], None] | None,
     ) -> None:
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
@@ -773,10 +978,6 @@ class PortableSessionCatalog:
         if prd_path is not None and issues_index_path is not None:
             canonical_prd = prd_path.resolve()
             canonical_issues = issues_index_path.resolve()
-            if not canonical_prd.is_file() or not canonical_issues.is_file():
-                raise ValueError(
-                    "Transferred workflow pointers must reference existing files."
-                )
             if (
                 not canonical_prd.is_relative_to(canonical_checkout)
                 or not canonical_issues.is_relative_to(canonical_checkout)
@@ -813,6 +1014,32 @@ class PortableSessionCatalog:
                 ).fetchone()
                 if conflict is not None:
                     raise PortableWorktreeLeaseConflict(_lease_from_row(conflict))
+                connection.execute(
+                    """
+                    UPDATE worktree_leases
+                    SET checkout = ?, heartbeat_at = ?
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (
+                        str(canonical_checkout),
+                        timestamp,
+                        session_id,
+                        owner_id,
+                    ),
+                )
+                if prepare_checkout is not None:
+                    prepare_checkout()
+                if (
+                    canonical_prd is not None
+                    and canonical_issues is not None
+                    and (
+                        not canonical_prd.is_file()
+                        or not canonical_issues.is_file()
+                    )
+                ):
+                    raise ValueError(
+                        "Transferred workflow pointers must reference existing files."
+                    )
                 connection.execute(
                     """
                     INSERT INTO saved_projects (
@@ -853,19 +1080,6 @@ class PortableSessionCatalog:
                             session_id,
                         ),
                     )
-                connection.execute(
-                    """
-                    UPDATE worktree_leases
-                    SET checkout = ?, heartbeat_at = ?
-                    WHERE session_id = ? AND owner_id = ?
-                    """,
-                    (
-                        str(canonical_checkout),
-                        timestamp,
-                        session_id,
-                        owner_id,
-                    ),
-                )
         except (PortableSessionCatalogError, PortableWorktreeLeaseConflict):
             raise
         except sqlite3.DatabaseError as error:
@@ -1377,6 +1591,7 @@ def bind_active_catalog_session_checkout(
     environment: Mapping[str, str] | None = None,
     prd_path: Path | None = None,
     issues_index_path: Path | None = None,
+    prepare_checkout: Callable[[], None] | None = None,
 ) -> PortableCatalogSession | None:
     """Atomically move the active session, lease, and workflow to a checkout."""
     values = os.environ if environment is None else environment
@@ -1395,6 +1610,7 @@ def bind_active_catalog_session_checkout(
         owner_id=values.get(PORTABLE_SESSION_OWNER_ID_ENV),
         prd_path=prd_path,
         issues_index_path=issues_index_path,
+        prepare_checkout=prepare_checkout,
     )
     return catalog.get_session(record.session_id)
 
