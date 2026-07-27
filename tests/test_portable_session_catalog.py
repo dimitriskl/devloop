@@ -264,7 +264,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
                 arguments=("--repo", str(checkout)),
             )
             settings = PortablePlanningSettings(
-                backend="codex",
+                backend="CODEX_CLI",
                 model="gpt-5.6-sol",
                 reasoning_effort="xhigh",
                 fast="OFF",
@@ -328,7 +328,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
                 arguments=("--repo", str(checkout)),
             )
             settings = PortablePlanningSettings(
-                backend="codex",
+                backend="CODEX_CLI",
                 model="gpt-5.6-sol",
                 reasoning_effort="xhigh",
                 fast="OFF",

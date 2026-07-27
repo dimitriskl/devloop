@@ -351,6 +351,12 @@ class PortableSessionSupervisor:
             command_kind = SupervisorMessageKind.RESUME
             if self._catalog is not None:
                 record = self._catalog.get_session(session_id)
+                launch = record.launch
+                self._launches[session_id] = launch
+                self._snapshots[session_id] = replace(
+                    self._snapshots[session_id],
+                    prd_path=record.prd_path,
+                )
                 payload["restore_catalog_session"] = True
                 payload["planning_thread_id"] = record.planning_thread_id
                 if record.planning_settings is not None:

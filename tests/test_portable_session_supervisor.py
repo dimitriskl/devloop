@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
@@ -21,7 +22,7 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
-    def test_pre_prd_clean_exit_can_resume_again_in_the_same_application(
+    def test_published_workflow_resumes_with_its_prd_in_the_same_application(
         self,
     ) -> None:
         worker_source = textwrap.dedent(
@@ -48,10 +49,19 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             """
         )
         workers: list[subprocess.Popen[str]] = []
+        launches: list[PortableSessionLaunch] = []
 
         def launch_worker(
             launch: PortableSessionLaunch,
         ) -> subprocess.Popen[str]:
+            launches.append(launch)
+            if len(launches) == 1:
+                catalog.publish_workflow(
+                    launch.session_id,
+                    prd_path=prd,
+                    issues_index_path=issues,
+                    activity_summary="Published workflow ready for delivery",
+                )
             worker = subprocess.Popen(
                 [sys.executable, "-u", "-c", worker_source, launch.session_id],
                 cwd=launch.checkout,
@@ -68,17 +78,24 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             root = Path(directory)
             checkout = root / "checkout"
             checkout.mkdir()
+            prd = checkout / "change.md"
+            issues = checkout / "README.md"
+            prd.write_text("# Change\n", encoding="utf-8")
+            issues.write_text("# Issues\n", encoding="utf-8")
             launch = PortableSessionLaunch(
                 session_id="pre-prd-resume-twice",
                 checkout=checkout,
                 operation=PortableWorkflowOperation.PLANNING,
-                arguments=(),
+                arguments=("--repo", str(checkout)),
             )
             catalog = PortableSessionCatalog(root / "catalog.sqlite3")
             catalog.create_session(launch)
             supervisor = PortableSessionSupervisor(
                 worker_launcher=launch_worker,
                 catalog=catalog,
+                resume_candidates_loader=lambda: (
+                    SimpleNamespace(prd_path=prd.resolve()),
+                ),
             )
 
             supervisor.resume_session(launch.session_id)
@@ -99,6 +116,8 @@ class PortableSessionSupervisorTests(unittest.TestCase):
 
         self.assertEqual(len(workers), 2)
         self.assertEqual(returncodes, [0, 0])
+        self.assertEqual(launches[0].arguments, ("--repo", str(checkout)))
+        self.assertEqual(launches[1].arguments, ("--prd", str(prd.resolve())))
 
     def test_session_projects_context_activity_and_success_from_an_isolated_worker(
         self,

@@ -13,11 +13,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
+from .execution_backend_id import parse_execution_backend_id
 from .portable_sessions import (
     PortableSessionLaunch,
     PortableSessionStatus,
     PortableWorkflowOperation,
 )
+from .portable_workflow import FastPreference
 from .redaction import redact_persisted_evidence
 
 CATALOG_SCHEMA_VERSION = 1
@@ -29,6 +31,10 @@ _SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"
 
 class PortableSessionCatalogError(RuntimeError):
     """Raised when the machine catalog cannot be read safely."""
+
+
+class _UnsupportedPortablePlanningSetting(ValueError):
+    """Raised when a planning snapshot contains a value outside a closed set."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,23 @@ class PortablePlanningSettings:
                 raise ValueError(
                     f"Portable planning {field_name} must be bounded secret-free text."
                 )
+        try:
+            backend = parse_execution_backend_id(self.backend)
+        except ValueError as error:
+            raise _UnsupportedPortablePlanningSetting(str(error)) from error
+        if backend.value != self.backend:
+            raise _UnsupportedPortablePlanningSetting(
+                f"Unsupported Execution Backend {self.backend!r}; "
+                f"expected {backend.value!r}."
+            )
+        try:
+            FastPreference(self.fast)
+        except ValueError as error:
+            supported = ", ".join(member.value for member in FastPreference)
+            raise _UnsupportedPortablePlanningSetting(
+                f"Unsupported Fast preference {self.fast!r}; "
+                f"expected one of {supported}."
+            ) from error
         for field_name, value in (
             ("timeout", self.timeout_seconds),
             ("checkpoint deadline", self.checkpoint_seconds),
@@ -98,6 +121,10 @@ class PortablePlanningSettings:
                 timeout_seconds=_required_number(value, "timeout_seconds"),
                 checkpoint_seconds=_required_number(value, "checkpoint_seconds"),
             )
+        except _UnsupportedPortablePlanningSetting as error:
+            raise PortableSessionCatalogError(
+                f"Portable planning settings are corrupt: {error}"
+            ) from error
         except (TypeError, ValueError) as error:
             raise PortableSessionCatalogError(
                 "Portable planning settings are corrupt."

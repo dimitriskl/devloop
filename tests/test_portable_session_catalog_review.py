@@ -79,10 +79,10 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
             database = root / "catalog.sqlite3"
             catalog = PortableSessionCatalog(database)
             persisted_settings = PortablePlanningSettings(
-                backend="codex",
+                backend="CODEX_CLI",
                 model="gpt-5",
                 reasoning_effort="high",
-                fast="off",
+                fast="OFF",
                 timeout_seconds=60,
                 checkpoint_seconds=30,
             ).to_dict()
@@ -111,6 +111,57 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                 "planning settings are corrupt",
             ):
                 PortableSessionCatalog(database)
+
+    def test_catalog_open_rejects_unsupported_closed_planning_settings(self) -> None:
+        for field_name, invalid_value, expected_error in (
+            ("backend", "SHELL", "Unsupported Execution Backend"),
+            ("fast", "AUTO", "Unsupported Fast preference"),
+        ):
+            with self.subTest(field_name=field_name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout = root / "checkout"
+                    checkout.mkdir()
+                    database = root / "catalog.sqlite3"
+                    catalog = PortableSessionCatalog(database)
+                    persisted_settings = PortablePlanningSettings(
+                        backend="CODEX_CLI",
+                        model="gpt-5",
+                        reasoning_effort="high",
+                        fast="OFF",
+                        timeout_seconds=60,
+                        checkpoint_seconds=30,
+                    ).to_dict()
+                    catalog.create_session(
+                        PortableSessionLaunch(
+                            session_id=f"unsupported-{field_name}",
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        ),
+                        PortablePlanningSettings.from_mapping(persisted_settings),
+                    )
+                    persisted_settings[field_name] = invalid_value
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            """
+                            UPDATE sessions
+                            SET planning_settings_json = ?
+                            """,
+                            (
+                                json.dumps(
+                                    persisted_settings,
+                                    separators=(",", ":"),
+                                ),
+                            ),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        PortableSessionCatalogError,
+                        expected_error,
+                    ):
+                        PortableSessionCatalog(database)
 
     def test_catalog_open_rejects_non_finite_planning_numbers(self) -> None:
         for field_name in ("timeout_seconds", "checkpoint_seconds"):
@@ -144,10 +195,10 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                 )
             )
             persisted_settings = {
-                "backend": "codex",
+                "backend": "CODEX_CLI",
                 "model": "gpt-5",
                 "reasoning_effort": "high",
-                "fast": "off",
+                "fast": "OFF",
                 "timeout_seconds": 60,
                 "checkpoint_seconds": 30,
             }
@@ -565,6 +616,102 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(contexts[0]["project_root"], checkout_a.resolve())
         self.assertEqual(contexts[0]["implementation_worktree"], checkout_a.resolve())
+
+    def test_startup_prd_selection_is_published_before_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            prd = checkout / "change.md"
+            issues = checkout / "README.md"
+            prd.write_text("# Change\n", encoding="utf-8")
+            issues.write_text("# Issues\n", encoding="utf-8")
+            artifacts = interactive_runner.PlanningArtifacts(prd, issues)
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="startup-prd",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=("--repo", str(checkout)),
+                )
+            )
+            parser = interactive_runner.build_parser()
+            args = parser.parse_args(["--repo", str(checkout)])
+            published_before_handoff = []
+
+            def run_handoff(*_args, **_kwargs):
+                published_before_handoff.append(catalog.get_session("startup-prd"))
+                return 23
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "DEVLOOP_PORTABLE_SESSION_CATALOG": str(catalog.path),
+                        "DEVLOOP_PORTABLE_SESSION_ID": "startup-prd",
+                        "DEVLOOP_PORTABLE_SESSION_RESTORE": "0",
+                    },
+                    clear=False,
+                ),
+                patch.object(
+                    interactive_runner.BundleContext,
+                    "from_file",
+                    return_value=SimpleNamespace(root=root),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "plan_state_path",
+                    return_value=root / "planner.json",
+                ),
+                patch.object(
+                    interactive_runner,
+                    "choose_target_repo",
+                    return_value=checkout,
+                ),
+                patch.object(
+                    interactive_runner,
+                    "choose_startup_artifacts",
+                    return_value=interactive_runner.StartupMenuResult(
+                        artifacts=artifacts
+                    ),
+                ),
+                patch.object(
+                    interactive_runner,
+                    "current_branch",
+                    return_value="main",
+                ),
+                patch.object(interactive_runner, "publish_planning_run_context"),
+                patch.object(interactive_runner, "print_prd_status"),
+                patch.object(
+                    interactive_runner,
+                    "run_handoff",
+                    side_effect=run_handoff,
+                ),
+            ):
+                result = interactive_runner._run_planning(parser, args)
+
+            reopened_supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: self.fail("must remain passive"),
+                catalog=PortableSessionCatalog(catalog.path),
+                resume_candidates=(
+                    SimpleNamespace(
+                        candidate_id="startup-prd-candidate",
+                        checkout=checkout.resolve(),
+                        prd_path=prd.resolve(),
+                    ),
+                ),
+            )
+            sessions_after_restart = reopened_supervisor.list_sessions()
+
+        self.assertEqual(result, 23)
+        self.assertEqual(len(published_before_handoff), 1)
+        published = published_before_handoff[0]
+        self.assertEqual(published.prd_path, prd.resolve())
+        self.assertEqual(published.issues_index_path, issues.resolve())
+        self.assertEqual(published.arguments, ("--prd", str(prd.resolve())))
+        self.assertEqual(len(sessions_after_restart), 1)
+        self.assertEqual(sessions_after_restart[0].session_id, "startup-prd")
 
     def test_authoritative_unfinished_candidate_reopens_completed_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

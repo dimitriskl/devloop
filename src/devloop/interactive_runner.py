@@ -336,6 +336,13 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             return 0
         if startup_result.artifacts is not None:
             resumed_artifacts = startup_result.artifacts
+            if session_catalog is not None and session_record is not None:
+                session_catalog.publish_workflow(
+                    session_record.session_id,
+                    prd_path=resumed_artifacts.prd_path,
+                    issues_index_path=resumed_artifacts.issues_index,
+                    activity_summary="Published workflow ready for delivery",
+                )
             print()
             print(f"Target checkout: {repo_root}")
             print(f"Current branch: {current_branch(repo_root) or 'unknown'}")
