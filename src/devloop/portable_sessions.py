@@ -317,6 +317,7 @@ class PortableSessionSupervisor:
                         snapshot,
                         status=PortableSessionStatus.COMPLETED,
                         result=0,
+                        input_request=None,
                     )
                     self._snapshots[completed.session_id] = completed
                     catalog.update_session_status(
@@ -567,9 +568,22 @@ class PortableSessionSupervisor:
     ) -> PortableSessionSnapshot:
         with self._condition:
             snapshot = self.snapshot(session_id)
-            if snapshot.input_request is None:
+            if snapshot.status.terminal:
+                raise ValueError(
+                    "Portable session is terminal and cannot accept input: "
+                    f"{session_id}"
+                )
+            running = self._running.get(session_id)
+            if running is None:
+                raise ValueError(
+                    "Portable session is not running and cannot accept input: "
+                    f"{session_id}"
+                )
+            if (
+                snapshot.status is not PortableSessionStatus.WAITING_FOR_INPUT
+                or snapshot.input_request is None
+            ):
                 raise ValueError(f"Portable session is not waiting for input: {session_id}")
-            running = self._running[session_id]
             frame = supervisor_frame(
                 session_id,
                 running.next_supervisor_sequence,
@@ -889,12 +903,14 @@ class PortableSessionSupervisor:
                     snapshot,
                     status=completion_status,
                     result=exit_code,
+                    input_request=None,
                 )
             elif kind is WorkerMessageKind.FAILURE:
                 updated = replace(
                     snapshot,
                     status=PortableSessionStatus.FAILED,
                     result=1,
+                    input_request=None,
                     diagnostics=(
                         *snapshot.diagnostics,
                         _payload_text(frame, "message"),
@@ -1029,6 +1045,7 @@ class PortableSessionSupervisor:
                 snapshot,
                 status=PortableSessionStatus.FAILED,
                 result=1,
+                input_request=None,
                 diagnostics=(*snapshot.diagnostics, message)[-100:],
                 updated_at=time.time(),
             )

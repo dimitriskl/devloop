@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from pathlib import Path
@@ -1130,6 +1132,165 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 value="beta only",
             ),
         )
+
+    async def test_crashed_waiting_session_clears_input_while_sibling_completes(
+        self,
+    ) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+            import time
+            from pathlib import Path
+
+            session_id = sys.argv[1]
+            crash_marker = Path(sys.argv[2])
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Value for " + session_id,
+            })
+            if session_id == "session-crashing":
+                while not crash_marker.exists():
+                    time.sleep(0.01)
+                raise SystemExit(17)
+
+            answer = json.loads(sys.stdin.readline())["payload"]["value"]
+            send(2, "ACTIVITY", {"message": "continued with " + answer})
+            send(3, "COMPLETION", {"exit_code": 0})
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout_a = root / "alpha"
+            checkout_b = root / "beta"
+            checkout_a.mkdir()
+            checkout_b.mkdir()
+            crash_marker = root / "crash-worker"
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                return subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        worker_source,
+                        launch.session_id,
+                        str(crash_marker),
+                    ],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            crashing = PortableSessionLaunch(
+                session_id="session-crashing",
+                checkout=checkout_a,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            continuing = PortableSessionLaunch(
+                session_id="session-continuing",
+                checkout=checkout_b,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(),
+            )
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            supervisor.start_session(crashing)
+            supervisor.start_session(continuing)
+            for _attempt in range(500):
+                if all(
+                    supervisor.snapshot(session_id).status
+                    is PortableSessionStatus.WAITING_FOR_INPUT
+                    for session_id in (crashing.session_id, continuing.session_id)
+                ):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("Both workers did not reach their input requests.")
+
+            app = PortableApplicationShell(
+                PortableRuntimeBridge(),
+                session_supervisor=supervisor,
+                session_launch=crashing,
+                attention_bell=False,
+            )
+
+            async with app.run_test(size=(120, 34)) as pilot:
+                app._active_session_id = crashing.session_id
+                app._show_session_snapshot(supervisor.snapshot(crashing.session_id))
+                app._show_sessions_tab()
+                app._active_session_id = continuing.session_id
+                app._show_session_snapshot(supervisor.snapshot(continuing.session_id))
+
+                crash_marker.write_text("crash\n", encoding="utf-8")
+                for _attempt in range(500):
+                    await asyncio.sleep(0.01)
+                    failed = supervisor.snapshot(crashing.session_id)
+                    if (
+                        failed.status is PortableSessionStatus.FAILED
+                        and app._session_snapshots.get(crashing.session_id) == failed
+                    ):
+                        break
+                else:
+                    self.fail("Crashed worker did not become a visible failed session.")
+
+                background_tabs = str(
+                    app.query_one("#portable-tabs", Static).render()
+                )
+                failed_tab = next(
+                    tab
+                    for tab in background_tabs.split(" | ")
+                    if tab.startswith("alpha ")
+                )
+                app._active_session_id = crashing.session_id
+                app._show_session_snapshot(failed)
+                failed_input = app.query_one("#portable-input", Input)
+                failed_input_displayed = failed_input.display
+                failed_menu = app.query_one("#portable-navigation", OptionList)
+                failed_options = [
+                    str(failed_menu.get_option_at_index(index).prompt)
+                    for index in range(failed_menu.option_count)
+                ]
+
+                app._active_session_id = continuing.session_id
+                app._show_session_snapshot(
+                    supervisor.snapshot(continuing.session_id)
+                )
+                sibling_input = app.query_one("#portable-input", Input)
+                sibling_input.value = "beta-only"
+                await pilot.press("enter")
+                completed = await asyncio.to_thread(
+                    supervisor.wait_for_terminal,
+                    continuing.session_id,
+                    timeout=5,
+                )
+                await pilot.pause()
+
+            self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+            self.assertIsNone(failed.input_request)
+            self.assertIn("alpha [FAILED]", failed_tab)
+            self.assertNotIn("[INPUT!]", failed_tab)
+            self.assertFalse(failed_input_displayed)
+            self.assertEqual(failed_options, ["Sessions", "alpha [FAILED]"])
+            self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
+            self.assertEqual(completed.activity, ("continued with beta-only",))
 
     async def test_escape_hides_only_the_tab_and_reopen_uses_retained_projection(
         self,

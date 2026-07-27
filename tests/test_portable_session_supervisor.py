@@ -16,6 +16,8 @@ from unittest import mock
 from devloop import cli, interactive_runner
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
+    PortableSessionInputKind,
+    PortableSessionInputRequest,
     PortableSessionLaunch,
     PortableSessionProgress,
     PortableSessionSnapshot,
@@ -998,6 +1000,109 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             supervisor.shutdown()
 
         self.assertEqual(completed.activity, ("Selected start",))
+
+    def test_worker_terminal_frames_clear_a_pending_input_request(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            terminal_kind = sys.argv[2]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Pending value",
+            })
+            terminal_payload = (
+                {"exit_code": 0}
+                if terminal_kind == "COMPLETION"
+                else {"message": "worker failed"}
+            )
+            send(2, terminal_kind, terminal_payload)
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    worker_source,
+                    launch.session_id,
+                    launch.arguments[0],
+                ],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            terminal_snapshots = []
+            for terminal_kind in ("COMPLETION", "FAILURE"):
+                launch = PortableSessionLaunch(
+                    session_id=f"session-{terminal_kind.casefold()}-while-waiting",
+                    checkout=Path(directory),
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(terminal_kind,),
+                )
+                supervisor.start_session(launch)
+                terminal_snapshots.append(
+                    supervisor.wait_for_terminal(launch.session_id, timeout=5)
+                )
+            supervisor.shutdown()
+
+        self.assertEqual(
+            [snapshot.status for snapshot in terminal_snapshots],
+            [PortableSessionStatus.COMPLETED, PortableSessionStatus.FAILED],
+        )
+        self.assertTrue(
+            all(snapshot.input_request is None for snapshot in terminal_snapshots)
+        )
+        for snapshot in terminal_snapshots:
+            with self.assertRaisesRegex(
+                ValueError,
+                "terminal and cannot accept input",
+            ):
+                supervisor.provide_input(snapshot.session_id, "stale input")
+
+    def test_provide_input_rejects_a_stale_non_running_request_clearly(self) -> None:
+        supervisor = PortableSessionSupervisor()
+        session_id = "session-stale-input"
+        supervisor._snapshots[session_id] = PortableSessionSnapshot(
+            session_id=session_id,
+            checkout=Path.cwd(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.TEXT,
+                prompt="No worker owns this request",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "not running and cannot accept input",
+        ):
+            supervisor.provide_input(session_id, "stale input")
+        with self.assertRaisesRegex(ValueError, "Unknown portable session"):
+            supervisor.provide_input("unknown-session", "input")
 
     def test_two_workers_route_interleaved_input_and_isolate_one_failure(self) -> None:
         worker_source = textwrap.dedent(
