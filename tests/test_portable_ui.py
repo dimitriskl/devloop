@@ -33,6 +33,117 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_session_action_offers_all_worktree_target_kinds(self) -> None:
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return (
+                    SimpleNamespace(
+                        project_id="saved-project",
+                        checkout=Path.cwd(),
+                    ),
+                )
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                raise AssertionError(f"Unexpected intent: {intent}")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(Path.cwd())),
+            ),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("+")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            prompts = {
+                str(menu.get_option_at_index(index).prompt)
+                for index in range(menu.option_count)
+            }
+
+        self.assertIn("Available saved worktree", prompts)
+        self.assertIn("Register existing checkout", prompts)
+        self.assertIn("Create or reuse Git worktree", prompts)
+        self.assertIn("Cancel", prompts)
+
+    async def test_new_session_resolution_error_starts_no_worker_or_catalog_claim(
+        self,
+    ) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return ()
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                raise AssertionError("A target error must not reach the supervisor")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        class RejectingResolver:
+            def resolve(self, request):
+                del request
+                raise RuntimeError("git worktree add failed: branch is already checked out")
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(Path.cwd())),
+            ),
+            session_target_resolver=RejectingResolver(),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("+")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            input_widget = app.query_one("#portable-input", Input)
+            input_widget.value = str(Path.cwd())
+            await pilot.press("enter")
+            await pilot.pause()
+            detail = str(app.query_one("#portable-detail", Static).render())
+
+        self.assertEqual(supervisor.intents, [])
+        self.assertIn("Session was not started", detail)
+        self.assertIn("git worktree add failed", detail)
+
     async def test_saved_project_launch_does_not_inherit_another_projects_prd(
         self,
     ) -> None:

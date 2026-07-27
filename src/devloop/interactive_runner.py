@@ -257,6 +257,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     state_path = plan_state_path()
     selection = catalog_module.load_selection(state_path)
     catalog_session = _active_catalog_session()
+    catalog_owner_id = os.environ.get("DEVLOOP_PORTABLE_SESSION_OWNER_ID")
 
     if args.prd:
         try:
@@ -276,6 +277,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
                 session_catalog.bind_session_checkout(
                     session_record.session_id,
                     repo_root,
+                    owner_id=catalog_owner_id,
                 )
             session_catalog.publish_workflow(
                 session_record.session_id,
@@ -364,7 +366,11 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if catalog_session is not None:
         assert session_catalog is not None
         assert session_record is not None
-        session_catalog.bind_session_checkout(session_record.session_id, repo_root)
+        session_catalog.bind_session_checkout(
+            session_record.session_id,
+            repo_root,
+            owner_id=catalog_owner_id,
+        )
         session_record = session_catalog.get_session(session_record.session_id)
     publish_planning_run_context(
         project_root=project_root,

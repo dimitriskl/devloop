@@ -17,12 +17,14 @@ from .execution_backend_id import parse_execution_backend_id
 from .portable_sessions import (
     PortableSessionLaunch,
     PortableSessionStatus,
+    PortableWorktreeLease,
+    PortableWorktreeLeaseConflict,
     PortableWorkflowOperation,
 )
 from .portable_workflow import ExecutionBudget, FastPreference, StepExecutionSettings
 from .redaction import redact_persisted_evidence
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 CATALOG_FILENAME = "portable-sessions.sqlite3"
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _APPROVAL_POLICIES = frozenset({"never", "on-request", "untrusted", "on-failure"})
@@ -401,6 +403,191 @@ class PortableSessionCatalog:
             ) from error
         return self.get_session(launch.session_id)
 
+    def create_session_with_lease(
+        self,
+        launch: PortableSessionLaunch,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+        planning_settings: PortablePlanningSettings | None = None,
+    ) -> PortableCatalogSession:
+        """Atomically register a selected checkout, session, and live owner."""
+        _validate_session_id(launch.session_id)
+        _validate_owner_id(owner_id)
+        checkout = launch.checkout.resolve()
+        if not checkout.is_dir():
+            raise ValueError(f"Portable session checkout does not exist: {checkout}")
+        active_process_id = os.getpid() if process_id is None else process_id
+        _validate_process_id(active_process_id)
+        project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, checkout.as_uri()))
+        launch_settings_json = json.dumps(
+            PortableLaunchSettings.from_arguments(launch.arguments).to_dict(),
+            separators=(",", ":"),
+        )
+        planning_settings_json = (
+            _serialize_planning_settings(planning_settings)
+            if planning_settings is not None
+            else None
+        )
+        timestamp = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT * FROM worktree_leases WHERE checkout = ?",
+                    (str(checkout),),
+                ).fetchone()
+                if existing is not None:
+                    raise PortableWorktreeLeaseConflict(_lease_from_row(existing))
+                connection.execute(
+                    """
+                    INSERT INTO saved_projects (
+                        project_id, checkout, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(checkout) DO UPDATE SET
+                        updated_at = excluded.updated_at
+                    """,
+                    (project_id, str(checkout), timestamp, timestamp),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO sessions (
+                        session_id, project_id, status, operation, arguments_json,
+                        planning_settings_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        launch.session_id,
+                        project_id,
+                        PortableSessionStatus.READY.value,
+                        launch.operation.value,
+                        launch_settings_json,
+                        planning_settings_json,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO worktree_leases (
+                        checkout, session_id, owner_id, process_id,
+                        acquired_at, heartbeat_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(checkout),
+                        launch.session_id,
+                        owner_id,
+                        active_process_id,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+        except PortableWorktreeLeaseConflict:
+            raise
+        except sqlite3.IntegrityError as error:
+            raise ValueError(
+                f"Portable session already exists: {launch.session_id}"
+            ) from error
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+        return self.get_session(launch.session_id)
+
+    def acquire_session_lease(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> PortableWorktreeLease:
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        active_process_id = os.getpid() if process_id is None else process_id
+        _validate_process_id(active_process_id)
+        timestamp = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                session = connection.execute(
+                    """
+                    SELECT p.checkout
+                    FROM sessions AS s
+                    JOIN saved_projects AS p ON p.project_id = s.project_id
+                    WHERE s.session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    raise KeyError(f"Unknown portable session: {session_id}")
+                existing = connection.execute(
+                    "SELECT * FROM worktree_leases WHERE checkout = ?",
+                    (session["checkout"],),
+                ).fetchone()
+                if existing is not None:
+                    lease = _lease_from_row(existing)
+                    if lease.session_id == session_id and lease.owner_id == owner_id:
+                        return lease
+                    raise PortableWorktreeLeaseConflict(lease)
+                connection.execute(
+                    """
+                    INSERT INTO worktree_leases (
+                        checkout, session_id, owner_id, process_id,
+                        acquired_at, heartbeat_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session["checkout"],
+                        session_id,
+                        owner_id,
+                        active_process_id,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+        except (KeyError, PortableWorktreeLeaseConflict):
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+        lease = self.get_worktree_lease(Path(session["checkout"]))
+        assert lease is not None
+        return lease
+
+    def get_worktree_lease(self, checkout: Path) -> PortableWorktreeLease | None:
+        canonical_checkout = checkout.resolve()
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT * FROM worktree_leases WHERE checkout = ?",
+                    (str(canonical_checkout),),
+                ).fetchone()
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog read failed: {error}"
+            ) from error
+        return _lease_from_row(row) if row is not None else None
+
+    def release_worktree_lease(self, session_id: str, *, owner_id: str) -> bool:
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        try:
+            with self._connection() as connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM worktree_leases
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                )
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+        return cursor.rowcount == 1
+
     def bind_or_create_session(
         self,
         launch: PortableSessionLaunch,
@@ -484,7 +671,16 @@ class PortableSessionCatalog:
             (thread_id, time.time()),
         )
 
-    def bind_session_checkout(self, session_id: str, checkout: Path) -> None:
+    def bind_session_checkout(
+        self,
+        session_id: str,
+        checkout: Path,
+        *,
+        owner_id: str | None = None,
+    ) -> None:
+        if owner_id is not None:
+            self._transfer_session_lease(session_id, checkout, owner_id=owner_id)
+            return
         record = self.get_session(session_id)
         self.bind_or_create_session(
             PortableSessionLaunch(
@@ -494,6 +690,91 @@ class PortableSessionCatalog:
                 arguments=record.arguments,
             )
         )
+
+    def _transfer_session_lease(
+        self,
+        session_id: str,
+        checkout: Path,
+        *,
+        owner_id: str,
+    ) -> None:
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        canonical_checkout = checkout.resolve()
+        if not canonical_checkout.is_dir():
+            raise ValueError(
+                f"Portable session checkout does not exist: {canonical_checkout}"
+            )
+        project_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, canonical_checkout.as_uri())
+        )
+        timestamp = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                owned = connection.execute(
+                    """
+                    SELECT * FROM worktree_leases
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                ).fetchone()
+                if owned is None:
+                    raise PortableSessionCatalogError(
+                        "Portable session cannot change checkout without its "
+                        "active worktree lease."
+                    )
+                conflict = connection.execute(
+                    """
+                    SELECT * FROM worktree_leases
+                    WHERE checkout = ? AND session_id <> ?
+                    """,
+                    (str(canonical_checkout), session_id),
+                ).fetchone()
+                if conflict is not None:
+                    raise PortableWorktreeLeaseConflict(_lease_from_row(conflict))
+                connection.execute(
+                    """
+                    INSERT INTO saved_projects (
+                        project_id, checkout, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(checkout) DO UPDATE SET
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        project_id,
+                        str(canonical_checkout),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET project_id = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (project_id, timestamp, session_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE worktree_leases
+                    SET checkout = ?, heartbeat_at = ?
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (
+                        str(canonical_checkout),
+                        timestamp,
+                        session_id,
+                        owner_id,
+                    ),
+                )
+        except (PortableSessionCatalogError, PortableWorktreeLeaseConflict):
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
 
     def publish_workflow(
         self,
@@ -731,7 +1012,48 @@ class PortableSessionCatalog:
                                 CHECK (typeof(updated_at) IN ('integer', 'real')
                                     AND updated_at >= 0)
                         );
-                        PRAGMA user_version = 1;
+                        CREATE TABLE worktree_leases (
+                            checkout TEXT PRIMARY KEY
+                                CHECK (length(checkout) BETWEEN 1 AND 4096),
+                            session_id TEXT NOT NULL UNIQUE
+                                REFERENCES sessions(session_id),
+                            owner_id TEXT NOT NULL
+                                CHECK (length(owner_id) BETWEEN 1 AND 128),
+                            process_id INTEGER NOT NULL
+                                CHECK (typeof(process_id) = 'integer'
+                                    AND process_id > 0),
+                            acquired_at REAL NOT NULL
+                                CHECK (typeof(acquired_at) IN ('integer', 'real')
+                                    AND acquired_at >= 0),
+                            heartbeat_at REAL NOT NULL
+                                CHECK (typeof(heartbeat_at) IN ('integer', 'real')
+                                    AND heartbeat_at >= 0)
+                        );
+                        PRAGMA user_version = 2;
+                        """
+                    )
+                elif version == 1:
+                    connection.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE worktree_leases (
+                            checkout TEXT PRIMARY KEY
+                                CHECK (length(checkout) BETWEEN 1 AND 4096),
+                            session_id TEXT NOT NULL UNIQUE
+                                REFERENCES sessions(session_id),
+                            owner_id TEXT NOT NULL
+                                CHECK (length(owner_id) BETWEEN 1 AND 128),
+                            process_id INTEGER NOT NULL
+                                CHECK (typeof(process_id) = 'integer'
+                                    AND process_id > 0),
+                            acquired_at REAL NOT NULL
+                                CHECK (typeof(acquired_at) IN ('integer', 'real')
+                                    AND acquired_at >= 0),
+                            heartbeat_at REAL NOT NULL
+                                CHECK (typeof(heartbeat_at) IN ('integer', 'real')
+                                    AND heartbeat_at >= 0)
+                        );
+                        PRAGMA user_version = 2;
                         """
                     )
                 self._validate_schema(connection)
@@ -769,7 +1091,7 @@ class PortableSessionCatalog:
             raise PortableSessionCatalogError(
                 "Portable Session Catalog foreign key check failed."
             )
-        expected_tables = {"saved_projects", "sessions"}
+        expected_tables = {"saved_projects", "sessions", "worktree_leases"}
         tables = {
             row[0]
             for row in connection.execute(
@@ -800,6 +1122,14 @@ class PortableSessionCatalog:
                 ("activity_summary", "TEXT", 1, 0),
                 ("created_at", "REAL", 1, 0),
                 ("updated_at", "REAL", 1, 0),
+            ),
+            "worktree_leases": (
+                ("checkout", "TEXT", 0, 1),
+                ("session_id", "TEXT", 1, 0),
+                ("owner_id", "TEXT", 1, 0),
+                ("process_id", "INTEGER", 1, 0),
+                ("acquired_at", "REAL", 1, 0),
+                ("heartbeat_at", "REAL", 1, 0),
             ),
         }
         for table, expected in expected_columns.items():
@@ -832,6 +1162,24 @@ class PortableSessionCatalog:
             raise PortableSessionCatalogError(
                 "Portable Session Catalog schema is incompatible."
             )
+        lease_foreign_keys = tuple(
+            (
+                row["table"],
+                row["from"],
+                row["to"],
+                row["on_update"],
+                row["on_delete"],
+            )
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(worktree_leases)"
+            )
+        )
+        if lease_foreign_keys != (
+            ("sessions", "session_id", "session_id", "NO ACTION", "NO ACTION"),
+        ):
+            raise PortableSessionCatalogError(
+                "Portable Session Catalog schema is incompatible."
+            )
         required_constraints = {
             "saved_projects": (
                 "check(length(project_id)between1and128)",
@@ -853,6 +1201,14 @@ class PortableSessionCatalog:
                 "check(length(activity_summary)<=500)",
                 "check(typeof(created_at)in('integer','real')andcreated_at>=0)",
                 "check(typeof(updated_at)in('integer','real')andupdated_at>=0)",
+            ),
+            "worktree_leases": (
+                "check(length(checkout)between1and4096)",
+                "session_idtextnotnullunique",
+                "check(length(owner_id)between1and128)",
+                "check(typeof(process_id)='integer'andprocess_id>0)",
+                "check(typeof(acquired_at)in('integer','real')andacquired_at>=0)",
+                "check(typeof(heartbeat_at)in('integer','real')andheartbeat_at>=0)",
             ),
         }
         for table, fragments in required_constraints.items():
@@ -885,6 +1241,8 @@ class PortableSessionCatalog:
             ).fetchall()
             for row in rows:
                 _session_from_row(row)
+            for row in connection.execute("SELECT * FROM worktree_leases"):
+                _lease_from_row(row)
         except PortableSessionCatalogError:
             raise
         except (sqlite3.DatabaseError, TypeError, ValueError) as error:
@@ -956,6 +1314,28 @@ def _session_from_row(row: sqlite3.Row) -> PortableCatalogSession:
         ) from error
 
 
+def _lease_from_row(row: sqlite3.Row) -> PortableWorktreeLease:
+    try:
+        _validate_catalog_path(row["checkout"])
+        _validate_session_id(row["session_id"])
+        _validate_owner_id(row["owner_id"])
+        _validate_process_id(row["process_id"])
+        _validate_timestamp(row["acquired_at"])
+        _validate_timestamp(row["heartbeat_at"])
+        return PortableWorktreeLease(
+            checkout=Path(row["checkout"]),
+            session_id=row["session_id"],
+            owner_id=row["owner_id"],
+            process_id=row["process_id"],
+            acquired_at=row["acquired_at"],
+            heartbeat_at=row["heartbeat_at"],
+        )
+    except (TypeError, ValueError) as error:
+        raise PortableSessionCatalogError(
+            "Portable Session Catalog contains an invalid worktree lease."
+        ) from error
+
+
 def _validate_session_id(session_id: str) -> None:
     if _SESSION_ID_PATTERN.fullmatch(session_id) is None:
         raise ValueError(
@@ -973,6 +1353,28 @@ def _validate_thread_id(thread_id: str) -> None:
         raise ValueError("Planning thread identity must be a bounded UUID.") from error
     if str(parsed) != thread_id or len(thread_id) > 64:
         raise ValueError("Planning thread identity must be a bounded UUID.")
+
+
+def _validate_owner_id(owner_id: str) -> None:
+    if (
+        not isinstance(owner_id, str)
+        or not owner_id
+        or len(owner_id) > 128
+        or _SESSION_ID_PATTERN.fullmatch(owner_id) is None
+    ):
+        raise ValueError(
+            "Portable lease owner identity must contain 1-128 letters, digits, "
+            "periods, underscores, or hyphens."
+        )
+
+
+def _validate_process_id(process_id: int) -> None:
+    if (
+        isinstance(process_id, bool)
+        or not isinstance(process_id, int)
+        or process_id <= 0
+    ):
+        raise ValueError("Portable lease process identity must be a positive integer.")
 
 
 def _validate_project_id(project_id: str) -> None:

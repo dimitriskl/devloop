@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -103,6 +104,33 @@ class PortableSessionEvent:
     snapshot: PortableSessionSnapshot
 
 
+@dataclass(frozen=True)
+class PortableWorktreeLease:
+    checkout: Path
+    session_id: str
+    owner_id: str
+    process_id: int
+    acquired_at: float
+    heartbeat_at: float
+
+
+class PortableWorktreeLeaseConflict(RuntimeError):
+    def __init__(self, lease: PortableWorktreeLease) -> None:
+        self.lease = lease
+        super().__init__(
+            "Portable worktree is already leased by session "
+            f"{lease.session_id} in application {lease.owner_id}."
+        )
+
+    @property
+    def session_id(self) -> str:
+        return self.lease.session_id
+
+    @property
+    def owner_id(self) -> str:
+        return self.lease.owner_id
+
+
 class PortableSessionController(Protocol):
     def handle_intent(
         self,
@@ -200,12 +228,15 @@ class PortableSessionSupervisor:
         resume_candidates_loader: (
             Callable[[], Iterable[PortableResumeCandidateRecord]] | None
         ) = None,
+        owner_id: str | None = None,
     ) -> None:
         self._catalog = catalog
+        self._owner_id = owner_id or str(uuid.uuid4())
         self._worker_launcher = worker_launcher or (
             lambda launch: _launch_portable_worker(
                 launch,
                 catalog_path=catalog.path if catalog is not None else None,
+                owner_id=self._owner_id,
             )
         )
         self._snapshots: dict[str, PortableSessionSnapshot] = {}
@@ -324,6 +355,9 @@ class PortableSessionSupervisor:
                     f"Portable session already exists: {launch.session_id}"
                 )
             normalized_launch = replace(launch, checkout=checkout)
+            focused = self._claim_new_session(normalized_launch)
+            if focused is not None:
+                return focused
             return self._launch_session(
                 normalized_launch,
                 SupervisorMessageKind.START,
@@ -339,8 +373,9 @@ class PortableSessionSupervisor:
             except KeyError as error:
                 raise ValueError(f"Unknown portable session: {session_id}") from error
             if session_id in self._candidate_launches:
-                if self._catalog is not None:
-                    self._catalog.create_session(launch)
+                focused = self._claim_new_session(launch)
+                if focused is not None:
+                    return focused
                 del self._candidate_launches[session_id]
                 return self._launch_session(
                     launch,
@@ -363,6 +398,7 @@ class PortableSessionSupervisor:
                     payload["planning_settings"] = record.planning_settings.to_dict()
                 if record.planning_thread_id is None:
                     command_kind = SupervisorMessageKind.START
+                self._acquire_existing_session_lease(session_id)
             return self._launch_session(
                 launch,
                 command_kind,
@@ -375,7 +411,12 @@ class PortableSessionSupervisor:
         command_kind: SupervisorMessageKind,
         command_payload: dict[str, object],
     ) -> PortableSessionSnapshot:
-        process = self._worker_launcher(launch)
+        try:
+            process = self._worker_launcher(launch)
+        except BaseException:
+            self._mark_launch_failed(launch.session_id)
+            self._release_session_lease(launch.session_id)
+            raise
         try:
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 process.terminate()
@@ -426,6 +467,13 @@ class PortableSessionSupervisor:
         except BaseException:
             if process.poll() is None:
                 process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait(timeout=1)
+            self._mark_launch_failed(launch.session_id)
+            self._release_session_lease(launch.session_id)
             raise
         stdout_thread = Thread(
             target=self._read_worker_stdout,
@@ -559,6 +607,7 @@ class PortableSessionSupervisor:
                 if stream is not None:
                     stream.close()
             self._running.pop(session_id, None)
+            self._release_session_lease(session_id)
             snapshot = self._snapshots[session_id]
             if not snapshot.status.terminal:
                 ready = replace(
@@ -605,6 +654,7 @@ class PortableSessionSupervisor:
             self._fail_session(session_id, str(error), running)
         finally:
             self._reap_worker(running)
+            self._release_session_lease(session_id)
 
     def _read_worker_stderr(
         self,
@@ -873,6 +923,52 @@ class PortableSessionSupervisor:
                 )[-100:],
             )
 
+    def _claim_new_session(
+        self,
+        launch: PortableSessionLaunch,
+    ) -> PortableSessionSnapshot | None:
+        if self._catalog is None:
+            return None
+        claim = getattr(self._catalog, "create_session_with_lease", None)
+        if not callable(claim):
+            return None
+        try:
+            claim(launch, owner_id=self._owner_id)
+        except PortableWorktreeLeaseConflict as error:
+            if error.owner_id == self._owner_id:
+                focused = self._snapshots.get(error.session_id)
+                if focused is not None:
+                    return focused
+            raise
+        self._saved_projects = tuple(self._catalog.list_saved_projects())
+        return None
+
+    def _acquire_existing_session_lease(self, session_id: str) -> None:
+        if self._catalog is None:
+            return
+        acquire = getattr(self._catalog, "acquire_session_lease", None)
+        if callable(acquire):
+            acquire(session_id, owner_id=self._owner_id)
+
+    def _release_session_lease(self, session_id: str) -> None:
+        if self._catalog is None:
+            return
+        release = getattr(self._catalog, "release_worktree_lease", None)
+        if callable(release):
+            release(session_id, owner_id=self._owner_id)
+
+    def _mark_launch_failed(self, session_id: str) -> None:
+        if self._catalog is None:
+            return
+        try:
+            self._catalog.update_session_status(
+                session_id,
+                PortableSessionStatus.FAILED,
+                activity_summary="Worker launch failed",
+            )
+        except KeyError:
+            return
+
 
 def _payload_text(frame: PortableProtocolFrame, key: str) -> str:
     value = frame.payload.get(key, "")
@@ -885,12 +981,15 @@ def _launch_portable_worker(
     launch: PortableSessionLaunch,
     *,
     catalog_path: Path | None = None,
+    owner_id: str | None = None,
 ) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment["DEVLOOP_UI_MODE"] = "application"
     environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
     if catalog_path is not None:
         environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog_path)
+    if owner_id is not None:
+        environment["DEVLOOP_PORTABLE_SESSION_OWNER_ID"] = owner_id
     return subprocess.Popen(
         [
             sys.executable,

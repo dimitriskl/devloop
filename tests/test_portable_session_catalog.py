@@ -44,9 +44,38 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PortableSessionCatalogError,
-                "newer than supported version 1",
+                "newer than supported version 2",
             ):
                 PortableSessionCatalog(database)
+
+    def test_version_one_catalog_migrates_without_losing_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            launch = PortableSessionLaunch(
+                session_id="session-before-leases",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(checkout)),
+            )
+            catalog.create_session(launch)
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("DROP TABLE worktree_leases")
+                connection.execute("PRAGMA user_version = 1")
+                connection.commit()
+
+            migrated = PortableSessionCatalog(database)
+            session = migrated.get_session(launch.session_id)
+            lease = migrated.acquire_session_lease(
+                launch.session_id,
+                owner_id="migration-test",
+            )
+
+        self.assertEqual(session.checkout, checkout.resolve())
+        self.assertEqual(lease.session_id, launch.session_id)
 
     def test_failed_catalog_write_preserves_previous_readable_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

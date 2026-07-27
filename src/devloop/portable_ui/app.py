@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -37,6 +38,15 @@ from ..portable_sessions import (
     PortableSessionSnapshot,
     PortableSessionStatus,
     PortableSessionSupervisor,
+    PortableWorktreeLeaseConflict,
+)
+from ..portable_session_targets import (
+    ExistingCheckoutTarget,
+    NewWorktreeTarget,
+    PortableSessionTargetController,
+    PortableSessionTargetRequest,
+    PortableSessionTargetResolver,
+    SavedWorktreeTarget,
 )
 from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
 from ..subprocess_utils import terminate_active_process_trees
@@ -58,6 +68,13 @@ SESSIONS_TAB_ID = "__sessions__"
 NEW_SESSION_ID = "__new_session__"
 RESUME_SESSION_ID = "__resume_session__"
 SAVED_PROJECT_ID_PREFIX = "__saved_project__:"
+NEW_SESSION_SAVED_ID = "__new_session_saved__"
+NEW_SESSION_EXISTING_ID = "__new_session_existing__"
+NEW_SESSION_WORKTREE_ID = "__new_session_worktree__"
+NEW_SESSION_CANCEL_ID = "__new_session_cancel__"
+NEW_SESSION_BACK_ID = "__new_session_back__"
+NEW_SESSION_SAVED_PREFIX = "__new_session_saved_project__:"
+NEW_SESSION_REPOSITORY_PREFIX = "__new_session_repository__:"
 
 
 class PortableDetail(Static):
@@ -356,6 +373,7 @@ class PortableApplicationShell(App[None]):
         *,
         session_supervisor: PortableSessionController | None = None,
         session_launch: PortableSessionLaunch | None = None,
+        session_target_resolver: PortableSessionTargetController | None = None,
     ) -> None:
         super().__init__()
         if operation is None and (session_supervisor is None or session_launch is None):
@@ -366,10 +384,18 @@ class PortableApplicationShell(App[None]):
         self._operation = operation
         self._session_supervisor = session_supervisor
         self._session_launch = session_launch
+        self._session_target_resolver = (
+            session_target_resolver or PortableSessionTargetResolver()
+        )
         self._active_session_id: str | None = None
         self._session_snapshots: dict[str, PortableSessionSnapshot] = {}
         self._saved_projects: dict[str, Path] = {}
         self._session_input_values: set[str] = set()
+        self._new_session_input: str | None = None
+        self._new_session_flow_active = False
+        self._new_session_view: str | None = None
+        self._new_session_repository: Path | None = None
+        self._new_session_worktree: Path | None = None
         self._active_request_id: int | None = None
         self._cancel_key: str | None = None
         self.operation_result: int | None = None
@@ -608,6 +634,11 @@ class PortableApplicationShell(App[None]):
     def _show_sessions_tab(self) -> None:
         self._active_session_id = None
         self._session_input_values.clear()
+        self._new_session_input = None
+        self._new_session_flow_active = False
+        self._new_session_view = None
+        self._new_session_repository = None
+        self._new_session_worktree = None
         self.query_one("#portable-input", Input).display = False
         self.query_one("#portable-header", Static).update("Dev Loop > Sessions")
         self.query_one("#portable-tabs", Static).update("Sessions")
@@ -626,7 +657,201 @@ class PortableApplicationShell(App[None]):
             "+ New Session | Enter Select | F2 Primary | Esc Stay"
         )
 
+    def _show_new_session_menu(self) -> None:
+        self._active_session_id = None
+        self._new_session_flow_active = True
+        self._new_session_view = "root"
+        self._new_session_input = None
+        self.query_one("#portable-input", Input).display = False
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
+        menu.clear_options()
+        menu.add_option(Option("Available saved worktree", id=NEW_SESSION_SAVED_ID))
+        menu.add_option(Option("Register existing checkout", id=NEW_SESSION_EXISTING_ID))
+        menu.add_option(
+            Option("Create or reuse Git worktree", id=NEW_SESSION_WORKTREE_ID)
+        )
+        menu.add_option(Option("Cancel", id=NEW_SESSION_CANCEL_ID))
+        menu.highlighted = 0
+        menu.focus()
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > New Session"
+        )
+        self.query_one("#portable-detail", Static).update(
+            "Choose where this Portable Workflow Session will run.\n\n"
+            "Every choice resolves to an exact Git checkout before a worker starts."
+        )
+        self.query_one("#portable-status", Static).update("SELECT WORKTREE")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Select | Esc Cancel | F4 Logs"
+        )
+
+    def _show_saved_worktree_menu(self, *, for_repository: bool) -> None:
+        self._new_session_view = "repository" if for_repository else "saved"
+        self._refresh_saved_projects()
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
+        menu.clear_options()
+        prefix = (
+            NEW_SESSION_REPOSITORY_PREFIX
+            if for_repository
+            else NEW_SESSION_SAVED_PREFIX
+        )
+        for project_id, checkout in self._saved_projects.items():
+            checkout_name = checkout.name or str(checkout)
+            menu.add_option(
+                Option(
+                    f"{checkout_name} · {checkout}",
+                    id=f"{prefix}{project_id}",
+                )
+            )
+        menu.add_option(Option("Back", id=NEW_SESSION_BACK_ID))
+        menu.highlighted = 0
+        menu.focus()
+        label = "source repository" if for_repository else "saved worktree"
+        self.query_one("#portable-header", Static).update(
+            f"Dev Loop > Sessions > Choose {label.title()}"
+        )
+        detail = (
+            f"Choose a {label}."
+            if self._saved_projects
+            else f"No {label}s are saved yet. Choose Back and register a checkout."
+        )
+        self.query_one("#portable-detail", Static).update(detail)
+        self.query_one("#portable-status", Static).update("SELECT WORKTREE")
+
+    def _show_new_session_text_input(self, field: str, prompt: str) -> None:
+        self._new_session_view = field
+        self._new_session_input = field
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.clear_options()
+        menu.disabled = True
+        input_widget = self.query_one("#portable-input", Input)
+        input_widget.value = ""
+        input_widget.placeholder = prompt
+        input_widget.display = True
+        input_widget.focus()
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > New Session"
+        )
+        self.query_one("#portable-detail", Static).update(
+            f"{prompt}\n\nEnter confirms. Esc cancels this new-session flow."
+        )
+        self.query_one("#portable-status", Static).update("INPUT REQUIRED")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Confirm | Esc Cancel | F4 Logs"
+        )
+
+    def _submit_new_session_text(self, value: str) -> None:
+        field = self._new_session_input
+        self._new_session_input = None
+        self.query_one("#portable-input", Input).display = False
+        if field == "existing_checkout":
+            self._start_new_session_target(
+                ExistingCheckoutTarget(Path(value).expanduser())
+            )
+            return
+        if field == "worktree_path":
+            self._new_session_worktree = Path(value).expanduser()
+            self._show_new_session_text_input(
+                "worktree_branch",
+                "Branch name for the new or reusable worktree",
+            )
+            return
+        if field == "worktree_branch":
+            assert self._new_session_repository is not None
+            assert self._new_session_worktree is not None
+            self._start_new_session_target(
+                NewWorktreeTarget(
+                    repository=self._new_session_repository,
+                    checkout=self._new_session_worktree,
+                    branch=value,
+                )
+            )
+
+    def _start_new_session_target(
+        self,
+        request: PortableSessionTargetRequest,
+    ) -> None:
+        assert self._session_supervisor is not None
+        assert self._session_launch is not None
+        try:
+            target = self._session_target_resolver.resolve(request)
+        except (RuntimeError, ValueError) as error:
+            self._show_new_session_error(str(error))
+            return
+        snapshot = self._launch_new_session_at_checkout(target.checkout)
+        if snapshot is None:
+            return
+        self._refresh_saved_projects()
+        self._active_session_id = snapshot.session_id
+        self._show_session_snapshot(snapshot)
+
+    def _launch_new_session_at_checkout(
+        self,
+        checkout: Path,
+    ) -> PortableSessionSnapshot | None:
+        assert self._session_supervisor is not None
+        assert self._session_launch is not None
+        session_id = self._session_launch.session_id
+        if session_id in self._session_snapshots:
+            session_id = str(uuid.uuid4())
+        launch = replace(
+            self._session_launch,
+            session_id=session_id,
+            checkout=checkout,
+            arguments=_arguments_for_checkout(
+                self._session_launch.arguments,
+                checkout,
+            ),
+        )
+        try:
+            return self._session_supervisor.handle_intent(
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.START,
+                    launch=launch,
+                )
+            )
+        except PortableWorktreeLeaseConflict as error:
+            self._show_new_session_error(
+                "That worktree is active in another Dev Loop application.\n\n"
+                f"Owner: {error.owner_id}\nSession: {error.session_id}"
+            )
+            return None
+
+    def _show_new_session_error(self, message: str) -> None:
+        self._new_session_view = "error"
+        safe_message = sanitize_terminal_text(message)
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.clear_options()
+        menu.disabled = False
+        menu.add_option(Option("Back", id=NEW_SESSION_BACK_ID))
+        menu.highlighted = 0
+        menu.focus()
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > New Session"
+        )
+        self.query_one("#portable-detail", Static).update(
+            f"Session was not started.\n\n{safe_message}"
+        )
+        self.query_one("#portable-status", Static).update("NOT STARTED")
+
+    def _refresh_saved_projects(self) -> None:
+        if self._session_supervisor is None:
+            return
+        list_saved_projects = getattr(
+            self._session_supervisor,
+            "list_saved_projects",
+            None,
+        )
+        if callable(list_saved_projects):
+            self._saved_projects = {
+                project.project_id: project.checkout
+                for project in list_saved_projects()
+            }
+
     def _refresh_sessions_menu(self) -> OptionList:
+        self._refresh_saved_projects()
         if self._session_supervisor is not None:
             list_sessions = getattr(self._session_supervisor, "list_sessions", None)
             if callable(list_sessions):
@@ -635,6 +860,7 @@ class PortableApplicationShell(App[None]):
                     for snapshot in list_sessions()
                 }
         menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
         selected_id = None
         if menu.highlighted is not None and menu.highlighted < menu.option_count:
             selected_id = menu.get_option_at_index(menu.highlighted).id
@@ -674,15 +900,11 @@ class PortableApplicationShell(App[None]):
     def _start_saved_project(self, project_id: str) -> None:
         assert self._session_launch is not None
         checkout = self._saved_projects[project_id]
-        self._session_launch = replace(
-            self._session_launch,
-            checkout=checkout,
-            arguments=_arguments_for_checkout(
-                self._session_launch.arguments,
-                checkout,
-            ),
-        )
-        self._start_selected_session()
+        snapshot = self._launch_new_session_at_checkout(checkout)
+        if snapshot is None:
+            return
+        self._active_session_id = snapshot.session_id
+        self._show_session_snapshot(snapshot)
 
     def _start_selected_session(self) -> None:
         assert self._session_supervisor is not None
@@ -694,11 +916,11 @@ class PortableApplicationShell(App[None]):
             self._active_session_id = existing.session_id
             self._show_session_snapshot(existing)
             return
-        intent = PortableSessionIntent(
-            kind=PortableSessionIntentKind.START,
-            launch=self._session_launch,
+        snapshot = self._launch_new_session_at_checkout(
+            self._session_launch.checkout
         )
-        snapshot = self._session_supervisor.handle_intent(intent)
+        if snapshot is None:
+            return
         self._active_session_id = snapshot.session_id
         self._show_session_snapshot(snapshot)
 
@@ -1043,7 +1265,38 @@ class PortableApplicationShell(App[None]):
         option_id = event.option.id
         if self._session_supervisor is not None:
             if option_id == NEW_SESSION_ID:
-                self._start_selected_session()
+                self._show_new_session_menu()
+            elif option_id == NEW_SESSION_SAVED_ID:
+                self._show_saved_worktree_menu(for_repository=False)
+            elif option_id == NEW_SESSION_EXISTING_ID:
+                self._show_new_session_text_input(
+                    "existing_checkout",
+                    "Existing Git checkout path",
+                )
+            elif option_id == NEW_SESSION_WORKTREE_ID:
+                self._show_saved_worktree_menu(for_repository=True)
+            elif option_id == NEW_SESSION_CANCEL_ID:
+                self._show_sessions_tab()
+            elif option_id == NEW_SESSION_BACK_ID:
+                self._show_new_session_menu()
+            elif (
+                isinstance(option_id, str)
+                and option_id.startswith(NEW_SESSION_SAVED_PREFIX)
+            ):
+                project_id = option_id[len(NEW_SESSION_SAVED_PREFIX) :]
+                self._start_new_session_target(
+                    SavedWorktreeTarget(self._saved_projects[project_id])
+                )
+            elif (
+                isinstance(option_id, str)
+                and option_id.startswith(NEW_SESSION_REPOSITORY_PREFIX)
+            ):
+                project_id = option_id[len(NEW_SESSION_REPOSITORY_PREFIX) :]
+                self._new_session_repository = self._saved_projects[project_id]
+                self._show_new_session_text_input(
+                    "worktree_path",
+                    "New or existing worktree checkout path",
+                )
             elif (
                 isinstance(option_id, str)
                 and option_id.startswith(SAVED_PROJECT_ID_PREFIX)
@@ -1075,6 +1328,10 @@ class PortableApplicationShell(App[None]):
 
     @on(Input.Submitted, "#portable-input")
     def submit_input(self, event: Input.Submitted) -> None:
+        if self._session_supervisor is not None and self._new_session_input is not None:
+            event.input.display = False
+            self._submit_new_session_text(event.value)
+            return
         if (
             self._session_supervisor is not None
             and self._active_session_id is not None
@@ -1090,6 +1347,12 @@ class PortableApplicationShell(App[None]):
 
     def action_back(self) -> None:
         if self._session_supervisor is not None:
+            if self._new_session_flow_active:
+                if self._new_session_view == "root":
+                    self._show_sessions_tab()
+                else:
+                    self._show_new_session_menu()
+                return
             current = (
                 self._session_snapshots.get(self._active_session_id)
                 if self._active_session_id is not None
@@ -1202,12 +1465,20 @@ class PortableApplicationShell(App[None]):
             return
         menu = self.query_one("#portable-navigation", OptionList)
         if menu.display and menu.highlighted is not None:
+            if (
+                self._session_supervisor is not None
+                and not self._new_session_flow_active
+                and self._active_session_id is None
+                and menu.get_option_at_index(menu.highlighted).id == NEW_SESSION_ID
+            ):
+                self._start_selected_session()
+                return
             menu.action_select()
 
     def action_new_session(self) -> None:
         if self._session_supervisor is None:
             return
-        self._start_selected_session()
+        self._show_new_session_menu()
 
     def action_view(self) -> None:
         self._respond_to_shortcut("f3")
