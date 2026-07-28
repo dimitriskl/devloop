@@ -281,6 +281,14 @@ class PortableSessionCatalogController(Protocol):
         process_id: int | None = None,
     ) -> None: ...
 
+    def owns_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> bool: ...
+
     def release_execution_capacity(
         self,
         session_id: str,
@@ -1754,6 +1762,26 @@ class PortableSessionSupervisor:
                 if status is not PortableSessionStatus.RUNNING:
                     # Generic worker progress cannot authorize supervisor-owned
                     # lifecycle transitions or release machine capacity.
+                    return True
+                if (
+                    self._catalog is not None
+                    and not self._catalog.owns_execution_capacity(
+                        session_id,
+                        owner_id=self._owner_id,
+                    )
+                ):
+                    ignored = replace(
+                        snapshot,
+                        diagnostics=(
+                            *snapshot.diagnostics,
+                            "Worker STATUS RUNNING without owned execution "
+                            "capacity was ignored.",
+                        )[-100:],
+                        updated_at=time.time(),
+                    )
+                    self._snapshots[session_id] = ignored
+                    self._publish(ignored)
+                    self._condition.notify_all()
                     return True
                 progress = snapshot.progress
                 if any(

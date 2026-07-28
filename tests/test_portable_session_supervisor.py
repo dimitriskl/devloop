@@ -2538,6 +2538,161 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         )
         self.assertGreater(waiting.updated_at, 0)
 
+    def test_claimless_running_status_after_input_wait_is_rejected(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "First request",
+                "request_id": "request-1",
+                "request_generation": 1,
+            })
+            send(2, "STATUS", {
+                "status": "RUNNING",
+                "stage": "claimless stage",
+            })
+            send(3, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Second request",
+                "request_id": "request-2",
+                "request_generation": 2,
+            })
+            json.loads(sys.stdin.readline())
+            send(4, "STATUS", {
+                "status": "RUNNING",
+                "stage": "claimed stage",
+            })
+            send(5, "INPUT_REQUEST", {
+                "request_kind": "TEXT",
+                "prompt": "Third request",
+                "request_id": "request-3",
+                "request_generation": 3,
+            })
+            json.loads(sys.stdin.readline())
+            send(6, "COMPLETION", {"exit_code": 0})
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "claim-aware-status-shell"
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="claim-aware-status",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+
+            started = supervisor.start_session(launch)
+            self.assertEqual(started.status, PortableSessionStatus.RUNNING)
+            self.assertTrue(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+
+            waiting = self._wait_for_input_prompt(
+                supervisor,
+                launch.session_id,
+                "Second request",
+            )
+            self.assertEqual(waiting.status, PortableSessionStatus.WAITING_FOR_INPUT)
+            self.assertEqual(waiting.progress.stage, "")
+            self.assertTrue(
+                any(
+                    "RUNNING without owned execution capacity" in diagnostic
+                    for diagnostic in waiting.diagnostics
+                )
+            )
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+
+            queued = self._provide_current_input(
+                supervisor,
+                launch.session_id,
+                "continue",
+            )
+            self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            claimed_waiting = self._wait_for_input_prompt(
+                supervisor,
+                launch.session_id,
+                "Third request",
+            )
+            self.assertEqual(
+                claimed_waiting.status,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            self.assertEqual(claimed_waiting.progress.stage, "claimed stage")
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            queued_again = self._provide_current_input(
+                supervisor,
+                launch.session_id,
+                "finish",
+            )
+            self.assertEqual(queued_again.status, PortableSessionStatus.QUEUED)
+            completed = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.READY,
+            )
+            supervisor.shutdown()
+
+        self.assertEqual(completed.status, PortableSessionStatus.READY)
+        self.assertEqual(completed.result, 0)
+        self.assertEqual(completed.progress.stage, "claimed stage")
+
     def test_real_resume_candidate_keeps_issue_status_separate_from_workflow_stage(
         self,
     ) -> None:
