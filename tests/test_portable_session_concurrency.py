@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -545,6 +546,107 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 )
             )
 
+    def test_cancelled_queued_session_never_launches_after_capacity_returns(
+        self,
+    ) -> None:
+        worker_source = (
+            "import json,socket,sys\n"
+            "session_id=sys.argv[1]\n"
+            "gate_port=int(sys.argv[2])\n"
+            "json.loads(sys.stdin.readline())\n"
+            "if session_id == 'active-session':\n"
+            " with socket.create_connection(('127.0.0.1',gate_port)) as gate:\n"
+            "  gate.recv(1)\n"
+            "print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':1,'kind':'COMPLETION','payload':{'exit_code':0}}),"
+            "flush=True)\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            catalog.set_concurrency_limit(1)
+            with socket.create_server(("127.0.0.1", 0)) as active_gate:
+                active_gate.settimeout(5)
+                gate_port = active_gate.getsockname()[1]
+                launched: list[str] = []
+
+                def launch_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    launched.append(launch.session_id)
+                    return subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                            str(gate_port),
+                        ],
+                        cwd=launch.checkout,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+
+                supervisor = PortableSessionSupervisor(
+                    worker_launcher=launch_worker,
+                    catalog=catalog,
+                    owner_id="queued-cancel-shell",
+                )
+                launches = []
+                for session_id in ("active-session", "cancelled-before-launch"):
+                    checkout = root / session_id
+                    checkout.mkdir()
+                    prd = checkout / "change.md"
+                    issues = checkout / "README.md"
+                    prd.write_text("# Change\n", encoding="utf-8")
+                    issues.write_text("# Issues\n", encoding="utf-8")
+                    launches.append(
+                        PortableSessionLaunch(
+                            session_id=session_id,
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.DELIVERY,
+                            arguments=("--prd", str(prd), "--issues", str(issues)),
+                        )
+                    )
+                connection = None
+                try:
+                    supervisor.start_session(launches[0])
+                    connection, _address = active_gate.accept()
+                    queued = supervisor.start_session(launches[1])
+                    self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+
+                    cancelled = supervisor.cancel_session(launches[1].session_id)
+                    connection.sendall(b"x")
+                    connection.close()
+                    connection = None
+                    active = supervisor.wait_for_terminal(
+                        launches[0].session_id,
+                        timeout=5,
+                    )
+
+                    self.assertEqual(active.status, PortableSessionStatus.COMPLETED)
+                    self.assertEqual(
+                        cancelled.status,
+                        PortableSessionStatus.CANCELLED,
+                    )
+                    self.assertEqual(
+                        catalog.get_session(launches[1].session_id).status,
+                        PortableSessionStatus.CANCELLED,
+                    )
+                    self.assertEqual(launched, ["active-session"])
+                    self.assertIsNone(
+                        catalog.get_worktree_lease(launches[1].checkout)
+                    )
+                finally:
+                    if connection is not None:
+                        connection.sendall(b"x")
+                        connection.close()
+                    supervisor.shutdown()
+
     def test_requeued_input_cannot_starve_an_older_capacity_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -783,6 +885,297 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 )
             finally:
                 supervisor.shutdown()
+
+    def test_restart_keeps_previously_queued_session_passive_until_resume(
+        self,
+    ) -> None:
+        worker_source = (
+            "import json,socket,sys\n"
+            "session_id=sys.argv[1]\n"
+            "gate_port=int(sys.argv[2])\n"
+            "json.loads(sys.stdin.readline())\n"
+            "if session_id == 'active-session':\n"
+            " with socket.create_connection(('127.0.0.1',gate_port)) as gate:\n"
+            "  gate.recv(1)\n"
+            "print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':1,'kind':'COMPLETION','payload':{'exit_code':0}}),"
+            "flush=True)\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            catalog.set_concurrency_limit(1)
+            with socket.create_server(("127.0.0.1", 0)) as active_gate:
+                active_gate.settimeout(5)
+                gate_port = active_gate.getsockname()[1]
+                first_launches: list[str] = []
+
+                def launch_first_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    first_launches.append(launch.session_id)
+                    return subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                            str(gate_port),
+                        ],
+                        cwd=launch.checkout,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+
+                first = PortableSessionSupervisor(
+                    worker_launcher=launch_first_worker,
+                    catalog=catalog,
+                    owner_id="before-restart-shell",
+                )
+                launches = []
+                for session_id in ("active-session", "passive-after-restart"):
+                    checkout = root / session_id
+                    checkout.mkdir()
+                    prd = checkout / "change.md"
+                    issues = checkout / "README.md"
+                    prd.write_text("# Change\n", encoding="utf-8")
+                    issues.write_text("# Issues\n", encoding="utf-8")
+                    launches.append(
+                        PortableSessionLaunch(
+                            session_id=session_id,
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.DELIVERY,
+                            arguments=("--prd", str(prd), "--issues", str(issues)),
+                        )
+                    )
+                connection = None
+                try:
+                    first.start_session(launches[0])
+                    connection, _address = active_gate.accept()
+                    queued = first.start_session(launches[1])
+                    self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+                    paused = first.pause_session(launches[1].session_id)
+                    self.assertEqual(paused.status, PortableSessionStatus.PAUSED)
+                    connection.sendall(b"x")
+                    connection.close()
+                    connection = None
+                    first.wait_for_terminal(launches[0].session_id, timeout=5)
+                finally:
+                    if connection is not None:
+                        connection.sendall(b"x")
+                        connection.close()
+                    first.shutdown()
+
+                restarted_launches: list[str] = []
+
+                def launch_restarted_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    restarted_launches.append(launch.session_id)
+                    return subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                            str(gate_port),
+                        ],
+                        cwd=launch.checkout,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+
+                restarted = PortableSessionSupervisor(
+                    worker_launcher=launch_restarted_worker,
+                    catalog=PortableSessionCatalog(catalog.path),
+                    owner_id="after-restart-shell",
+                )
+                try:
+                    self.assertEqual(
+                        restarted.snapshot(launches[1].session_id).status,
+                        PortableSessionStatus.PAUSED,
+                    )
+                    self.assertEqual(restarted_launches, [])
+
+                    resumed = restarted.resume_session(launches[1].session_id)
+                    completed = restarted.wait_for_terminal(
+                        launches[1].session_id,
+                        timeout=5,
+                    )
+
+                    self.assertEqual(
+                        resumed.status,
+                        PortableSessionStatus.RUNNING,
+                    )
+                    self.assertEqual(
+                        completed.status,
+                        PortableSessionStatus.COMPLETED,
+                    )
+                    self.assertEqual(
+                        restarted_launches,
+                        ["passive-after-restart"],
+                    )
+                finally:
+                    restarted.shutdown()
+
+    def test_stale_catalog_read_cannot_restore_running_after_crash(self) -> None:
+        worker_source = (
+            "import json,socket,sys\n"
+            "session_id=sys.argv[1]\n"
+            "crash_port=int(sys.argv[2])\n"
+            "json.loads(sys.stdin.readline())\n"
+            "if session_id == 'crashing-session':\n"
+            " with socket.create_connection(('127.0.0.1',crash_port)) as gate:\n"
+            "  gate.recv(1)\n"
+            " raise SystemExit(17)\n"
+            "print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':1,'kind':'COMPLETION','payload':{'exit_code':0}}),"
+            "flush=True)\n"
+        )
+
+        class BarrierCatalog(PortableSessionCatalog):
+            def __init__(self, path: Path) -> None:
+                super().__init__(path)
+                self.arm_stale_read = threading.Event()
+                self.stale_read_captured = threading.Event()
+                self.release_stale_read = threading.Event()
+                self.stale_read_returned = threading.Event()
+                self.allow_fresh_read = threading.Event()
+                self.crash_ownership_released = threading.Event()
+
+            def list_sessions(self):
+                records = super().list_sessions()
+                scheduler_read = threading.current_thread().name.startswith(
+                    "portable-session-capacity-"
+                )
+                statuses = {
+                    record.session_id: record.status for record in records
+                }
+                if (
+                    scheduler_read
+                    and self.arm_stale_read.is_set()
+                    and not self.stale_read_captured.is_set()
+                    and statuses.get("crashing-session")
+                    is PortableSessionStatus.RUNNING
+                    and statuses.get("queued-after-crash")
+                    is PortableSessionStatus.QUEUED
+                ):
+                    self.stale_read_captured.set()
+                    if not self.release_stale_read.wait(timeout=5):
+                        raise AssertionError("Stale catalog read was not released.")
+                    self.stale_read_returned.set()
+                elif scheduler_read and self.stale_read_returned.is_set():
+                    if not self.allow_fresh_read.wait(timeout=5):
+                        raise AssertionError("Fresh catalog read was not released.")
+                return records
+
+            def release_worktree_lease(
+                self,
+                session_id: str,
+                *,
+                owner_id: str,
+            ) -> bool:
+                released = super().release_worktree_lease(
+                    session_id,
+                    owner_id=owner_id,
+                )
+                if session_id == "crashing-session" and released:
+                    self.crash_ownership_released.set()
+                return released
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = BarrierCatalog(root / "portable-sessions.sqlite3")
+            catalog.set_concurrency_limit(1)
+            with socket.create_server(("127.0.0.1", 0)) as crash_gate:
+                crash_gate.settimeout(5)
+                crash_port = crash_gate.getsockname()[1]
+
+                def launch_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    return subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                            str(crash_port),
+                        ],
+                        cwd=launch.checkout,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+
+                supervisor = PortableSessionSupervisor(
+                    worker_launcher=launch_worker,
+                    catalog=catalog,
+                    owner_id="crash-order-shell",
+                )
+                launches = []
+                for session_id in ("crashing-session", "queued-after-crash"):
+                    checkout = root / session_id
+                    checkout.mkdir()
+                    prd = checkout / "change.md"
+                    issues = checkout / "README.md"
+                    prd.write_text("# Change\n", encoding="utf-8")
+                    issues.write_text("# Issues\n", encoding="utf-8")
+                    launches.append(
+                        PortableSessionLaunch(
+                            session_id=session_id,
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.DELIVERY,
+                            arguments=("--prd", str(prd), "--issues", str(issues)),
+                        )
+                    )
+                try:
+                    supervisor.start_session(launches[0])
+                    queued = supervisor.start_session(launches[1])
+                    self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+
+                    catalog.arm_stale_read.set()
+                    self.assertTrue(catalog.stale_read_captured.wait(timeout=5))
+                    connection, _address = crash_gate.accept()
+                    with connection:
+                        connection.sendall(b"x")
+                    self.assertTrue(
+                        catalog.crash_ownership_released.wait(timeout=5)
+                    )
+                    self.assertEqual(
+                        catalog.get_session("crashing-session").status,
+                        PortableSessionStatus.FAILED,
+                    )
+
+                    catalog.release_stale_read.set()
+                    completed = supervisor.wait_for_terminal(
+                        "queued-after-crash",
+                        timeout=5,
+                    )
+
+                    self.assertEqual(
+                        completed.status,
+                        PortableSessionStatus.COMPLETED,
+                    )
+                    self.assertEqual(
+                        supervisor.snapshot("crashing-session").status,
+                        PortableSessionStatus.FAILED,
+                    )
+                finally:
+                    catalog.release_stale_read.set()
+                    catalog.allow_fresh_read.set()
+                    supervisor.shutdown()
 
     def test_waiting_session_requeues_input_until_capacity_returns(self) -> None:
         worker_source = (

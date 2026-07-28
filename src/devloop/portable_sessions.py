@@ -1462,6 +1462,11 @@ class PortableSessionSupervisor:
                 ):
                     continue
                 previous = self._snapshots.get(record.session_id)
+                if (
+                    previous is not None
+                    and record.updated_at <= previous.updated_at
+                ):
+                    continue
                 activity = (
                     (record.activity_summary,)
                     if record.activity_summary
