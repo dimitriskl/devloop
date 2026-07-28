@@ -50,4 +50,18 @@ Covers parent PRD user stories 29–40.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Implemented in commits `05d1866` through `fa90d97`.
+- Cooperative pause records an authoritative durable checkpoint, releases worker
+  execution capacity, and retains the session checkout for exact planning-thread
+  or PRD role/pass-cursor resume without replaying completed work.
+- Force Stop, explicit Cancel, tab close, and aggregate application exit remain
+  distinct. Cleanup retains process-tree ownership until termination is confirmed,
+  quarantines late worker outcomes, and preserves partial work and diagnostics.
+- Final review passed for `05d1866..fa90d97`. Final QA passed the focused
+  supervisor, concurrency, Application Shell, worker, backend, and process-tree
+  lifecycle coverage, plus compilation and diff checks.
+- Environment limitation: the repository Python environment could not be launched
+  from the managed sandbox, so pytest, Ruff, and mypy were not rerun in this
+  completion-record step; the final QA used the standard-library unittest fallback.
