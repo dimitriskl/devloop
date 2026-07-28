@@ -273,6 +273,14 @@ class PortableSessionCatalogController(Protocol):
         process_id: int | None = None,
     ) -> bool: ...
 
+    def enqueue_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> None: ...
+
     def release_execution_capacity(
         self,
         session_id: str,
@@ -1052,6 +1060,31 @@ class PortableSessionSupervisor:
                     "Portable session input is no longer the current input "
                     f"request: {session_id}"
                 )
+            enqueue_capacity = (
+                getattr(self._catalog, "enqueue_execution_capacity", None)
+                if self._catalog is not None
+                else None
+            )
+            if callable(enqueue_capacity):
+                enqueue_capacity(
+                    session_id,
+                    owner_id=self._owner_id,
+                )
+                self._queued[session_id] = _QueuedInput(
+                    value=value,
+                    request_id=request.request_id,
+                    request_generation=request.generation,
+                )
+                queued = replace(
+                    snapshot,
+                    status=PortableSessionStatus.QUEUED,
+                    input_request=None,
+                    updated_at=time.time(),
+                )
+                self._snapshots[session_id] = queued
+                self._publish(queued)
+                self._condition.notify_all()
+                return queued
             request_capacity = (
                 getattr(self._catalog, "request_execution_capacity", None)
                 if self._catalog is not None
@@ -1182,6 +1215,10 @@ class PortableSessionSupervisor:
                 dict.fromkeys((*self._running, *self._queued))
             )
         for session_id in live_session_ids:
+            with self._condition:
+                running = self._running.get(session_id)
+                if running is not None and running.stop_requested:
+                    continue
             try:
                 self.pause_session(session_id)
             except ValueError:
@@ -1916,7 +1953,10 @@ class PortableSessionSupervisor:
                 updated = self._refresh_authoritative_progress(updated)
             updated = replace(updated, updated_at=time.time())
             self._snapshots[session_id] = updated
-            self._persist_snapshot(updated)
+            if kind is WorkerMessageKind.INPUT_REQUEST:
+                self._release_execution_capacity(updated)
+            else:
+                self._persist_snapshot(updated)
             if kind in {
                 WorkerMessageKind.COMPLETION,
                 WorkerMessageKind.FAILURE,

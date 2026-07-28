@@ -1424,6 +1424,112 @@ class PortableSessionCatalog:
                 f"Portable Session Catalog write failed: {error}"
             ) from error
 
+    def enqueue_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> None:
+        """Atomically retain a fair queue place without acquiring a free slot."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        active_process_id = os.getpid() if process_id is None else process_id
+        _validate_process_id(active_process_id)
+        timestamp = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                session = connection.execute(
+                    "SELECT status FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    raise KeyError(f"Unknown portable session: {session_id}")
+                status = PortableSessionStatus(session["status"])
+                if status.terminal or status is PortableSessionStatus.UNAVAILABLE:
+                    raise ValueError(
+                        "Portable session cannot queue execution capacity from "
+                        f"{status.value}."
+                    )
+                lease = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM worktree_leases
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if lease is None or lease["owner_id"] != owner_id:
+                    raise PortableSessionCatalogError(
+                        "Portable execution capacity request does not own the "
+                        "session worktree lease."
+                    )
+                claim = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM execution_claims
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if claim is not None:
+                    raise PortableSessionCatalogError(
+                        "Portable session must release execution capacity before "
+                        "returning to the queue."
+                    )
+                request = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM execution_requests
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if request is not None and request["owner_id"] != owner_id:
+                    raise PortableSessionCatalogError(
+                        "Portable execution request is owned by another application."
+                    )
+                if request is None:
+                    next_order = connection.execute(
+                        """
+                        SELECT COALESCE(MAX(queue_order), 0) + 1
+                        FROM execution_requests
+                        """
+                    ).fetchone()[0]
+                    connection.execute(
+                        """
+                        INSERT INTO execution_requests (
+                            session_id, owner_id, process_id, queue_order, requested_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            owner_id,
+                            active_process_id,
+                            next_order,
+                            timestamp,
+                        ),
+                    )
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET status = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        PortableSessionStatus.QUEUED.value,
+                        timestamp,
+                        session_id,
+                    ),
+                )
+        except (KeyError, PortableSessionCatalogError, ValueError):
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+
     def owns_execution_capacity(
         self,
         session_id: str,

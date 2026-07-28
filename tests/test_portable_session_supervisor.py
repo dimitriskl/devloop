@@ -3389,17 +3389,13 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 launch.session_id,
                 PortableSessionStatus.WAITING_FOR_INPUT,
             )
-            with self.assertRaisesRegex(
-                ValueError,
-                "worker input channel closed before input could be sent",
-            ):
-                self._provide_current_input(
-                    supervisor,
-                    launch.session_id,
-                    "too late",
-                )
+            queued = self._provide_current_input(
+                supervisor,
+                launch.session_id,
+                "too late",
+            )
+            self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
 
-            retired_process.stdout.close()
             self.assertTrue(catalog.release_entered.wait(timeout=1))
             resumed: list[PortableSessionSnapshot] = []
             resume_thread = threading.Thread(

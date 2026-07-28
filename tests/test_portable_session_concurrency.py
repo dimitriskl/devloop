@@ -223,7 +223,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 launch.session_id,
                 PortableSessionStatus.WAITING_FOR_INPUT,
             )
-            self.assertTrue(
+            self.assertFalse(
                 catalog.owns_execution_capacity(
                     launch.session_id,
                     owner_id=owner_id,
@@ -542,6 +542,82 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                     session_ids[3],
                     owner_id=owner_ids[3],
                     process_id=103,
+                )
+            )
+
+    def test_requeued_input_cannot_starve_an_older_capacity_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            catalog.set_concurrency_limit(1)
+            sessions = (
+                ("active-session", "active-shell", 201),
+                ("older-session", "older-shell", 202),
+                ("input-session", "input-shell", 203),
+            )
+            for session_id, owner_id, process_id in sessions:
+                checkout = root / session_id
+                checkout.mkdir()
+                catalog.create_session_with_lease(
+                    PortableSessionLaunch(
+                        session_id=session_id,
+                        checkout=checkout,
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    ),
+                    owner_id=owner_id,
+                    process_id=process_id,
+                )
+
+            self.assertTrue(
+                catalog.request_execution_capacity(
+                    "active-session",
+                    owner_id="active-shell",
+                    process_id=201,
+                )
+            )
+            self.assertFalse(
+                catalog.request_execution_capacity(
+                    "older-session",
+                    owner_id="older-shell",
+                    process_id=202,
+                )
+            )
+            catalog.enqueue_execution_capacity(
+                "input-session",
+                owner_id="input-shell",
+                process_id=203,
+            )
+
+            catalog.release_execution_capacity(
+                "active-session",
+                owner_id="active-shell",
+                status=PortableSessionStatus.COMPLETED,
+            )
+            self.assertFalse(
+                catalog.request_execution_capacity(
+                    "input-session",
+                    owner_id="input-shell",
+                    process_id=203,
+                )
+            )
+            self.assertTrue(
+                catalog.request_execution_capacity(
+                    "older-session",
+                    owner_id="older-shell",
+                    process_id=202,
+                )
+            )
+            catalog.release_execution_capacity(
+                "older-session",
+                owner_id="older-shell",
+                status=PortableSessionStatus.COMPLETED,
+            )
+            self.assertTrue(
+                catalog.request_execution_capacity(
+                    "input-session",
+                    owner_id="input-shell",
+                    process_id=203,
                 )
             )
 
