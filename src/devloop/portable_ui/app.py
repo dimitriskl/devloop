@@ -888,6 +888,11 @@ class PortableApplicationShell(App[None]):
             menu.add_option(Option("Pause", id=SESSION_PAUSE_ID))
             menu.add_option(Option("Force Stop", id=SESSION_FORCE_STOP_ID))
             menu.add_option(Option("Cancel Session", id=SESSION_CANCEL_ID))
+        elif snapshot.status in {
+            PortableSessionStatus.PAUSED,
+            PortableSessionStatus.INTERRUPTED,
+        }:
+            menu.add_option(Option("Cancel Session", id=SESSION_CANCEL_ID))
         menu.add_option(Option("Back to Session", id=SESSION_ACTIONS_BACK_ID))
         menu.highlighted = 0
         menu.focus()

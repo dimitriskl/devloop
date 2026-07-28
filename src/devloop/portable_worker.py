@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from itertools import count
 from queue import Queue
-from threading import RLock, Thread
+from threading import Event, RLock, Thread
 from typing import Any, TextIO
 
 from .portable_protocol import (
@@ -75,7 +75,7 @@ class PortableWorkerRuntimeBridge:
     def start_control_reader(
         self,
         *,
-        on_lifecycle: Callable[[], None] | None = None,
+        on_lifecycle: Callable[[SupervisorMessageKind], None] | None = None,
     ) -> None:
         if self._control_reader_started:
             return
@@ -180,8 +180,27 @@ class PortableWorkerRuntimeBridge:
     def send_completion(self, exit_code: int) -> None:
         self._send(WorkerMessageKind.COMPLETION, {"exit_code": exit_code})
 
-    def send_checkpoint(self, summary: str) -> None:
-        self._send(WorkerMessageKind.CHECKPOINT, {"summary": summary})
+    def send_checkpoint(self, evidence: Mapping[str, Any]) -> None:
+        self._send(WorkerMessageKind.CHECKPOINT, evidence)
+
+    def send_checkpoint_failure(self, message: str) -> None:
+        self._send(WorkerMessageKind.CHECKPOINT_FAILURE, {"message": message})
+
+    def send_termination(
+        self,
+        request: SupervisorMessageKind,
+        *,
+        descendants_confirmed: bool,
+        detail: str,
+    ) -> None:
+        self._send(
+            WorkerMessageKind.TERMINATION,
+            {
+                "request": request.value,
+                "descendants_confirmed": descendants_confirmed,
+                "detail": detail,
+            },
+        )
 
     def send_hello(self) -> None:
         self._send(WorkerMessageKind.HELLO, {})
@@ -260,7 +279,7 @@ class PortableWorkerRuntimeBridge:
 
     def _read_commands(
         self,
-        on_lifecycle: Callable[[], None] | None,
+        on_lifecycle: Callable[[SupervisorMessageKind], None] | None,
     ) -> None:
         while True:
             line = self._command_stream.readline()
@@ -291,7 +310,7 @@ class PortableWorkerRuntimeBridge:
             }:
                 self._lifecycle_request = kind
                 if on_lifecycle is not None:
-                    on_lifecycle()
+                    on_lifecycle(kind)
                 self._command_queue.put(frame)
                 return
             self._command_queue.put(frame)
@@ -320,7 +339,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         bridge.send_hello()
         from .subprocess_utils import terminate_active_process_trees
 
-        bridge.start_control_reader(on_lifecycle=terminate_active_process_trees)
+        termination_handled = Event()
+
+        def handle_lifecycle(request: SupervisorMessageKind) -> None:
+            if request is SupervisorMessageKind.PAUSE:
+                return
+            try:
+                results = terminate_active_process_trees()
+                descendants_confirmed = all(
+                    result.tree_terminated for result in results
+                )
+                detail = (
+                    "All owned backend process trees stopped."
+                    if descendants_confirmed
+                    else "; ".join(result.detail for result in results)
+                )
+                bridge.send_termination(
+                    request,
+                    descendants_confirmed=descendants_confirmed,
+                    detail=detail,
+                )
+            except BaseException as error:
+                bridge.send_termination(
+                    request,
+                    descendants_confirmed=False,
+                    detail=(
+                        "Backend tree termination failed: "
+                        f"{type(error).__name__}: {error}"
+                    ),
+                )
+            finally:
+                termination_handled.set()
+
+        bridge.start_control_reader(on_lifecycle=handle_lifecycle)
         if start.payload.get("restore_catalog_session") is True:
             os.environ["DEVLOOP_PORTABLE_SESSION_RESTORE"] = "1"
         if start.kind == SupervisorMessageKind.RESUME.value:
@@ -357,13 +408,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         sys.stdout = protocol_stdout
     if bridge.lifecycle_request == SupervisorMessageKind.PAUSE.value:
-        bridge.send_checkpoint("Latest durable workflow checkpoint persisted")
+        try:
+            evidence = _capture_durable_checkpoint(operation, arguments)
+        except (OSError, RuntimeError, ValueError) as error:
+            bridge.send_checkpoint_failure(
+                f"Cooperative checkpoint failed: {type(error).__name__}: {error}"
+            )
+            return 1
+        bridge.send_checkpoint(evidence)
         return 0
     if bridge.lifecycle_request in {
         SupervisorMessageKind.FORCE_STOP.value,
         SupervisorMessageKind.CANCEL.value,
         SupervisorMessageKind.SHUTDOWN.value,
     }:
+        termination_handled.wait(timeout=6.0)
         return 0
     bridge.send_completion(result)
     return result
@@ -403,6 +462,82 @@ def _run_operation(
     from .cli import main as run_delivery
 
     return run_delivery(arguments)
+
+
+def _capture_durable_checkpoint(
+    operation: PortableWorkflowOperation,
+    arguments: Sequence[str],
+) -> dict[str, Any]:
+    from .portable_session_catalog import active_portable_catalog_session
+    from .subprocess_utils import owned_process_trees_are_stopped
+
+    if not owned_process_trees_are_stopped():
+        raise RuntimeError("an owned backend process tree is still running")
+    active_session = active_portable_catalog_session()
+    if active_session is None:
+        raise RuntimeError("the Portable Session Catalog is unavailable")
+    _catalog, record, _restore_requested = active_session
+    if record is None:
+        raise RuntimeError("the Portable Session Catalog session is missing")
+    if record.prd_path is None:
+        if operation is not PortableWorkflowOperation.PLANNING:
+            raise RuntimeError("delivery has no authoritative PRD checkpoint")
+        if record.planning_thread_id is None:
+            raise RuntimeError("the planning thread identity is not durable")
+        if record.planning_settings is None:
+            raise RuntimeError("the planning settings snapshot is not durable")
+        return {
+            "checkpoint_kind": "PLANNING",
+            "planning_thread_id": record.planning_thread_id,
+            "planning_settings": record.planning_settings.to_dict(),
+            "summary": (
+                "Planning checkpoint "
+                f"{record.planning_thread_id} with exact settings persisted"
+            ),
+        }
+    issues_index = record.issues_index_path
+    if issues_index is None:
+        raise RuntimeError("the published workflow has no Issue Index pointer")
+    prd_path = record.prd_path.resolve()
+    issues_index = issues_index.resolve()
+    if not prd_path.is_file() or not issues_index.is_file():
+        raise RuntimeError("the published PRD checkpoint files are unavailable")
+
+    from .issue_pack import parse_issue_index
+    from .state import LoopStateWriter
+
+    issues = {issue.number: issue for issue in parse_issue_index(issues_index)}
+    writer = LoopStateWriter(issues_index)
+    active_attempt = writer.active_scheduling_attempt()
+    if active_attempt is None:
+        return {
+            "checkpoint_kind": "PRD",
+            "prd_path": str(prd_path),
+            "issues_index_path": str(issues_index),
+            "issue_id": None,
+            "next_role": "scheduler",
+            "pass_number": 1,
+            "summary": "PRD scheduler checkpoint persisted",
+        }
+    issue_id = active_attempt["issue"]
+    issue = issues.get(issue_id)
+    if issue is None:
+        raise RuntimeError(
+            f"the scheduling cursor references unknown issue {issue_id!r}"
+        )
+    cursor = writer.resume_issue(issue)
+    return {
+        "checkpoint_kind": "PRD",
+        "prd_path": str(prd_path),
+        "issues_index_path": str(issues_index),
+        "issue_id": issue_id,
+        "next_role": cursor.next_role.value,
+        "pass_number": cursor.pass_number,
+        "summary": (
+            f"PRD checkpoint issue {issue_id} · "
+            f"{cursor.next_role.value} pass {cursor.pass_number} persisted"
+        ),
+    }
 
 
 if __name__ == "__main__":

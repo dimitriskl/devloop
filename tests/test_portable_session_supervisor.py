@@ -26,10 +26,265 @@ from devloop.portable_sessions import (
     PortableSessionSupervisor,
     PortableWorkflowOperation,
 )
+from devloop.subprocess_utils import (
+    ProcessTerminationResult,
+    process_tree_creation_kwargs,
+    register_process_tree,
+    terminate_process,
+)
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
-    def test_pause_waiting_session_persists_checkpoint_and_stops_worker(self) -> None:
+    def test_pause_uses_exact_durable_pre_prd_thread_and_settings(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import sys
+
+            from devloop import portable_worker
+            from devloop.portable_runtime import active_portable_runtime
+            from devloop.portable_session_catalog import (
+                PortablePlanningSettings,
+                active_portable_catalog_session,
+            )
+
+            thread_id = "11111111-2222-4333-8444-555555555555"
+            settings = PortablePlanningSettings(
+                backend="CODEX_CLI",
+                model="gpt-5.4",
+                reasoning_effort="high",
+                fast="OFF",
+                timeout_seconds=1200,
+                checkpoint_seconds=300,
+            )
+
+            def wait_for_pause(_operation, _arguments):
+                active = active_portable_catalog_session()
+                assert active is not None
+                catalog, record, _restore = active
+                assert record is not None
+                catalog.save_planning_settings(record.session_id, settings)
+                catalog.save_planning_thread(record.session_id, thread_id)
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                bridge.read_line("Planning checkpoint ready")
+                return 0
+
+            portable_worker._run_operation = wait_for_pause
+            raise SystemExit(portable_worker.main(["--session-id", sys.argv[1]]))
+            """
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "real-planning-pause-shell"
+
+            def launch_worker(launch: PortableSessionLaunch) -> subprocess.Popen[str]:
+                environment = self._worker_environment(
+                    catalog,
+                    owner_id,
+                )
+                environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
+                return subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                    cwd=launch.checkout,
+                    env=environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="real-planning-pause",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            supervisor.pause_session(launch.session_id)
+            paused = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+            record = catalog.get_session(launch.session_id)
+            cancelled = supervisor.cancel_session(launch.session_id)
+            supervisor.shutdown()
+
+        self.assertEqual(
+            record.planning_thread_id,
+            "11111111-2222-4333-8444-555555555555",
+        )
+        self.assertIsNotNone(record.planning_settings)
+        self.assertIn(record.planning_thread_id, paused.activity[-1])
+        self.assertEqual(cancelled.status, PortableSessionStatus.CANCELLED)
+
+    def test_pause_uses_exact_durable_prd_role_and_pass_cursor(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+
+            from devloop import portable_worker
+            from devloop.codex_runner import RoleResult
+            from devloop.issue_pack import parse_issue_index
+            from devloop.issue_scheduler import SchedulingPhase
+            from devloop.portable_runtime import active_portable_runtime
+            from devloop.portable_session_catalog import (
+                bind_active_catalog_session_checkout,
+            )
+            from devloop.state import LoopStateWriter
+
+            prd_path = Path(sys.argv[2]).resolve()
+            issues_index = Path(sys.argv[3]).resolve()
+
+            def wait_for_pause(_operation, _arguments):
+                bind_active_catalog_session_checkout(
+                    Path.cwd(),
+                    prd_path=prd_path,
+                    issues_index_path=issues_index,
+                )
+                issue = parse_issue_index(issues_index)[0]
+                writer = LoopStateWriter(issues_index)
+                writer.record_run_start(Path.cwd(), prd_path, [issue.number], False)
+                writer.reserve_scheduling_attempt(
+                    issue,
+                    phase=SchedulingPhase.NORMAL_SCHEDULING,
+                    ordinal=1,
+                )
+                writer.record_issue_start(issue)
+                writer.record_role_result(
+                    issue,
+                    "coder",
+                    2,
+                    RoleResult(status="PASS", summary="Coder pass two persisted."),
+                )
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                bridge.read_line("PRD checkpoint ready")
+                return 0
+
+            portable_worker._run_operation = wait_for_pause
+            raise SystemExit(portable_worker.main(["--session-id", sys.argv[1]]))
+            """
+        )
+        resumed_worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+            from pathlib import Path
+
+            from devloop.issue_pack import parse_issue_index
+            from devloop.state import LoopStateWriter
+
+            session_id = sys.argv[1]
+            issues_index = Path(sys.argv[3]).resolve()
+            json.loads(sys.stdin.readline())
+            issue = parse_issue_index(issues_index)[0]
+            cursor = LoopStateWriter(issues_index).resume_issue(issue)
+            assert cursor.next_role.value == "reviewer"
+            assert cursor.pass_number == 2
+            for sequence, kind, payload in (
+                (1, "ACTIVITY", {
+                    "message": "Resumed exact reviewer pass 2 cursor",
+                }),
+                (2, "COMPLETION", {"exit_code": 0}),
+            ):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+            """
+        )
+        worker_sources = iter((worker_source, resumed_worker_source))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            issues_directory = checkout / "prd" / "cursor" / "issues"
+            issues_directory.mkdir(parents=True)
+            prd = issues_directory.parent / "cursor.md"
+            index = issues_directory / "README.md"
+            issue = issues_directory / "0001-cursor.md"
+            prd.write_text("# Cursor\n", encoding="utf-8")
+            index.write_text("- [Cursor](./0001-cursor.md)\n", encoding="utf-8")
+            issue.write_text("# Cursor\n\nCompleted: [ ]\n", encoding="utf-8")
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "real-prd-pause-shell"
+
+            def launch_worker(launch: PortableSessionLaunch) -> subprocess.Popen[str]:
+                environment = self._worker_environment(catalog, owner_id)
+                environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
+                return subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        next(worker_sources),
+                        launch.session_id,
+                        str(prd),
+                        str(index),
+                    ],
+                    cwd=launch.checkout,
+                    env=environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="real-prd-pause",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=("--prd", str(prd), "--issues", str(index)),
+            )
+            supervisor.start_session(launch)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            supervisor.pause_session(launch.session_id)
+            paused = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+            supervisor.resume_session(launch.session_id)
+            completed = supervisor.wait_for_terminal(
+                launch.session_id,
+                timeout=5,
+            )
+            supervisor.shutdown()
+
+        self.assertIn("issue 0001", paused.activity[-1])
+        self.assertIn("reviewer pass 2", paused.activity[-1])
+        self.assertIn("Resumed exact reviewer pass 2 cursor", completed.activity)
+
+    def test_pause_rejects_a_marker_without_authoritative_evidence(self) -> None:
         worker_source = textwrap.dedent(
             """
             import json
@@ -90,22 +345,22 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
 
             pausing = supervisor.pause_session(launch.session_id)
-            paused = self._wait_for_status(
+            interrupted = self._wait_for_status(
                 supervisor,
                 launch.session_id,
-                PortableSessionStatus.PAUSED,
+                PortableSessionStatus.INTERRUPTED,
             )
             supervisor.shutdown()
 
         self.assertEqual(pausing.status, PortableSessionStatus.PAUSING)
-        self.assertEqual(paused.status, PortableSessionStatus.PAUSED)
-        self.assertIsNone(paused.input_request)
+        self.assertEqual(interrupted.status, PortableSessionStatus.INTERRUPTED)
+        self.assertIsNone(interrupted.input_request)
         self.assertIn(
-            "Planning thread and settings are durable",
-            paused.activity,
+            "authoritative session catalog",
+            interrupted.diagnostics[-1],
         )
 
-    def test_pause_active_worker_reaches_runtime_checkpoint(self) -> None:
+    def test_pause_without_durable_state_is_interrupted(self) -> None:
         worker_source = textwrap.dedent(
             """
             import sys
@@ -165,124 +420,18 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 self.fail("Active worker did not publish a runtime boundary.")
 
             supervisor.pause_session(launch.session_id)
-            paused = self._wait_for_status(
+            interrupted = self._wait_for_status(
                 supervisor,
                 launch.session_id,
-                PortableSessionStatus.PAUSED,
+                PortableSessionStatus.INTERRUPTED,
             )
             supervisor.shutdown()
 
-        self.assertEqual(paused.status, PortableSessionStatus.PAUSED)
+        self.assertEqual(interrupted.status, PortableSessionStatus.INTERRUPTED)
         self.assertIn(
-            "Latest durable workflow checkpoint persisted",
-            paused.activity,
+            "Portable Session Catalog is unavailable",
+            interrupted.diagnostics[-1],
         )
-
-    def test_resume_after_pause_continues_from_persisted_checkpoint(self) -> None:
-        first_worker = textwrap.dedent(
-            """
-            import json
-            import sys
-            from pathlib import Path
-
-            session_id = sys.argv[1]
-            json.loads(sys.stdin.readline())
-            Path("completed-role.checkpoint").write_text("done", encoding="utf-8")
-            print(json.dumps({
-                "version": 1,
-                "session_id": session_id,
-                "sequence": 1,
-                "kind": "INPUT_REQUEST",
-                "payload": {
-                    "request_id": "checkpoint-wait",
-                    "request_generation": 1,
-                    "request_kind": "TEXT",
-                    "prompt": "Continue",
-                },
-            }), flush=True)
-            command = json.loads(sys.stdin.readline())
-            assert command["kind"] == "PAUSE", command
-            print(json.dumps({
-                "version": 1,
-                "session_id": session_id,
-                "sequence": 2,
-                "kind": "CHECKPOINT",
-                "payload": {"summary": "Completed role persisted"},
-            }), flush=True)
-            """
-        )
-        resumed_worker = textwrap.dedent(
-            """
-            import json
-            import sys
-            from pathlib import Path
-
-            session_id = sys.argv[1]
-            json.loads(sys.stdin.readline())
-            assert Path("completed-role.checkpoint").read_text(
-                encoding="utf-8"
-            ) == "done"
-            for sequence, kind, payload in (
-                (1, "ACTIVITY", {"message": "Continued after completed role"}),
-                (2, "COMPLETION", {"exit_code": 0}),
-            ):
-                print(json.dumps({
-                    "version": 1,
-                    "session_id": session_id,
-                    "sequence": sequence,
-                    "kind": kind,
-                    "payload": payload,
-                }), flush=True)
-            """
-        )
-        worker_sources = iter((first_worker, resumed_worker))
-
-        def launch_worker(
-            launch: PortableSessionLaunch,
-        ) -> subprocess.Popen[str]:
-            return subprocess.Popen(
-                [
-                    sys.executable,
-                    "-u",
-                    "-c",
-                    next(worker_sources),
-                    launch.session_id,
-                ],
-                cwd=launch.checkout,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-            )
-
-        with tempfile.TemporaryDirectory() as directory:
-            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
-            launch = PortableSessionLaunch(
-                session_id="resume-checkpoint",
-                checkout=Path(directory),
-                operation=PortableWorkflowOperation.DELIVERY,
-                arguments=(),
-            )
-            supervisor.start_session(launch)
-            self._wait_for_status(
-                supervisor,
-                launch.session_id,
-                PortableSessionStatus.WAITING_FOR_INPUT,
-            )
-            supervisor.pause_session(launch.session_id)
-            self._wait_for_status(
-                supervisor,
-                launch.session_id,
-                PortableSessionStatus.PAUSED,
-            )
-
-            supervisor.resume_session(launch.session_id)
-            completed = supervisor.wait_for_terminal(launch.session_id, timeout=5)
-            supervisor.shutdown()
-
-        self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
-        self.assertIn("Continued after completed role", completed.activity)
 
     def test_force_stop_preserves_partial_work_and_diagnostics(self) -> None:
         worker_source = textwrap.dedent(
@@ -361,21 +510,31 @@ class PortableSessionSupervisorTests(unittest.TestCase):
     def test_explicit_cancel_records_cancelled_and_stops_worker(self) -> None:
         worker_source = textwrap.dedent(
             """
-            import json
             import sys
 
-            json.loads(sys.stdin.readline())
-            command = json.loads(sys.stdin.readline())
-            assert command["kind"] == "CANCEL", command
+            from devloop import portable_worker
+            from devloop.portable_runtime import active_portable_runtime
+
+            def wait_for_cancel(_operation, _arguments):
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                bridge.read_line("Wait for explicit cancellation")
+                return 0
+
+            portable_worker._run_operation = wait_for_cancel
+            raise SystemExit(portable_worker.main(["--session-id", sys.argv[1]]))
             """
         )
 
         def launch_worker(
             launch: PortableSessionLaunch,
         ) -> subprocess.Popen[str]:
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(Path(cli.__file__).resolve().parents[1])
             return subprocess.Popen(
-                [sys.executable, "-u", "-c", worker_source],
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
                 cwd=launch.checkout,
+                env=environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -392,6 +551,11 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 arguments=(),
             )
             supervisor.start_session(launch)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
 
             cancelled = supervisor.cancel_session(launch.session_id)
             terminal = supervisor.wait_for_terminal(launch.session_id, timeout=1)
@@ -401,56 +565,300 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         self.assertEqual(terminal.status, PortableSessionStatus.CANCELLED)
         self.assertEqual(cancelled.result, 130)
 
-    def test_shutdown_cooperatively_pauses_all_live_sessions(self) -> None:
+    def test_interrupted_session_can_be_cancelled_without_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="cancel-interrupted-metadata",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session(launch)
+            catalog.update_session_status(
+                launch.session_id,
+                PortableSessionStatus.INTERRUPTED,
+                activity_summary="Retained interrupted checkpoint",
+            )
+            supervisor = PortableSessionSupervisor(catalog=catalog)
+
+            cancelled = supervisor.cancel_session(launch.session_id)
+            persisted_status = catalog.get_session(launch.session_id).status
+            supervisor.shutdown()
+
+        self.assertEqual(cancelled.status, PortableSessionStatus.CANCELLED)
+        self.assertEqual(persisted_status, PortableSessionStatus.CANCELLED)
+
+    def test_ambiguous_force_stop_retains_capacity_lease_and_worker_ownership(
+        self,
+    ) -> None:
         worker_source = textwrap.dedent(
             """
             import json
             import sys
-
-            session_id = sys.argv[1]
-            waiting = sys.argv[2] == "waiting"
-
-            def send(sequence, kind, payload):
-                print(json.dumps({
-                    "version": 1,
-                    "session_id": session_id,
-                    "sequence": sequence,
-                    "kind": kind,
-                    "payload": payload,
-                }), flush=True)
+            import time
 
             json.loads(sys.stdin.readline())
-            if waiting:
-                send(1, "INPUT_REQUEST", {
-                    "request_id": f"{session_id}-input",
-                    "request_generation": 1,
-                    "request_kind": "TEXT",
-                    "prompt": "Planning input",
-                })
-            else:
-                send(1, "ACTIVITY", {"message": "Active delivery work"})
-            command = json.loads(sys.stdin.readline())
-            assert command["kind"] == "PAUSE", command
-            send(2, "CHECKPOINT", {
-                "summary": f"{session_id} exit checkpoint",
-            })
+            while True:
+                time.sleep(0.05)
             """
         )
         processes: list[subprocess.Popen[str]] = []
 
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "ambiguous-force-shell"
+
+            def launch_worker(launch: PortableSessionLaunch) -> subprocess.Popen[str]:
+                process = subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    **process_tree_creation_kwargs(),
+                )
+                register_process_tree(process)
+                processes.append(process)
+                return process
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="ambiguous-force-stop",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            with mock.patch(
+                "devloop.portable_sessions.terminate_process",
+                return_value=ProcessTerminationResult(
+                    tree_terminated=False,
+                    detail="Injected ambiguous termination timeout.",
+                ),
+            ):
+                interrupted = supervisor.force_stop_session(launch.session_id)
+
+            self.assertEqual(
+                interrupted.status,
+                PortableSessionStatus.INTERRUPTED,
+            )
+            self.assertTrue(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            self.assertIsNotNone(catalog.get_worktree_lease(checkout))
+            self.assertIsNone(processes[0].poll())
+
+            cleanup = terminate_process(processes[0])
+            self.assertTrue(cleanup.tree_terminated, cleanup.detail)
+
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_force_and_cancel_confirm_real_child_and_grandchild_trees_dead(
+        self,
+    ) -> None:
+        grandchild_source = (
+            "import os,time;"
+            "from pathlib import Path;"
+            "Path('grandchild.pid').write_text(str(os.getpid()),encoding='utf-8');"
+            "time.sleep(60)"
+        )
+        child_source = (
+            "import os,subprocess,sys,time;"
+            "from pathlib import Path;"
+            f"p=subprocess.Popen([sys.executable,'-u','-c',{grandchild_source!r}]);"
+            "Path('child.pid').write_text(str(os.getpid()),encoding='utf-8');"
+            "p.wait()"
+        )
+        worker_source = textwrap.dedent(
+            f"""
+            import subprocess
+            import sys
+            import time
+            from pathlib import Path
+
+            from devloop import portable_worker
+            from devloop.portable_runtime import active_portable_runtime
+            from devloop.subprocess_utils import (
+                process_tree_creation_kwargs,
+                register_process_tree,
+                unregister_process_tree,
+            )
+
+            child_source = {child_source!r}
+
+            def run_backend(_operation, _arguments):
+                process = subprocess.Popen(
+                    [sys.executable, "-u", "-c", child_source],
+                    stdin=subprocess.DEVNULL,
+                    **process_tree_creation_kwargs(),
+                )
+                register_process_tree(process)
+                try:
+                    while not Path("grandchild.pid").is_file():
+                        time.sleep(0.01)
+                    process.wait()
+                finally:
+                    unregister_process_tree(process)
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                bridge.show_screen("Backend tree exited")
+                return 0
+
+            portable_worker._run_operation = run_backend
+            raise SystemExit(portable_worker.main(["--session-id", sys.argv[1]]))
+            """
+        )
+
+        for action in ("force", "cancel"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                checkout = root / "checkout"
+                checkout.mkdir()
+                catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+                owner_id = f"{action}-tree-shell"
+
+                def launch_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    environment = self._worker_environment(catalog, owner_id)
+                    environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
+                    return subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                        ],
+                        cwd=launch.checkout,
+                        env=environment,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        **process_tree_creation_kwargs(),
+                    )
+
+                supervisor = PortableSessionSupervisor(
+                    worker_launcher=launch_worker,
+                    catalog=catalog,
+                    owner_id=owner_id,
+                )
+                launch = PortableSessionLaunch(
+                    session_id=f"{action}-real-tree",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+                supervisor.start_session(launch)
+                try:
+                    child_pid = self._wait_for_pid(checkout / "child.pid")
+                except AssertionError as error:
+                    self.fail(
+                        f"{error}; snapshot={supervisor.snapshot(launch.session_id)!r}"
+                    )
+                grandchild_pid = self._wait_for_pid(checkout / "grandchild.pid")
+
+                stopped = (
+                    supervisor.force_stop_session(launch.session_id)
+                    if action == "force"
+                    else supervisor.cancel_session(launch.session_id)
+                )
+                supervisor.shutdown()
+
+                self.assertEqual(
+                    stopped.status,
+                    (
+                        PortableSessionStatus.INTERRUPTED
+                        if action == "force"
+                        else PortableSessionStatus.CANCELLED
+                    ),
+                    stopped.diagnostics,
+                )
+                self.assertTrue(self._wait_for_process_dead(child_pid))
+                self.assertTrue(self._wait_for_process_dead(grandchild_pid))
+
+    def test_shutdown_cooperatively_pauses_all_live_sessions(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import sys
+            import time
+
+            from devloop import portable_worker
+            from devloop.portable_runtime import active_portable_runtime
+            from devloop.portable_session_catalog import (
+                PortablePlanningSettings,
+                active_portable_catalog_session,
+            )
+
+            def run_until_pause(_operation, _arguments):
+                active = active_portable_catalog_session()
+                assert active is not None
+                catalog, record, _restore = active
+                assert record is not None
+                catalog.save_planning_settings(
+                    record.session_id,
+                    PortablePlanningSettings(
+                        backend="CODEX_CLI",
+                        model="gpt-5.4",
+                        reasoning_effort="high",
+                        fast="OFF",
+                        timeout_seconds=1200,
+                        checkpoint_seconds=300,
+                    ),
+                )
+                catalog.save_planning_thread(
+                    record.session_id,
+                    "11111111-2222-4333-8444-" + (
+                        "555555555555"
+                        if record.session_id.endswith("waiting")
+                        else "666666666666"
+                    ),
+                )
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                if record.session_id.endswith("waiting"):
+                    bridge.read_line("Planning input")
+                else:
+                    while True:
+                        bridge.show_screen("Active planning work")
+                        time.sleep(0.01)
+                return 0
+
+            portable_worker._run_operation = run_until_pause
+            raise SystemExit(portable_worker.main(["--session-id", sys.argv[1]]))
+            """
+        )
+        processes: list[subprocess.Popen[str]] = []
+        catalog: PortableSessionCatalog
+        owner_id = "aggregate-exit-shell"
+
         def launch_worker(
             launch: PortableSessionLaunch,
         ) -> subprocess.Popen[str]:
+            environment = self._worker_environment(catalog, owner_id)
+            environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
             process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-u",
-                    "-c",
-                    worker_source,
-                    launch.session_id,
-                    "waiting" if launch.session_id.endswith("waiting") else "active",
-                ],
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
                 cwd=launch.checkout,
+                env=environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -461,17 +869,27 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             return process
 
         with tempfile.TemporaryDirectory() as directory:
-            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            root = Path(directory)
+            active_checkout = root / "active"
+            waiting_checkout = root / "waiting"
+            active_checkout.mkdir()
+            waiting_checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
             launches = (
                 PortableSessionLaunch(
                     session_id="exit-active",
-                    checkout=Path(directory),
-                    operation=PortableWorkflowOperation.DELIVERY,
+                    checkout=active_checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
                     arguments=(),
                 ),
                 PortableSessionLaunch(
                     session_id="exit-waiting",
-                    checkout=Path(directory),
+                    checkout=waiting_checkout,
                     operation=PortableWorkflowOperation.PLANNING,
                     arguments=(),
                 ),
@@ -2618,7 +3036,72 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             if snapshot.status is expected:
                 return snapshot
             time.sleep(0.01)
-        self.fail(f"Portable session did not reach {expected.value}.")
+        self.fail(
+            f"Portable session did not reach {expected.value}: "
+            f"{supervisor.snapshot(session_id)!r}"
+        )
+
+    def _worker_environment(
+        self,
+        catalog: PortableSessionCatalog,
+        owner_id: str,
+    ) -> dict[str, str]:
+        environment = os.environ.copy()
+        environment["DEVLOOP_UI_MODE"] = "application"
+        environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog.path)
+        environment["DEVLOOP_PORTABLE_SESSION_OWNER_ID"] = owner_id
+        source_path = str(Path(cli.__file__).resolve().parents[1])
+        existing_python_path = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            source_path
+            if not existing_python_path
+            else os.pathsep.join((source_path, existing_python_path))
+        )
+        return environment
+
+    def _wait_for_pid(self, path: Path) -> int:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if path.is_file():
+                try:
+                    return int(path.read_text(encoding="utf-8"))
+                except ValueError:
+                    pass
+            time.sleep(0.01)
+        self.fail(f"Process identity was not written: {path}")
+
+    def _process_is_alive(self, process_id: int) -> bool:
+        if os.name == "nt":
+            result = subprocess.run(
+                [
+                    "tasklist",
+                    "/FI",
+                    f"PID eq {process_id}",
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            return f'"{process_id}"' in result.stdout
+        try:
+            os.kill(process_id, 0)
+        except OSError:
+            return False
+        return True
+
+    def _wait_for_process_dead(self, process_id: int) -> bool:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not self._process_is_alive(process_id):
+                return True
+            time.sleep(0.01)
+        return False
 
     def _wait_for_input_prompt(
         self,

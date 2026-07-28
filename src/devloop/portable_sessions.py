@@ -23,6 +23,7 @@ from .portable_protocol import (
 )
 from .portable_runtime import PortableRunContext
 from .subprocess_utils import (
+    ProcessTerminationResult,
     process_tree_creation_kwargs,
     register_process_tree,
     terminate_process,
@@ -192,6 +193,7 @@ _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PROGRESS_REFRESH_INTERVAL_SECONDS = 1.0
 _CAPACITY_REFRESH_INTERVAL_SECONDS = 0.05
 _COOPERATIVE_PAUSE_TIMEOUT_SECONDS = 2.0
+_TERMINATION_ACK_TIMEOUT_SECONDS = 8.0
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -285,6 +287,11 @@ class _RunningSession:
     generation: int
     next_supervisor_sequence: int = 2
     next_worker_sequence: int = 1
+    checkpoint_summary: str | None = None
+    termination_ack: bool | None = None
+    termination_detail: str = ""
+    cleanup_confirmed: bool = False
+    stop_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -809,12 +816,31 @@ class PortableSessionSupervisor:
             if snapshot.status.terminal:
                 return snapshot
             queued = self._queued.pop(session_id, None)
-            running = self._running.pop(session_id, None)
+            running = self._running.get(session_id)
             if queued is None and running is None:
+                if snapshot.status in {
+                    PortableSessionStatus.PAUSED,
+                    PortableSessionStatus.INTERRUPTED,
+                }:
+                    cancelled = replace(
+                        snapshot,
+                        status=PortableSessionStatus.CANCELLED,
+                        result=130,
+                        input_request=None,
+                        activity=(*snapshot.activity, activity)[-100:],
+                        updated_at=time.time(),
+                    )
+                    self._snapshots[session_id] = cancelled
+                    self._persist_snapshot(cancelled)
+                    self._release_session_lease(session_id)
+                    self._publish(cancelled)
+                    self._condition.notify_all()
+                    return cancelled
                 raise ValueError(
                     f"Portable session is not active and cannot be stopped: {session_id}"
                 )
             if running is not None and running.process.poll() is None:
+                running.stop_requested = True
                 frame = supervisor_frame(
                     session_id,
                     running.next_supervisor_sequence,
@@ -828,7 +854,77 @@ class PortableSessionSupervisor:
                         process_input.flush()
                 except (BrokenPipeError, OSError):
                     pass
-                terminate_process(running.process)  # type: ignore[arg-type]
+                self._condition.wait_for(
+                    lambda: running.termination_ack is not None,
+                    timeout=_TERMINATION_ACK_TIMEOUT_SECONDS,
+                )
+                if running.termination_ack is True:
+                    try:
+                        running.process.wait(
+                            timeout=_COOPERATIVE_PAUSE_TIMEOUT_SECONDS
+                        )
+                    except subprocess.TimeoutExpired:
+                        termination = terminate_process(
+                            running.process  # type: ignore[arg-type]
+                        )
+                        cleanup_confirmed = termination.tree_terminated
+                    else:
+                        unregister_process_tree(
+                            running.process  # type: ignore[arg-type]
+                        )
+                        termination = ProcessTerminationResult(
+                            tree_terminated=True,
+                            detail=running.termination_detail,
+                        )
+                        cleanup_confirmed = True
+                else:
+                    termination = terminate_process(
+                        running.process  # type: ignore[arg-type]
+                    )
+                    cleanup_confirmed = (
+                        termination.tree_terminated
+                        and running.termination_ack is True
+                    )
+                running.cleanup_confirmed = cleanup_confirmed
+                if not cleanup_confirmed:
+                    interrupted = replace(
+                        snapshot,
+                        status=PortableSessionStatus.INTERRUPTED,
+                        result=130,
+                        input_request=None,
+                        activity=(*snapshot.activity, activity)[-100:],
+                        diagnostics=(
+                            *snapshot.diagnostics,
+                            running.termination_detail or termination.detail,
+                        )[-100:],
+                        updated_at=time.time(),
+                    )
+                    self._snapshots[session_id] = interrupted
+                    self._persist_snapshot(interrupted)
+                    self._publish(interrupted)
+                    self._condition.notify_all()
+                    return interrupted
+            elif running is not None and not running.cleanup_confirmed:
+                interrupted = replace(
+                    snapshot,
+                    status=PortableSessionStatus.INTERRUPTED,
+                    result=130,
+                    input_request=None,
+                    activity=(*snapshot.activity, activity)[-100:],
+                    diagnostics=(
+                        *snapshot.diagnostics,
+                        "Worker exited without confirmed descendant-tree cleanup; "
+                        "ownership remains retained.",
+                    )[-100:],
+                    updated_at=time.time(),
+                )
+                self._snapshots[session_id] = interrupted
+                self._persist_snapshot(interrupted)
+                self._publish(interrupted)
+                self._condition.notify_all()
+                return interrupted
+            if running is not None:
+                self._running.pop(session_id, None)
             updated = replace(
                 snapshot,
                 status=status,
@@ -1200,6 +1296,7 @@ class PortableSessionSupervisor:
                     return
                 if frame.kind in {
                     WorkerMessageKind.CHECKPOINT.value,
+                    WorkerMessageKind.CHECKPOINT_FAILURE.value,
                     WorkerMessageKind.COMPLETION.value,
                     WorkerMessageKind.FAILURE.value,
                 }:
@@ -1208,7 +1305,11 @@ class PortableSessionSupervisor:
                 self._running.get(session_id) is running
                 and not self.snapshot(session_id).status.terminal
                 and self.snapshot(session_id).status
-                is not PortableSessionStatus.PAUSED
+                not in {
+                    PortableSessionStatus.PAUSING,
+                    PortableSessionStatus.INTERRUPTED,
+                }
+                and not running.stop_requested
             ):
                 self._fail_session(
                     session_id,
@@ -1218,17 +1319,48 @@ class PortableSessionSupervisor:
         except (PortableProtocolError, OSError) as error:
             self._fail_session(session_id, str(error), running)
         finally:
-            self._reap_worker(running)
+            cleanup = self._reap_worker(running)
+            running.cleanup_confirmed = cleanup.tree_terminated
             with self._condition:
                 current_running = self._running.get(session_id)
-                if (
-                    current_running is running
-                    and self._snapshots[session_id].status
-                    is PortableSessionStatus.PAUSED
-                ):
-                    self._running.pop(session_id, None)
-                    current_running = None
-                if current_running is None:
+                snapshot = self._snapshots[session_id]
+                if current_running is running and running.checkpoint_summary is not None:
+                    if cleanup.tree_terminated:
+                        running.cleanup_confirmed = True
+                        self._running.pop(session_id, None)
+                        paused = replace(
+                            snapshot,
+                            status=PortableSessionStatus.PAUSED,
+                            result=None,
+                            input_request=None,
+                            activity=(
+                                *snapshot.activity,
+                                running.checkpoint_summary,
+                            )[-100:],
+                            updated_at=time.time(),
+                        )
+                        self._snapshots[session_id] = paused
+                        self._persist_snapshot(paused)
+                        self._publish(paused)
+                        current_running = None
+                    else:
+                        interrupted = replace(
+                            snapshot,
+                            status=PortableSessionStatus.INTERRUPTED,
+                            result=130,
+                            diagnostics=(
+                                *snapshot.diagnostics,
+                                cleanup.detail,
+                            )[-100:],
+                            updated_at=time.time(),
+                        )
+                        self._snapshots[session_id] = interrupted
+                        self._persist_snapshot(interrupted)
+                        self._publish(interrupted)
+                if current_running is None and running.cleanup_confirmed:
+                    self._release_execution_capacity(
+                        self._snapshots[session_id]
+                    )
                     self._release_session_lease(session_id)
                 self._condition.notify_all()
 
@@ -1439,17 +1571,45 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker CHECKPOINT requires a pausing session."
                     )
-                summary = _payload_text(frame, "summary")
+                running.checkpoint_summary = self._validate_checkpoint_evidence(
+                    session_id,
+                    frame,
+                )
+                updated = snapshot
+            elif kind is WorkerMessageKind.CHECKPOINT_FAILURE:
+                if snapshot.status is not PortableSessionStatus.PAUSING:
+                    raise PortableProtocolError(
+                        "Worker CHECKPOINT_FAILURE requires a pausing session."
+                    )
                 updated = replace(
                     snapshot,
-                    status=PortableSessionStatus.PAUSED,
+                    status=PortableSessionStatus.INTERRUPTED,
+                    result=130,
                     input_request=None,
-                    activity=(
-                        (*snapshot.activity, summary)[-100:]
-                        if summary
-                        else snapshot.activity
-                    ),
+                    diagnostics=(
+                        *snapshot.diagnostics,
+                        _payload_text(frame, "message"),
+                    )[-100:],
                 )
+            elif kind is WorkerMessageKind.TERMINATION:
+                request = _payload_text(frame, "request")
+                expected_request = {
+                    SupervisorMessageKind.FORCE_STOP.value,
+                    SupervisorMessageKind.CANCEL.value,
+                    SupervisorMessageKind.SHUTDOWN.value,
+                }
+                if request not in expected_request:
+                    raise PortableProtocolError(
+                        "Worker TERMINATION identifies an invalid lifecycle request."
+                    )
+                descendants_confirmed = frame.payload.get("descendants_confirmed")
+                if not isinstance(descendants_confirmed, bool):
+                    raise PortableProtocolError(
+                        "Worker TERMINATION descendants_confirmed must be boolean."
+                    )
+                running.termination_ack = descendants_confirmed
+                running.termination_detail = _payload_text(frame, "detail")
+                updated = snapshot
             elif kind is WorkerMessageKind.COMPLETION:
                 exit_code = frame.payload.get("exit_code")
                 if not isinstance(exit_code, int) or isinstance(exit_code, bool):
@@ -1497,6 +1657,7 @@ class PortableSessionSupervisor:
                 WorkerMessageKind.STATUS,
                 WorkerMessageKind.INPUT_REQUEST,
                 WorkerMessageKind.CHECKPOINT,
+                WorkerMessageKind.CHECKPOINT_FAILURE,
             }:
                 updated = self._refresh_authoritative_progress(updated)
             updated = replace(updated, updated_at=time.time())
@@ -1510,6 +1671,96 @@ class PortableSessionSupervisor:
             self._publish(updated)
             self._condition.notify_all()
             return True
+
+    def _validate_checkpoint_evidence(
+        self,
+        session_id: str,
+        frame: PortableProtocolFrame,
+    ) -> str:
+        if self._catalog is None:
+            raise PortableProtocolError(
+                "Worker CHECKPOINT requires an authoritative session catalog."
+            )
+        record = self._catalog.get_session(session_id)
+        checkpoint_kind = _payload_text(frame, "checkpoint_kind")
+        summary = _payload_text(frame, "summary")
+        if checkpoint_kind == "PLANNING":
+            thread_id = _payload_text(frame, "planning_thread_id")
+            settings = frame.payload.get("planning_settings")
+            if (
+                record.prd_path is not None
+                or record.planning_thread_id != thread_id
+                or record.planning_settings is None
+                or not isinstance(settings, dict)
+                or record.planning_settings.to_dict() != settings
+            ):
+                raise PortableProtocolError(
+                    "Worker planning checkpoint does not match durable catalog state."
+                )
+            return summary
+        if checkpoint_kind != "PRD":
+            raise PortableProtocolError(
+                "Worker CHECKPOINT has an unsupported evidence kind."
+            )
+        if record.prd_path is None or record.issues_index_path is None:
+            raise PortableProtocolError(
+                "Worker PRD checkpoint has no authoritative catalog pointers."
+            )
+        prd_path = Path(_payload_text(frame, "prd_path")).resolve()
+        issues_index = Path(_payload_text(frame, "issues_index_path")).resolve()
+        if (
+            prd_path != record.prd_path.resolve()
+            or issues_index != record.issues_index_path.resolve()
+            or not prd_path.is_file()
+            or not issues_index.is_file()
+        ):
+            raise PortableProtocolError(
+                "Worker PRD checkpoint does not match durable workflow files."
+            )
+        issue_id = frame.payload.get("issue_id")
+        next_role = _payload_text(frame, "next_role")
+        pass_number = frame.payload.get("pass_number")
+        if (
+            issue_id is not None and not isinstance(issue_id, str)
+        ) or (
+            not isinstance(pass_number, int)
+            or isinstance(pass_number, bool)
+            or pass_number < 1
+        ):
+            raise PortableProtocolError(
+                "Worker PRD checkpoint cursor is invalid."
+            )
+        from .issue_pack import parse_issue_index
+        from .state import LoopStateWriter
+
+        writer = LoopStateWriter(issues_index)
+        active_attempt = writer.active_scheduling_attempt()
+        if active_attempt is None:
+            if issue_id is not None or next_role != "scheduler" or pass_number != 1:
+                raise PortableProtocolError(
+                    "Worker PRD scheduler checkpoint is not the durable cursor."
+                )
+            return summary
+        issues = {
+            issue.number: issue
+            for issue in parse_issue_index(issues_index)
+        }
+        durable_issue_id = active_attempt["issue"]
+        issue = issues.get(durable_issue_id)
+        if issue is None:
+            raise PortableProtocolError(
+                "Durable PRD checkpoint references an unknown Issue."
+            )
+        cursor = writer.resume_issue(issue)
+        if (
+            issue_id != durable_issue_id
+            or next_role != cursor.next_role.value
+            or pass_number != cursor.pass_number
+        ):
+            raise PortableProtocolError(
+                "Worker PRD checkpoint is not the exact durable role/pass cursor."
+            )
+        return summary
 
     def _synchronize_catalog_checkout(
         self,
@@ -1631,8 +1882,16 @@ class PortableSessionSupervisor:
                 return
             updated = replace(
                 snapshot,
-                status=PortableSessionStatus.FAILED,
-                result=1,
+                status=(
+                    PortableSessionStatus.INTERRUPTED
+                    if snapshot.status is PortableSessionStatus.PAUSING
+                    else PortableSessionStatus.FAILED
+                ),
+                result=(
+                    130
+                    if snapshot.status is PortableSessionStatus.PAUSING
+                    else 1
+                ),
                 input_request=None,
                 diagnostics=(*snapshot.diagnostics, message)[-100:],
                 updated_at=time.time(),
@@ -1654,13 +1913,18 @@ class PortableSessionSupervisor:
             self._running.pop(session_id)
 
     @staticmethod
-    def _reap_worker(running: _RunningSession) -> None:
+    def _reap_worker(running: _RunningSession) -> ProcessTerminationResult:
+        cleanup: ProcessTerminationResult
         try:
             running.process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            terminate_process(running.process)  # type: ignore[arg-type]
-        finally:
             unregister_process_tree(running.process)  # type: ignore[arg-type]
+            cleanup = ProcessTerminationResult(
+                tree_terminated=True,
+                detail="Portable worker exited after durable acknowledgement.",
+            )
+        except subprocess.TimeoutExpired:
+            cleanup = terminate_process(running.process)  # type: ignore[arg-type]
+        finally:
             for stream in (
                 running.process.stdin,
                 running.process.stdout,
@@ -1671,6 +1935,7 @@ class PortableSessionSupervisor:
                         stream.close()
                     except OSError:
                         pass
+        return cleanup
 
     def _publish(self, snapshot: PortableSessionSnapshot) -> None:
         self._events.put(PortableSessionEvent(snapshot))
@@ -1680,12 +1945,16 @@ class PortableSessionSupervisor:
             return
         summary = snapshot.activity[-1] if snapshot.activity else ""
         try:
-            if snapshot.status not in {
+            if (
+                snapshot.session_id not in self._running
+                and snapshot.status not in {
                 PortableSessionStatus.RUNNING,
                 PortableSessionStatus.PAUSING,
                 PortableSessionStatus.QUEUED,
-            } and callable(
+                }
+                and callable(
                 getattr(self._catalog, "release_execution_capacity", None)
+                )
             ):
                 self._catalog.release_execution_capacity(
                     snapshot.session_id,

@@ -2177,6 +2177,7 @@ def run_git(args: Sequence[str], *, cwd: Path) -> None:
     result = subprocess.run(
         command,
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -2195,6 +2196,7 @@ def run_text(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProces
     return subprocess.run(
         list(command),
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         text=True,
         encoding="utf-8",
         errors="replace",

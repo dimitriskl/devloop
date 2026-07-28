@@ -5,6 +5,7 @@ import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -18,8 +19,20 @@ BUDGET_POLL_SECONDS = 0.05
 # number.
 EXECUTION_BUDGET_EXPIRY_RETURNCODE = 124
 PROCESS_TREE_ATTRIBUTE = "_devloop_process_group_id"
+WINDOWS_PROCESS_SNAPSHOT = 0x00000002
+WINDOWS_PROCESS_TERMINATE = 0x0001
+WINDOWS_SYNCHRONIZE = 0x00100000
+WINDOWS_ERROR_INVALID_PARAMETER = 87
+WINDOWS_WAIT_OBJECT_0 = 0x00000000
+WINDOWS_WAIT_TIMEOUT = 0x00000102
 _ACTIVE_PROCESS_TREES: set[subprocess.Popen[str]] = set()
 _ACTIVE_PROCESS_TREES_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class ProcessTerminationResult:
+    tree_terminated: bool
+    detail: str
 
 
 class AttemptExecutionBudget:
@@ -143,6 +156,7 @@ def run_captured_text(
     return subprocess.run(
         list(command),
         input=input_text,
+        stdin=subprocess.DEVNULL if input_text is None else None,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -195,42 +209,80 @@ def unregister_process_tree(process: subprocess.Popen[str]) -> None:
         _ACTIVE_PROCESS_TREES.discard(process)
 
 
-def terminate_active_process_trees() -> None:
+def terminate_active_process_trees() -> tuple[ProcessTerminationResult, ...]:
     """Terminate subprocess trees still owned by the active application."""
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        processes = tuple(_ACTIVE_PROCESS_TREES)
+    results: list[ProcessTerminationResult] = []
+    for process in processes:
+        if getattr(process, "poll", lambda: None)() is None:
+            results.append(terminate_process(process))
+        else:
+            unregister_process_tree(process)
+            results.append(
+                ProcessTerminationResult(
+                    tree_terminated=True,
+                    detail="Owned process tree had already exited.",
+                )
+            )
+    return tuple(results)
+
+
+def owned_process_trees_are_stopped() -> bool:
+    """Confirm that every registered backend tree has reached a terminal state."""
     with _ACTIVE_PROCESS_TREES_LOCK:
         processes = tuple(_ACTIVE_PROCESS_TREES)
     for process in processes:
         if getattr(process, "poll", lambda: None)() is None:
-            terminate_process(process)
-        else:
-            unregister_process_tree(process)
-
-
-def terminate_process(process: subprocess.Popen[str]) -> None:
-    try:
-        _signal_process_tree(process, force=False)
-        try:
-            process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
-        if not _process_tree_is_alive(process):
-            return
-
-        _signal_process_tree(process, force=True)
-        try:
-            process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            # Never hold the workflow indefinitely because an OS process refuses
-            # to be reaped.
-            pass
-    finally:
+            return False
+        if _process_tree_is_alive(process):
+            return False
         unregister_process_tree(process)
+    return True
 
 
-def _signal_process_tree(process: subprocess.Popen[str], *, force: bool) -> None:
+def terminate_process(
+    process: subprocess.Popen[str],
+) -> ProcessTerminationResult:
+    tree_signal_confirmed = _signal_process_tree(process, force=False)
+    try:
+        process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    if _process_tree_is_alive(process):
+        tree_signal_confirmed = (
+            _signal_process_tree(process, force=True) or tree_signal_confirmed
+        )
+        try:
+            process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+    tree_terminated = tree_signal_confirmed and not _process_tree_is_alive(process)
+    if tree_terminated:
+        unregister_process_tree(process)
+        return ProcessTerminationResult(
+            tree_terminated=True,
+            detail="Owned process tree termination was confirmed.",
+        )
+    return ProcessTerminationResult(
+        tree_terminated=False,
+        detail=(
+            "Owned process tree termination could not be confirmed; "
+            "ownership remains registered."
+        ),
+    )
+
+
+def _signal_process_tree(
+    process: subprocess.Popen[str],
+    *,
+    force: bool,
+) -> bool:
     if os.name == "nt":
         pid = getattr(process, "pid", None)
         if isinstance(pid, int):
+            if _terminate_windows_process_tree(pid):
+                return True
             try:
                 completed = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
@@ -240,11 +292,11 @@ def _signal_process_tree(process: subprocess.Popen[str], *, force: bool) -> None
                     timeout=PROCESS_EXIT_GRACE_SECONDS,
                 )
                 if completed.returncode == 0:
-                    return
+                    return True
             except (OSError, subprocess.TimeoutExpired):
                 pass
         _signal_process(process, force=force)
-        return
+        return False
 
     process_group_id = getattr(process, PROCESS_TREE_ATTRIBUTE, None)
     if not isinstance(process_group_id, int):
@@ -258,10 +310,134 @@ def _signal_process_tree(process: subprocess.Popen[str], *, force: bool) -> None
                 process_group_id,
                 signal.SIGKILL if force else signal.SIGTERM,
             )
-            return
-        except (ProcessLookupError, OSError):
+            return True
+        except ProcessLookupError:
+            return True
+        except OSError:
             pass
     _signal_process(process, force=force)
+    return False
+
+
+def _terminate_windows_process_tree(root_pid: int) -> bool:
+    """Terminate and verify a Windows tree without relying on taskkill."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return False
+
+    class ProcessEntry32(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD),
+            ("usage", wintypes.DWORD),
+            ("process_id", wintypes.DWORD),
+            ("default_heap_id", ctypes.c_size_t),
+            ("module_id", wintypes.DWORD),
+            ("thread_count", wintypes.DWORD),
+            ("parent_process_id", wintypes.DWORD),
+            ("base_priority", ctypes.c_long),
+            ("flags", wintypes.DWORD),
+            ("executable_file", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    create_snapshot.restype = wintypes.HANDLE
+    process_first = kernel32.Process32FirstW
+    process_first.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32))
+    process_first.restype = wintypes.BOOL
+    process_next = kernel32.Process32NextW
+    process_next.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32))
+    process_next.restype = wintypes.BOOL
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    terminate = kernel32.TerminateProcess
+    terminate.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    terminate.restype = wintypes.BOOL
+    wait = kernel32.WaitForSingleObject
+    wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    wait.restype = wintypes.DWORD
+    close = kernel32.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+
+    invalid_handle = wintypes.HANDLE(-1).value
+    snapshot = create_snapshot(WINDOWS_PROCESS_SNAPSHOT, 0)
+    if snapshot == invalid_handle:
+        return False
+    parent_by_pid: dict[int, int] = {}
+    try:
+        entry = ProcessEntry32()
+        entry.size = ctypes.sizeof(ProcessEntry32)
+        if process_first(snapshot, ctypes.byref(entry)):
+            while True:
+                parent_by_pid[int(entry.process_id)] = int(entry.parent_process_id)
+                if not process_next(snapshot, ctypes.byref(entry)):
+                    break
+    finally:
+        close(snapshot)
+
+    descendants = {root_pid}
+    while True:
+        discovered = {
+            pid for pid, parent in parent_by_pid.items() if parent in descendants
+        }
+        expanded = descendants | discovered
+        if expanded == descendants:
+            break
+        descendants = expanded
+
+    confirmed = True
+    ordered_pids = sorted(
+        descendants,
+        key=lambda pid: _windows_process_depth(pid, parent_by_pid, root_pid),
+        reverse=True,
+    )
+    handles: list[object] = []
+    for pid in ordered_pids:
+        handle = open_process(
+            WINDOWS_PROCESS_TERMINATE | WINDOWS_SYNCHRONIZE,
+            False,
+            pid,
+        )
+        if not handle:
+            if ctypes.get_last_error() != WINDOWS_ERROR_INVALID_PARAMETER:
+                confirmed = False
+            continue
+        handles.append(handle)
+    try:
+        for handle in handles:
+            if not terminate(handle, 1) and wait(handle, 0) != WINDOWS_WAIT_OBJECT_0:
+                confirmed = False
+        deadline = time.monotonic() + PROCESS_TERMINATE_GRACE_SECONDS
+        for handle in handles:
+            remaining_milliseconds = max(
+                0,
+                int((deadline - time.monotonic()) * 1000),
+            )
+            if wait(handle, remaining_milliseconds) == WINDOWS_WAIT_TIMEOUT:
+                confirmed = False
+    finally:
+        for handle in handles:
+            close(handle)
+    return confirmed
+
+
+def _windows_process_depth(
+    pid: int,
+    parent_by_pid: dict[int, int],
+    root_pid: int,
+) -> int:
+    depth = 0
+    visited: set[int] = set()
+    while pid != root_pid and pid not in visited:
+        visited.add(pid)
+        pid = parent_by_pid.get(pid, root_pid)
+        depth += 1
+    return depth
 
 
 def _process_tree_is_alive(process: subprocess.Popen[str]) -> bool:
