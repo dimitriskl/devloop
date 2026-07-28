@@ -828,7 +828,8 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                                     issues_index_path TEXT,
                                     activity_summary TEXT NOT NULL DEFAULT '',
                                     created_at REAL NOT NULL,
-                                    updated_at REAL NOT NULL
+                                    updated_at REAL NOT NULL,
+                                    revision INTEGER NOT NULL
                                 );
                                 INSERT INTO sessions SELECT * FROM old_sessions;
                                 DROP TABLE old_sessions;

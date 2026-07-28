@@ -24,7 +24,7 @@ from .portable_sessions import (
 from .portable_workflow import ExecutionBudget, FastPreference, StepExecutionSettings
 from .redaction import redact_persisted_evidence
 
-CATALOG_SCHEMA_VERSION = 3
+CATALOG_SCHEMA_VERSION = 4
 CATALOG_FILENAME = "portable-sessions.sqlite3"
 DEFAULT_PORTABLE_SESSION_CONCURRENCY_LIMIT = 2
 MINIMUM_PORTABLE_SESSION_CONCURRENCY_LIMIT = 1
@@ -456,6 +456,7 @@ class PortableCatalogSession:
     activity_summary: str
     created_at: float
     updated_at: float
+    revision: int
 
     @property
     def launch(self) -> PortableSessionLaunch:
@@ -563,6 +564,7 @@ class PortableSessionCatalog:
         timestamp = time.time()
         try:
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
                     INSERT INTO saved_projects (
@@ -573,13 +575,17 @@ class PortableSessionCatalog:
                     """,
                     (project_id, str(checkout), timestamp, timestamp),
                 )
+                revision = self._next_session_revision(
+                    connection,
+                    launch.session_id,
+                )
                 connection.execute(
                     """
                     INSERT INTO sessions (
                         session_id, project_id, status, operation, arguments_json,
-                        planning_settings_json, created_at, updated_at
+                        planning_settings_json, created_at, updated_at, revision
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -591,6 +597,7 @@ class PortableSessionCatalog:
                         settings_json,
                         timestamp,
                         timestamp,
+                        revision,
                     ),
                 )
         except sqlite3.IntegrityError as error:
@@ -653,12 +660,16 @@ class PortableSessionCatalog:
                     """,
                     (project_id, str(checkout), timestamp, timestamp),
                 )
+                revision = self._next_session_revision(
+                    connection,
+                    launch.session_id,
+                )
                 connection.execute(
                     """
                     INSERT INTO sessions (
                         session_id, project_id, status, operation, arguments_json,
-                        planning_settings_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        planning_settings_json, created_at, updated_at, revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         launch.session_id,
@@ -669,6 +680,7 @@ class PortableSessionCatalog:
                         planning_settings_json,
                         timestamp,
                         timestamp,
+                        revision,
                     ),
                 )
                 connection.execute(
@@ -876,6 +888,7 @@ class PortableSessionCatalog:
         timestamp = time.time()
         try:
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
                     INSERT INTO saved_projects (
@@ -886,15 +899,20 @@ class PortableSessionCatalog:
                     """,
                     (project_id, str(checkout), timestamp, timestamp),
                 )
+                revision = self._next_session_revision(
+                    connection,
+                    launch.session_id,
+                )
                 connection.execute(
                     """
                     INSERT INTO sessions (
                         session_id, project_id, status, operation, arguments_json,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(session_id) DO UPDATE SET
                         project_id = excluded.project_id,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        revision = excluded.revision
                     """,
                     (
                         launch.session_id,
@@ -904,6 +922,7 @@ class PortableSessionCatalog:
                         launch_settings_json,
                         timestamp,
                         timestamp,
+                        revision,
                     ),
                 )
         except sqlite3.DatabaseError as error:
@@ -933,10 +952,10 @@ class PortableSessionCatalog:
             raise KeyError(f"Unknown portable session: {session_id}")
         return _session_from_row(row)
 
-    def save_planning_thread(self, session_id: str, thread_id: str) -> None:
+    def save_planning_thread(self, session_id: str, thread_id: str) -> int:
         _validate_session_id(session_id)
         _validate_thread_id(thread_id)
-        self._update_session(
+        return self._update_session(
             session_id,
             "planning_thread_id = ?, updated_at = ?",
             (thread_id, time.time()),
@@ -951,13 +970,13 @@ class PortableSessionCatalog:
         prd_path: Path | None = None,
         issues_index_path: Path | None = None,
         prepare_checkout: Callable[[], None] | None = None,
-    ) -> None:
+    ) -> int:
         if (prd_path is None) != (issues_index_path is None):
             raise ValueError(
                 "Portable workflow transfer requires both PRD and issue-index pointers."
             )
         if owner_id is not None:
-            self._transfer_session_lease(
+            return self._transfer_session_lease(
                 session_id,
                 checkout,
                 owner_id=owner_id,
@@ -965,7 +984,6 @@ class PortableSessionCatalog:
                 issues_index_path=issues_index_path,
                 prepare_checkout=prepare_checkout,
             )
-            return
         if prepare_checkout is not None:
             raise ValueError(
                 "Portable checkout preparation requires the active worktree lease."
@@ -976,14 +994,14 @@ class PortableSessionCatalog:
                 "worktree lease."
             )
         record = self.get_session(session_id)
-        self.bind_or_create_session(
+        return self.bind_or_create_session(
             PortableSessionLaunch(
                 session_id=session_id,
                 checkout=checkout,
                 operation=record.operation,
                 arguments=record.arguments,
             )
-        )
+        ).revision
 
     def _transfer_session_lease(
         self,
@@ -994,7 +1012,7 @@ class PortableSessionCatalog:
         prd_path: Path | None,
         issues_index_path: Path | None,
         prepare_checkout: Callable[[], None] | None,
-    ) -> None:
+    ) -> int:
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
         canonical_checkout = checkout.resolve()
@@ -1085,20 +1103,21 @@ class PortableSessionCatalog:
                     ),
                 )
                 if canonical_prd is None or canonical_issues is None:
-                    connection.execute(
+                    cursor = connection.execute(
                         """
                         UPDATE sessions
-                        SET project_id = ?, updated_at = ?
+                        SET project_id = ?, updated_at = ?,
+                            revision = revision + 1
                         WHERE session_id = ?
                         """,
                         (project_id, timestamp, session_id),
                     )
                 else:
-                    connection.execute(
+                    cursor = connection.execute(
                         """
                         UPDATE sessions
                         SET project_id = ?, prd_path = ?, issues_index_path = ?,
-                            updated_at = ?
+                            updated_at = ?, revision = revision + 1
                         WHERE session_id = ?
                         """,
                         (
@@ -1109,12 +1128,16 @@ class PortableSessionCatalog:
                             session_id,
                         ),
                     )
-        except (PortableSessionCatalogError, PortableWorktreeLeaseConflict):
+                if cursor.rowcount != 1:
+                    raise KeyError(f"Unknown portable session: {session_id}")
+                revision = self._session_revision(connection, session_id)
+        except (KeyError, PortableSessionCatalogError, PortableWorktreeLeaseConflict):
             raise
         except sqlite3.DatabaseError as error:
             raise PortableSessionCatalogError(
                 f"Portable Session Catalog write failed: {error}"
             ) from error
+        return revision
 
     def publish_workflow(
         self,
@@ -1123,13 +1146,13 @@ class PortableSessionCatalog:
         prd_path: Path,
         issues_index_path: Path,
         activity_summary: str,
-    ) -> None:
+    ) -> int:
         canonical_prd = prd_path.resolve()
         canonical_issues = issues_index_path.resolve()
         if not canonical_prd.is_file() or not canonical_issues.is_file():
             raise ValueError("Published workflow pointers must reference existing files.")
         bounded_summary = redact_persisted_evidence(activity_summary)[:500]
-        self._update_session(
+        return self._update_session(
             session_id,
             """
             prd_path = ?, issues_index_path = ?, activity_summary = ?,
@@ -1189,8 +1212,8 @@ class PortableSessionCatalog:
         self,
         session_id: str,
         settings: PortablePlanningSettings,
-    ) -> None:
-        self._update_session(
+    ) -> int:
+        return self._update_session(
             session_id,
             "planning_settings_json = ?, updated_at = ?",
             (_serialize_planning_settings(settings), time.time()),
@@ -1202,10 +1225,10 @@ class PortableSessionCatalog:
         status: PortableSessionStatus,
         *,
         activity_summary: str = "",
-    ) -> None:
+    ) -> int:
         if not isinstance(status, PortableSessionStatus):
             raise ValueError("Portable session status must be a known lifecycle value.")
-        self._update_session(
+        return self._update_session(
             session_id,
             """
             status = ?, activity_summary = ?, updated_at = ?
@@ -1269,6 +1292,20 @@ class PortableSessionCatalog:
         owner_id: str,
         process_id: int | None = None,
     ) -> bool:
+        granted, _revision = self.request_execution_capacity_with_revision(
+            session_id,
+            owner_id=owner_id,
+            process_id=process_id,
+        )
+        return granted
+
+    def request_execution_capacity_with_revision(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> tuple[bool, int]:
         """Atomically acquire execution capacity or retain the session's fair queue place."""
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
@@ -1316,7 +1353,8 @@ class PortableSessionCatalog:
                     connection.execute(
                         """
                         UPDATE sessions
-                        SET status = ?, updated_at = ?
+                        SET status = ?, updated_at = ?,
+                            revision = revision + 1
                         WHERE session_id = ?
                         """,
                         (
@@ -1325,7 +1363,7 @@ class PortableSessionCatalog:
                             session_id,
                         ),
                     )
-                    return True
+                    return True, self._session_revision(connection, session_id)
                 request = connection.execute(
                     """
                     SELECT owner_id
@@ -1403,7 +1441,8 @@ class PortableSessionCatalog:
                 connection.execute(
                     """
                     UPDATE sessions
-                    SET status = ?, updated_at = ?
+                    SET status = ?, updated_at = ?,
+                        revision = revision + 1
                     WHERE session_id = ?
                     """,
                     (
@@ -1416,7 +1455,7 @@ class PortableSessionCatalog:
                         session_id,
                     ),
                 )
-                return granted
+                return granted, self._session_revision(connection, session_id)
         except (KeyError, PortableSessionCatalogError, ValueError):
             raise
         except sqlite3.DatabaseError as error:
@@ -1430,7 +1469,7 @@ class PortableSessionCatalog:
         *,
         owner_id: str,
         process_id: int | None = None,
-    ) -> None:
+    ) -> int:
         """Atomically retain a fair queue place without acquiring a free slot."""
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
@@ -1514,7 +1553,8 @@ class PortableSessionCatalog:
                 connection.execute(
                     """
                     UPDATE sessions
-                    SET status = ?, updated_at = ?
+                    SET status = ?, updated_at = ?,
+                        revision = revision + 1
                     WHERE session_id = ?
                     """,
                     (
@@ -1523,12 +1563,14 @@ class PortableSessionCatalog:
                         session_id,
                     ),
                 )
+                revision = self._session_revision(connection, session_id)
         except (KeyError, PortableSessionCatalogError, ValueError):
             raise
         except sqlite3.DatabaseError as error:
             raise PortableSessionCatalogError(
                 f"Portable Session Catalog write failed: {error}"
             ) from error
+        return revision
 
     def owns_execution_capacity(
         self,
@@ -1572,6 +1614,22 @@ class PortableSessionCatalog:
         status: PortableSessionStatus,
         activity_summary: str = "",
     ) -> bool:
+        released, _revision = self.release_execution_capacity_with_revision(
+            session_id,
+            owner_id=owner_id,
+            status=status,
+            activity_summary=activity_summary,
+        )
+        return released
+
+    def release_execution_capacity_with_revision(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        status: PortableSessionStatus,
+        activity_summary: str = "",
+    ) -> tuple[bool, int]:
         """Atomically release a slot and persist the session's inactive status."""
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
@@ -1631,7 +1689,8 @@ class PortableSessionCatalog:
                 connection.execute(
                     """
                     UPDATE sessions
-                    SET status = ?, activity_summary = ?, updated_at = ?
+                    SET status = ?, activity_summary = ?, updated_at = ?,
+                        revision = revision + 1
                     WHERE session_id = ?
                     """,
                     (
@@ -1641,7 +1700,10 @@ class PortableSessionCatalog:
                         session_id,
                     ),
                 )
-                return cursor.rowcount == 1
+                return (
+                    cursor.rowcount == 1,
+                    self._session_revision(connection, session_id),
+                )
         except (KeyError, PortableSessionCatalogError):
             raise
         except sqlite3.DatabaseError as error:
@@ -1695,22 +1757,76 @@ class PortableSessionCatalog:
         session_id: str,
         assignments: str,
         values: tuple[object, ...],
-    ) -> None:
+    ) -> int:
         _validate_session_id(session_id)
         try:
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 cursor = connection.execute(
-                    f"UPDATE sessions SET {assignments} WHERE session_id = ?",
+                    (
+                        f"UPDATE sessions SET {assignments}, "
+                        "revision = revision + 1 WHERE session_id = ?"
+                    ),
                     (*values, session_id),
                 )
                 if cursor.rowcount != 1:
                     raise KeyError(f"Unknown portable session: {session_id}")
+                revision = self._session_revision(connection, session_id)
         except KeyError:
             raise
         except sqlite3.DatabaseError as error:
             raise PortableSessionCatalogError(
                 f"Portable Session Catalog write failed: {error}"
             ) from error
+        return revision
+
+    @staticmethod
+    def _session_revision(
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> int:
+        row = connection.execute(
+            "SELECT revision FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown portable session: {session_id}")
+        revision = _validate_revision(row["revision"])
+        connection.execute(
+            """
+            INSERT INTO session_revision_counters (session_id, revision)
+            VALUES (?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                revision = excluded.revision
+            """,
+            (session_id, revision),
+        )
+        return revision
+
+    @staticmethod
+    def _next_session_revision(
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> int:
+        connection.execute(
+            """
+            INSERT INTO session_revision_counters (session_id, revision)
+            VALUES (?, 1)
+            ON CONFLICT(session_id) DO UPDATE SET
+                revision = session_revision_counters.revision + 1
+            """,
+            (session_id,),
+        )
+        row = connection.execute(
+            """
+            SELECT revision
+            FROM session_revision_counters
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        assert row is not None
+        return _validate_revision(row["revision"])
 
     def _initialize(self) -> None:
         try:
@@ -1783,7 +1899,17 @@ class PortableSessionCatalog:
                                     AND created_at >= 0),
                             updated_at REAL NOT NULL
                                 CHECK (typeof(updated_at) IN ('integer', 'real')
-                                    AND updated_at >= 0)
+                                    AND updated_at >= 0),
+                            revision INTEGER NOT NULL DEFAULT 1
+                                CHECK (typeof(revision) = 'integer'
+                                    AND revision > 0)
+                        );
+                        CREATE TABLE session_revision_counters (
+                            session_id TEXT PRIMARY KEY
+                                CHECK (length(session_id) BETWEEN 1 AND 128),
+                            revision INTEGER NOT NULL
+                                CHECK (typeof(revision) = 'integer'
+                                    AND revision > 0)
                         );
                         CREATE TABLE worktree_leases (
                             checkout TEXT PRIMARY KEY
@@ -1838,7 +1964,7 @@ class PortableSessionCatalog:
                                 CHECK (typeof(acquired_at) IN ('integer', 'real')
                                     AND acquired_at >= 0)
                         );
-                        PRAGMA user_version = 3;
+                        PRAGMA user_version = 4;
                         """
                     )
                 if version == 1:
@@ -1909,6 +2035,52 @@ class PortableSessionCatalog:
                         PRAGMA user_version = 3;
                         """
                     )
+                    version = 3
+                if version == 3:
+                    columns = {
+                        row["name"]
+                        for row in connection.execute(
+                            "PRAGMA table_info(sessions)"
+                        )
+                    }
+                    if not connection.in_transaction:
+                        connection.execute("BEGIN IMMEDIATE")
+                    if "revision" not in columns:
+                        connection.execute(
+                            """
+                            ALTER TABLE sessions
+                                ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
+                                CHECK (typeof(revision) = 'integer'
+                                    AND revision > 0)
+                            """
+                        )
+                    connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS session_revision_counters (
+                            session_id TEXT PRIMARY KEY
+                                CHECK (length(session_id) BETWEEN 1 AND 128),
+                            revision INTEGER NOT NULL
+                                CHECK (typeof(revision) = 'integer'
+                                    AND revision > 0)
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO session_revision_counters (
+                            session_id, revision
+                        )
+                        SELECT session_id, revision
+                        FROM sessions
+                        WHERE 1
+                        ON CONFLICT(session_id) DO UPDATE SET
+                            revision = MAX(
+                                session_revision_counters.revision,
+                                excluded.revision
+                            )
+                        """
+                    )
+                    connection.execute("PRAGMA user_version = 4")
                 self._validate_schema(connection)
                 self._validate_records(connection)
         except PortableSessionCatalogError:
@@ -1947,6 +2119,7 @@ class PortableSessionCatalog:
         expected_tables = {
             "saved_projects",
             "sessions",
+            "session_revision_counters",
             "worktree_leases",
             "catalog_settings",
             "execution_requests",
@@ -1982,6 +2155,11 @@ class PortableSessionCatalog:
                 ("activity_summary", "TEXT", 1, 0),
                 ("created_at", "REAL", 1, 0),
                 ("updated_at", "REAL", 1, 0),
+                ("revision", "INTEGER", 1, 0),
+            ),
+            "session_revision_counters": (
+                ("session_id", "TEXT", 0, 1),
+                ("revision", "INTEGER", 1, 0),
             ),
             "worktree_leases": (
                 ("checkout", "TEXT", 0, 1),
@@ -2095,6 +2273,11 @@ class PortableSessionCatalog:
                 "check(length(activity_summary)<=500)",
                 "check(typeof(created_at)in('integer','real')andcreated_at>=0)",
                 "check(typeof(updated_at)in('integer','real')andupdated_at>=0)",
+                "check(typeof(revision)='integer'andrevision>0)",
+            ),
+            "session_revision_counters": (
+                "check(length(session_id)between1and128)",
+                "check(typeof(revision)='integer'andrevision>0)",
             ),
             "worktree_leases": (
                 "check(length(checkout)between1and4096)",
@@ -2151,6 +2334,21 @@ class PortableSessionCatalog:
             ).fetchall()
             for row in rows:
                 _session_from_row(row)
+            revisions = {
+                row["session_id"]: _validate_revision(row["revision"])
+                for row in connection.execute(
+                    "SELECT session_id, revision FROM session_revision_counters"
+                )
+            }
+            for session_id, revision in revisions.items():
+                _validate_session_id(session_id)
+            if any(
+                revisions.get(row["session_id"]) != row["revision"]
+                for row in rows
+            ):
+                raise PortableSessionCatalogError(
+                    "Portable Session Catalog session revisions are inconsistent."
+                )
             for row in connection.execute("SELECT * FROM worktree_leases"):
                 _lease_from_row(row)
             concurrency_row = connection.execute(
@@ -2273,6 +2471,7 @@ def _session_from_row(row: sqlite3.Row) -> PortableCatalogSession:
         _validate_catalog_path(row["checkout"])
         _validate_timestamp(row["created_at"])
         _validate_timestamp(row["updated_at"])
+        _validate_revision(row["revision"])
         arguments_text = row["arguments_json"]
         _validate_catalog_text(arguments_text, maximum_length=4096)
         launch_settings_value = json.loads(arguments_text)
@@ -2322,6 +2521,7 @@ def _session_from_row(row: sqlite3.Row) -> PortableCatalogSession:
             activity_summary=activity_summary,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            revision=row["revision"],
         )
     except (json.JSONDecodeError, TypeError, ValueError) as error:
         raise PortableSessionCatalogError(
@@ -2357,6 +2557,12 @@ def _validate_session_id(session_id: str) -> None:
             "Portable session identity must contain 1-128 letters, digits, "
             "periods, underscores, or hyphens."
         )
+
+
+def _validate_revision(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("Portable session revision must be a positive integer.")
+    return value
 
 
 def _validate_thread_id(thread_id: str) -> None:

@@ -7,6 +7,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from devloop import cli
 from devloop.portable_session_catalog import (
@@ -45,9 +46,106 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PortableSessionCatalogError,
-                "newer than supported version 3",
+                "newer than supported version 4",
             ):
                 PortableSessionCatalog(database)
+
+    def test_version_three_catalog_adds_durable_session_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            launch = PortableSessionLaunch(
+                session_id="session-before-revisions",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session(launch)
+            with closing(sqlite3.connect(database)) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(sessions)")
+                }
+                if "revision" in columns:
+                    connection.execute("ALTER TABLE sessions DROP COLUMN revision")
+                connection.execute("PRAGMA user_version = 3")
+                connection.commit()
+
+            migrated = PortableSessionCatalog(database)
+            before = migrated.get_session(launch.session_id)
+            committed_revision = migrated.update_session_status(
+                launch.session_id,
+                PortableSessionStatus.RUNNING,
+            )
+            after = migrated.get_session(launch.session_id)
+
+        self.assertEqual(before.revision, 1)
+        self.assertEqual(committed_revision, 2)
+        self.assertEqual(after.revision, 2)
+
+    def test_session_revision_follows_commit_order_when_clock_rolls_back(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            session = catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="rollback-clock-session",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+
+            with patch(
+                "devloop.portable_session_catalog.time.time",
+                side_effect=(200.0, 100.0),
+            ):
+                running_revision = catalog.update_session_status(
+                    session.session_id,
+                    PortableSessionStatus.RUNNING,
+                )
+                failed_revision = catalog.update_session_status(
+                    session.session_id,
+                    PortableSessionStatus.FAILED,
+                )
+            failed = catalog.get_session(session.session_id)
+
+        self.assertEqual(running_revision, session.revision + 1)
+        self.assertEqual(failed_revision, running_revision + 1)
+        self.assertEqual(failed.revision, failed_revision)
+        self.assertEqual(failed.updated_at, 100.0)
+
+    def test_session_revision_survives_rollback_delete_and_recreate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="recreated-after-rollback",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            first = catalog.create_session_with_lease(
+                launch,
+                owner_id="rollback-owner",
+            )
+            catalog.rollback_session_start(
+                launch.session_id,
+                owner_id="rollback-owner",
+            )
+            recreated = catalog.create_session(launch)
+
+        self.assertEqual(first.revision, 1)
+        self.assertEqual(recreated.revision, 2)
 
     def test_version_one_catalog_migrates_without_losing_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

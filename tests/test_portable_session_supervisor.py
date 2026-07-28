@@ -2856,6 +2856,96 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             ),
         )
 
+    def test_newer_catalog_revision_applies_even_when_wall_clock_rolls_back(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="cross-supervisor-state",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session(launch)
+            observer = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: self.fail(
+                    "Catalog synchronization must not launch a worker."
+                ),
+                catalog=catalog,
+                owner_id="observing-shell",
+            )
+            try:
+                with mock.patch(
+                    "devloop.portable_session_catalog.time.time",
+                    side_effect=(200.0, 100.0),
+                ):
+                    catalog.update_session_status(
+                        launch.session_id,
+                        PortableSessionStatus.RUNNING,
+                    )
+                    observer._synchronize_catalog_sessions()
+                    self.assertEqual(
+                        observer.snapshot(launch.session_id).status,
+                        PortableSessionStatus.RUNNING,
+                    )
+
+                    catalog.update_session_status(
+                        launch.session_id,
+                        PortableSessionStatus.FAILED,
+                    )
+                    observer._synchronize_catalog_sessions()
+
+                self.assertEqual(
+                    observer.snapshot(launch.session_id).status,
+                    PortableSessionStatus.FAILED,
+                )
+            finally:
+                observer.shutdown()
+
+    def test_restart_leaves_raw_durable_queued_session_passive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="raw-durable-queued",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session(launch)
+            catalog.update_session_status(
+                launch.session_id,
+                PortableSessionStatus.QUEUED,
+            )
+            launches: list[str] = []
+
+            def launch_worker(
+                candidate: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                launches.append(candidate.session_id)
+                raise AssertionError("Restarted queued session launched implicitly.")
+
+            restarted = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=PortableSessionCatalog(catalog.path),
+                owner_id="restarted-shell",
+            )
+            try:
+                time.sleep(0.15)
+                self.assertEqual(
+                    restarted.snapshot(launch.session_id).status,
+                    PortableSessionStatus.QUEUED,
+                )
+                self.assertEqual(launches, [])
+            finally:
+                restarted.shutdown()
+
     def test_real_worker_runs_existing_planning_entrypoint_in_child_process(
         self,
     ) -> None:

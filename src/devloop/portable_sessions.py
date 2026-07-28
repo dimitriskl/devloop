@@ -211,6 +211,7 @@ class PortableCatalogSessionRecord(Protocol):
     prd_path: Path | None
     activity_summary: str
     updated_at: float
+    revision: int
     launch: PortableSessionLaunch
 
 
@@ -252,7 +253,7 @@ class PortableSessionCatalogController(Protocol):
         status: PortableSessionStatus,
         *,
         activity_summary: str = "",
-    ) -> None: ...
+    ) -> int: ...
 
     def rollback_session_start(
         self,
@@ -272,6 +273,14 @@ class PortableSessionCatalogController(Protocol):
         owner_id: str,
         process_id: int | None = None,
     ) -> bool: ...
+
+    def request_execution_capacity_with_revision(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> tuple[bool, int]: ...
 
     def enqueue_execution_capacity(
         self,
@@ -297,6 +306,15 @@ class PortableSessionCatalogController(Protocol):
         status: PortableSessionStatus,
         activity_summary: str = "",
     ) -> bool: ...
+
+    def release_execution_capacity_with_revision(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        status: PortableSessionStatus,
+        activity_summary: str = "",
+    ) -> tuple[bool, int]: ...
 
 
 @dataclass
@@ -401,6 +419,7 @@ class PortableSessionSupervisor:
         self._running: dict[str, _RunningSession] = {}
         self._queued: dict[str, _QueuedSession | _QueuedInput] = {}
         self._owned_session_ids: set[str] = set()
+        self._catalog_revisions: dict[str, int] = {}
         self._next_worker_generation = 1
         self._last_progress_refresh: dict[str, float] = {}
         self._live_stage_session_ids: set[str] = set()
@@ -416,6 +435,10 @@ class PortableSessionSupervisor:
         )
         if catalog is not None:
             for record in catalog.list_sessions():
+                self._remember_catalog_revision(
+                    record.session_id,
+                    getattr(record, "revision", 0),
+                )
                 self._snapshots[record.session_id] = PortableSessionSnapshot(
                     session_id=record.session_id,
                     checkout=record.checkout,
@@ -456,10 +479,14 @@ class PortableSessionSupervisor:
                         input_request=None,
                     )
                     self._snapshots[completed.session_id] = completed
-                    catalog.update_session_status(
+                    revision = catalog.update_session_status(
                         completed.session_id,
                         PortableSessionStatus.COMPLETED,
                         activity_summary="Project workflow is no longer unfinished",
+                    )
+                    self._remember_catalog_revision(
+                        completed.session_id,
+                        revision,
                     )
         for candidate in candidates:
             candidate_path = candidate.prd_path.resolve()
@@ -488,10 +515,14 @@ class PortableSessionSupervisor:
                     )
                     self._snapshots[restored.session_id] = restored
                     if self._catalog is not None:
-                        self._catalog.update_session_status(
+                        revision = self._catalog.update_session_status(
                             restored.session_id,
                             PortableSessionStatus.READY,
                             activity_summary="Unfinished project workflow",
+                        )
+                        self._remember_catalog_revision(
+                            restored.session_id,
+                            revision,
                         )
                 continue
             if (
@@ -594,6 +625,10 @@ class PortableSessionSupervisor:
             command_kind = SupervisorMessageKind.RESUME
             if self._catalog is not None:
                 record = self._catalog.get_session(session_id)
+                self._remember_catalog_revision(
+                    session_id,
+                    getattr(record, "revision", 0),
+                )
                 launch = record.launch
                 self._launches[session_id] = launch
                 self._snapshots[session_id] = replace(
@@ -608,11 +643,12 @@ class PortableSessionSupervisor:
                     command_kind = SupervisorMessageKind.START
                 self._acquire_existing_session_lease(session_id)
                 if record.status.terminal:
-                    self._catalog.update_session_status(
+                    revision = self._catalog.update_session_status(
                         session_id,
                         PortableSessionStatus.READY,
                         activity_summary="Explicit resume requested",
                     )
+                    self._remember_catalog_revision(session_id, revision)
             return self._schedule_session(
                 launch,
                 command_kind,
@@ -639,7 +675,7 @@ class PortableSessionSupervisor:
                 command_payload,
                 rollback_new_session=rollback_new_session,
             )
-        if request_capacity(launch.session_id, owner_id=self._owner_id):
+        if self._request_catalog_execution_capacity(launch.session_id):
             return self._launch_session(
                 launch,
                 command_kind,
@@ -722,9 +758,13 @@ class PortableSessionSupervisor:
             self._launches[launch.session_id] = launch
             if self._catalog is not None:
                 try:
-                    self._catalog.update_session_status(
+                    revision = self._catalog.update_session_status(
                         launch.session_id,
                         PortableSessionStatus.RUNNING,
+                    )
+                    self._remember_catalog_revision(
+                        launch.session_id,
+                        revision,
                     )
                 except KeyError:
                     # Fresh sessions become durable at the worker's selected
@@ -1277,10 +1317,7 @@ class PortableSessionSupervisor:
                         continue
                     assert self._catalog is not None
                     try:
-                        granted = self._catalog.request_execution_capacity(
-                            session_id,
-                            owner_id=self._owner_id,
-                        )
+                        granted = self._request_catalog_execution_capacity(session_id)
                     except (KeyError, RuntimeError, ValueError) as error:
                         self._queued.pop(session_id, None)
                         previous = self._snapshots[session_id]
@@ -1462,7 +1499,14 @@ class PortableSessionSupervisor:
                 ):
                     continue
                 previous = self._snapshots.get(record.session_id)
-                if (
+                revision = getattr(record, "revision", 0)
+                if revision > 0:
+                    if revision <= self._catalog_revisions.get(
+                        record.session_id,
+                        0,
+                    ):
+                        continue
+                elif (
                     previous is not None
                     and record.updated_at <= previous.updated_at
                 ):
@@ -1490,9 +1534,44 @@ class PortableSessionSupervisor:
                     updated_at=record.updated_at,
                 )
                 self._launches[record.session_id] = record.launch
+                self._remember_catalog_revision(record.session_id, revision)
                 if synchronized != previous:
                     self._snapshots[record.session_id] = synchronized
                     self._publish(synchronized)
+
+    def _remember_catalog_revision(
+        self,
+        session_id: str,
+        revision: object,
+    ) -> None:
+        if (
+            isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and revision > self._catalog_revisions.get(session_id, 0)
+        ):
+            self._catalog_revisions[session_id] = revision
+
+    def _request_catalog_execution_capacity(
+        self,
+        session_id: str,
+    ) -> bool:
+        assert self._catalog is not None
+        request_with_revision = getattr(
+            self._catalog,
+            "request_execution_capacity_with_revision",
+            None,
+        )
+        if callable(request_with_revision):
+            granted, revision = request_with_revision(
+                session_id,
+                owner_id=self._owner_id,
+            )
+            self._remember_catalog_revision(session_id, revision)
+            return granted
+        return self._catalog.request_execution_capacity(
+            session_id,
+            owner_id=self._owner_id,
+        )
 
     def _write_frame(self, session_id: str, frame: PortableProtocolFrame) -> None:
         process = self._running[session_id].process
@@ -2280,18 +2359,36 @@ class PortableSessionSupervisor:
                 getattr(self._catalog, "release_execution_capacity", None)
                 )
             ):
-                self._catalog.release_execution_capacity(
-                    snapshot.session_id,
-                    owner_id=self._owner_id,
-                    status=snapshot.status,
-                    activity_summary=summary,
+                release_with_revision = getattr(
+                    self._catalog,
+                    "release_execution_capacity_with_revision",
+                    None,
                 )
+                if callable(release_with_revision):
+                    _released, revision = release_with_revision(
+                        snapshot.session_id,
+                        owner_id=self._owner_id,
+                        status=snapshot.status,
+                        activity_summary=summary,
+                    )
+                    self._remember_catalog_revision(
+                        snapshot.session_id,
+                        revision,
+                    )
+                else:
+                    self._catalog.release_execution_capacity(
+                        snapshot.session_id,
+                        owner_id=self._owner_id,
+                        status=snapshot.status,
+                        activity_summary=summary,
+                    )
                 return
-            self._catalog.update_session_status(
+            revision = self._catalog.update_session_status(
                 snapshot.session_id,
                 snapshot.status,
                 activity_summary=summary,
             )
+            self._remember_catalog_revision(snapshot.session_id, revision)
         except (KeyError, RuntimeError) as error:
             current = self._snapshots[snapshot.session_id]
             self._snapshots[snapshot.session_id] = replace(
@@ -2313,12 +2410,26 @@ class PortableSessionSupervisor:
             self._persist_snapshot(snapshot)
             return
         summary = snapshot.activity[-1] if snapshot.activity else ""
-        release(
-            snapshot.session_id,
-            owner_id=self._owner_id,
-            status=snapshot.status,
-            activity_summary=summary,
+        release_with_revision = getattr(
+            self._catalog,
+            "release_execution_capacity_with_revision",
+            None,
         )
+        if callable(release_with_revision):
+            _released, revision = release_with_revision(
+                snapshot.session_id,
+                owner_id=self._owner_id,
+                status=snapshot.status,
+                activity_summary=summary,
+            )
+            self._remember_catalog_revision(snapshot.session_id, revision)
+        else:
+            release(
+                snapshot.session_id,
+                owner_id=self._owner_id,
+                status=snapshot.status,
+                activity_summary=summary,
+            )
 
     def _claim_new_session(
         self,
@@ -2330,7 +2441,7 @@ class PortableSessionSupervisor:
         if not callable(claim):
             return None
         try:
-            claim(launch, owner_id=self._owner_id)
+            record = claim(launch, owner_id=self._owner_id)
         except PortableWorktreeLeaseConflict as error:
             if error.owner_id == self._owner_id:
                 focused = self._snapshots.get(error.session_id)
@@ -2338,6 +2449,10 @@ class PortableSessionSupervisor:
                     return focused
             raise
         self._owned_session_ids.add(launch.session_id)
+        self._remember_catalog_revision(
+            launch.session_id,
+            getattr(record, "revision", 0),
+        )
         self._saved_projects = tuple(self._catalog.list_saved_projects())
         return None
 
@@ -2366,11 +2481,12 @@ class PortableSessionSupervisor:
         if self._catalog is None:
             return
         try:
-            self._catalog.update_session_status(
+            revision = self._catalog.update_session_status(
                 session_id,
                 PortableSessionStatus.FAILED,
                 activity_summary="Worker launch failed",
             )
+            self._remember_catalog_revision(session_id, revision)
         except KeyError:
             return
 
