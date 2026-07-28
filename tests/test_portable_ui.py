@@ -1462,6 +1462,139 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_queued_text_from_previous_tab_cannot_submit_after_focus_switch(
+        self,
+    ) -> None:
+        session_a = PortableSessionSnapshot(
+            session_id="session-alpha",
+            checkout=Path("text-alpha").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.TEXT,
+                request_id="alpha-text",
+                generation=1,
+                prompt="Alpha text",
+            ),
+        )
+        session_b = PortableSessionSnapshot(
+            session_id="session-beta",
+            checkout=Path("text-beta").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.TEXT,
+                request_id="beta-text",
+                generation=1,
+                prompt="Beta text",
+            ),
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (session_a, session_b)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return PortableSessionSnapshot(
+                    session_id=intent.session_id,
+                    checkout=(
+                        session_a.checkout
+                        if intent.session_id == session_a.session_id
+                        else session_b.checkout
+                    ),
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            app._active_session_id = session_a.session_id
+            app._show_session_snapshot(session_a)
+            input_widget = app.query_one("#portable-input", Input)
+            input_widget.value = "queued alpha"
+            await input_widget.action_submit()
+
+            app._active_session_id = session_b.session_id
+            app._show_session_snapshot(session_b)
+            await pilot.pause()
+
+            self.assertEqual(supervisor.intents, [])
+            self.assertTrue(input_widget.display)
+            self.assertEqual(input_widget.placeholder, "Beta text")
+            self.assertIn(
+                "INPUT NOT SENT",
+                str(app.query_one("#portable-status", Static).render()),
+            )
+
+            input_widget.value = "queued beta for old request"
+            await input_widget.action_submit()
+            next_session_b = replace(
+                session_b,
+                input_request=PortableSessionInputRequest(
+                    kind=PortableSessionInputKind.TEXT,
+                    request_id="beta-text-next",
+                    generation=2,
+                    prompt="Next beta text",
+                ),
+            )
+            app._show_session_snapshot(next_session_b)
+            await pilot.pause()
+
+            self.assertEqual(supervisor.intents, [])
+            self.assertTrue(input_widget.display)
+            self.assertEqual(input_widget.placeholder, "Next beta text")
+
+            input_widget.value = "current beta"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            app._active_session_id = session_a.session_id
+            app._show_session_snapshot(session_a)
+            input_widget.value = "current alpha"
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertEqual(
+            supervisor.intents,
+            [
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                    session_id=session_b.session_id,
+                    value="current beta",
+                    request_id="beta-text-next",
+                    request_generation=2,
+                ),
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                    session_id=session_a.session_id,
+                    value="current alpha",
+                    request_id="alpha-text",
+                    request_generation=1,
+                ),
+            ],
+        )
+
     async def test_crashed_waiting_session_clears_input_while_sibling_completes(
         self,
     ) -> None:

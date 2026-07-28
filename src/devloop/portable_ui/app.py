@@ -1617,12 +1617,25 @@ class PortableApplicationShell(App[None]):
             self._session_supervisor is not None
             and self._active_session_id is not None
         ):
+            session_id = getattr(event, "session_id", None)
+            request_id = getattr(event, "request_id", None)
+            request_generation = getattr(event, "request_generation", None)
+            current = self._session_snapshots.get(session_id or "")
+            if (
+                self._active_session_id != session_id
+                or current is None
+                or current.input_request is None
+                or current.input_request.request_id != request_id
+                or current.input_request.generation != request_generation
+            ):
+                self._reject_stale_session_input()
+                return
             event.input.display = False
             self._provide_session_input(
                 event.value,
-                session_id=getattr(event, "session_id", None),
-                request_id=getattr(event, "request_id", None),
-                request_generation=getattr(event, "request_generation", None),
+                session_id=session_id,
+                request_id=request_id,
+                request_generation=request_generation,
             )
             return
         request_id = self._active_request_id
