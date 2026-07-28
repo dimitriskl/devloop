@@ -45,7 +45,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PortableSessionCatalogError,
-                "newer than supported version 2",
+                "newer than supported version 3",
             ):
                 PortableSessionCatalog(database)
 
@@ -77,6 +77,39 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
         self.assertEqual(session.checkout, checkout.resolve())
         self.assertEqual(lease.session_id, launch.session_id)
+
+    def test_version_two_catalog_adds_default_concurrency_without_losing_sessions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            launch = PortableSessionLaunch(
+                session_id="session-before-capacity",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(checkout)),
+            )
+            catalog.create_session(launch)
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("DROP TABLE execution_claims")
+                connection.execute("DROP TABLE execution_requests")
+                connection.execute("DROP TABLE catalog_settings")
+                connection.execute("PRAGMA user_version = 2")
+                connection.commit()
+
+            migrated = PortableSessionCatalog(database)
+            limit = migrated.get_concurrency_limit()
+            session = migrated.get_session(launch.session_id)
+
+        self.assertEqual(limit, 2)
+        self.assertEqual(
+            session.checkout,
+            checkout.resolve(),
+        )
 
     def test_failed_catalog_write_preserves_previous_readable_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

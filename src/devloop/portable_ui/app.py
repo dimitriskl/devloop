@@ -81,6 +81,8 @@ NEW_SESSION_SAVED_PREFIX = "__new_session_saved_project__:"
 NEW_SESSION_REPOSITORY_PREFIX = "__new_session_repository__:"
 SESSION_INPUT_OPTION_ID_PREFIX = "__session_input_option__:"
 SESSION_INPUT_ERROR_MAX_LENGTH = 160
+SESSION_CONCURRENCY_LIMIT_ID = "__session_concurrency_limit__"
+SESSION_OPTIONS_BACK_ID = "__session_options_back__"
 STALE_SESSION_INPUT_MESSAGE = (
     "INPUT NOT SENT: That selection no longer belongs to the active input request."
 )
@@ -456,6 +458,8 @@ class PortableApplicationShell(App[None]):
         self._new_session_view: str | None = None
         self._new_session_repository: Path | None = None
         self._new_session_worktree: Path | None = None
+        self._session_options_active = False
+        self._concurrency_limit_input_active = False
         self._active_request_id: int | None = None
         self._cancel_key: str | None = None
         self.operation_result: int | None = None
@@ -707,6 +711,8 @@ class PortableApplicationShell(App[None]):
         self._new_session_view = None
         self._new_session_repository = None
         self._new_session_worktree = None
+        self._session_options_active = False
+        self._concurrency_limit_input_active = False
         input_widget = self.query_one("#portable-input", PortableRequestInput)
         input_widget.display = False
         input_widget.bind_request(
@@ -723,7 +729,79 @@ class PortableApplicationShell(App[None]):
         )
         self.query_one("#portable-status", Static).update("READY")
         self.query_one("#portable-actions", Static).update(
-            "+ New Session | Enter Select | F2 Primary | Esc Stay"
+            "+ New Session | Enter Select | F2 Primary | F9 Options | Esc Stay"
+        )
+
+    def _show_session_options(self) -> None:
+        assert self._session_supervisor is not None
+        self._active_session_id = None
+        self._new_session_flow_active = False
+        self._session_options_active = True
+        self._concurrency_limit_input_active = False
+        input_widget = self.query_one("#portable-input", PortableRequestInput)
+        input_widget.display = False
+        input_widget.bind_request(
+            session_id=None,
+            request_id=None,
+            request_generation=None,
+        )
+        get_limit = getattr(self._session_supervisor, "get_concurrency_limit", None)
+        limit = get_limit() if callable(get_limit) else 2
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > Options"
+        )
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
+        menu.clear_options()
+        menu.add_option(
+            Option(
+                f"Concurrency limit: {limit}",
+                id=SESSION_CONCURRENCY_LIMIT_ID,
+            )
+        )
+        menu.add_option(Option("Back to Sessions", id=SESSION_OPTIONS_BACK_ID))
+        menu.highlighted = 0
+        menu.focus()
+        self.query_one("#portable-detail", Static).update(
+            "Portable Session Options\n\n"
+            f"Active execution limit: {limit}\n\n"
+            "Paused and waiting-for-input sessions release capacity. "
+            "Reducing the limit does not stop running work."
+        )
+        self.query_one("#portable-status", Static).update("READY")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Select | Esc Back to Sessions"
+        )
+
+    def _show_concurrency_limit_input(self) -> None:
+        self._session_options_active = True
+        self._concurrency_limit_input_active = True
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > Options > Concurrency Limit"
+        )
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
+        menu.clear_options()
+        menu.add_option(Option("Back to Options", id=SESSION_OPTIONS_BACK_ID))
+        menu.highlighted = 0
+        input_widget = self.query_one("#portable-input", PortableRequestInput)
+        input_widget.bind_request(
+            session_id=None,
+            request_id=None,
+            request_generation=None,
+        )
+        input_widget.placeholder = "Concurrency limit (1-64)"
+        input_widget.value = ""
+        input_widget.display = True
+        input_widget.focus()
+        self.query_one("#portable-detail", Static).update(
+            "Set Portable Session Concurrency Limit\n\n"
+            "Enter a whole number from 1 through 64. The update applies "
+            "atomically across all Dev Loop applications and Plain Mode processes."
+        )
+        self.query_one("#portable-status", Static).update("INPUT REQUIRED")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Save | Esc Back to Options"
         )
 
     def _show_new_session_menu(self) -> None:
@@ -1565,6 +1643,13 @@ class PortableApplicationShell(App[None]):
                 self._show_sessions_tab()
             elif option_id == NEW_SESSION_BACK_ID:
                 self._show_new_session_menu()
+            elif option_id == SESSION_CONCURRENCY_LIMIT_ID:
+                self._show_concurrency_limit_input()
+            elif option_id == SESSION_OPTIONS_BACK_ID:
+                if self._concurrency_limit_input_active:
+                    self._show_session_options()
+                else:
+                    self._show_sessions_tab()
             elif (
                 isinstance(option_id, str)
                 and option_id.startswith(NEW_SESSION_SAVED_PREFIX)
@@ -1609,6 +1694,43 @@ class PortableApplicationShell(App[None]):
 
     @on(Input.Submitted, "#portable-input")
     def submit_input(self, event: Input.Submitted) -> None:
+        if (
+            self._session_supervisor is not None
+            and self._concurrency_limit_input_active
+        ):
+            value = event.value.strip()
+            try:
+                limit = int(value)
+                if str(limit) != value:
+                    raise ValueError
+                set_limit = getattr(
+                    self._session_supervisor,
+                    "set_concurrency_limit",
+                    None,
+                )
+                if not callable(set_limit):
+                    raise RuntimeError(
+                        "Portable session concurrency settings are unavailable."
+                    )
+                set_limit(limit)
+            except (RuntimeError, ValueError) as error:
+                event.input.display = True
+                event.input.focus()
+                message = (
+                    str(error)
+                    if str(error)
+                    else "Concurrency limit must be a whole number from 1 through 64."
+                )
+                self.query_one("#portable-status", Static).update(
+                    compact_terminal_text(message, max_length=160)
+                )
+                return
+            event.input.display = False
+            self._show_session_options()
+            self.query_one("#portable-status", Static).update(
+                f"UPDATED · CONCURRENCY LIMIT {limit}"
+            )
+            return
         if self._session_supervisor is not None and self._new_session_input is not None:
             event.input.display = False
             self._submit_new_session_text(event.value)
@@ -1646,6 +1768,12 @@ class PortableApplicationShell(App[None]):
 
     def action_back(self) -> None:
         if self._session_supervisor is not None:
+            if self._concurrency_limit_input_active:
+                self._show_session_options()
+                return
+            if self._session_options_active:
+                self._show_sessions_tab()
+                return
             if self._new_session_flow_active:
                 if self._new_session_view == "root":
                     self._show_sessions_tab()
@@ -1857,6 +1985,9 @@ class PortableApplicationShell(App[None]):
 
     def action_actions(self) -> None:
         if self._respond_to_shortcut("f9"):
+            return
+        if self._session_supervisor is not None:
+            self._show_session_options()
             return
         menu = self.query_one("#portable-navigation", OptionList)
         for index in range(menu.option_count):

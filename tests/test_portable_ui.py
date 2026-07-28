@@ -45,6 +45,80 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sessions_options_updates_machine_concurrency_limit(self) -> None:
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.limit = 2
+                self.updated: list[int] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return ()
+
+            def get_concurrency_limit(self) -> int:
+                return self.limit
+
+            def set_concurrency_limit(self, limit: int) -> None:
+                if limit < 1 or limit > 64:
+                    raise ValueError(
+                        "Portable session concurrency limit must be an integer "
+                        "from 1 through 64."
+                    )
+                self.limit = limit
+                self.updated.append(limit)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                raise AssertionError(f"Unexpected intent: {intent}")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="options-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(Path.cwd())),
+            ),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("f9")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            self.assertEqual(
+                str(menu.get_option_at_index(0).prompt),
+                "Concurrency limit: 2",
+            )
+
+            await pilot.press("enter")
+            await pilot.pause()
+            concurrency_input = app.query_one("#portable-input", Input)
+            self.assertTrue(concurrency_input.display)
+            await pilot.press("3", "enter")
+            await pilot.pause()
+
+            self.assertEqual(supervisor.updated, [3])
+            self.assertEqual(
+                str(menu.get_option_at_index(0).prompt),
+                "Concurrency limit: 3",
+            )
+            self.assertIn(
+                "UPDATED",
+                str(app.query_one("#portable-status", Static).render()),
+            )
+
     async def test_launch_retargeting_preserves_supplied_work_and_isolates_new_work(
         self,
     ) -> None:

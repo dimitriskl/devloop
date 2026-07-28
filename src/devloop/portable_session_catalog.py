@@ -24,8 +24,12 @@ from .portable_sessions import (
 from .portable_workflow import ExecutionBudget, FastPreference, StepExecutionSettings
 from .redaction import redact_persisted_evidence
 
-CATALOG_SCHEMA_VERSION = 2
+CATALOG_SCHEMA_VERSION = 3
 CATALOG_FILENAME = "portable-sessions.sqlite3"
+DEFAULT_PORTABLE_SESSION_CONCURRENCY_LIMIT = 2
+MINIMUM_PORTABLE_SESSION_CONCURRENCY_LIMIT = 1
+MAXIMUM_PORTABLE_SESSION_CONCURRENCY_LIMIT = 64
+_CONCURRENCY_LIMIT_SETTING_KEY = "session_concurrency_limit"
 PORTABLE_SESSION_CATALOG_ENV = "DEVLOOP_PORTABLE_SESSION_CATALOG"
 PORTABLE_SESSION_ID_ENV = "DEVLOOP_PORTABLE_SESSION_ID"
 PORTABLE_SESSION_OWNER_ID_ENV = "DEVLOOP_PORTABLE_SESSION_OWNER_ID"
@@ -775,6 +779,21 @@ class PortableSessionCatalog:
         _validate_owner_id(owner_id)
         try:
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    DELETE FROM execution_claims
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM execution_requests
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                )
                 cursor = connection.execute(
                     """
                     DELETE FROM worktree_leases
@@ -816,6 +835,14 @@ class PortableSessionCatalog:
                     WHERE session_id = ? AND owner_id = ?
                     """,
                     (session_id, owner_id),
+                )
+                connection.execute(
+                    "DELETE FROM execution_claims WHERE session_id = ?",
+                    (session_id,),
+                )
+                connection.execute(
+                    "DELETE FROM execution_requests WHERE session_id = ?",
+                    (session_id,),
                 )
                 connection.execute(
                     "DELETE FROM sessions WHERE session_id = ?",
@@ -1190,6 +1217,298 @@ class PortableSessionCatalog:
             ),
         )
 
+    def get_concurrency_limit(self) -> int:
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT integer_value
+                    FROM catalog_settings
+                    WHERE setting_key = ?
+                    """,
+                    (_CONCURRENCY_LIMIT_SETTING_KEY,),
+                ).fetchone()
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog read failed: {error}"
+            ) from error
+        if row is None:
+            raise PortableSessionCatalogError(
+                "Portable Session Catalog concurrency setting is missing."
+            )
+        return _validate_concurrency_limit(row["integer_value"])
+
+    def set_concurrency_limit(self, limit: int) -> None:
+        validated = _validate_concurrency_limit(limit)
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE catalog_settings
+                    SET integer_value = ?
+                    WHERE setting_key = ?
+                    """,
+                    (validated, _CONCURRENCY_LIMIT_SETTING_KEY),
+                )
+                if cursor.rowcount != 1:
+                    raise PortableSessionCatalogError(
+                        "Portable Session Catalog concurrency setting is missing."
+                    )
+        except PortableSessionCatalogError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+
+    def request_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> bool:
+        """Atomically acquire execution capacity or retain the session's fair queue place."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        active_process_id = os.getpid() if process_id is None else process_id
+        _validate_process_id(active_process_id)
+        timestamp = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                session = connection.execute(
+                    "SELECT status FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    raise KeyError(f"Unknown portable session: {session_id}")
+                status = PortableSessionStatus(session["status"])
+                if status.terminal or status is PortableSessionStatus.UNAVAILABLE:
+                    raise ValueError(
+                        "Portable session cannot request execution capacity from "
+                        f"{status.value}."
+                    )
+                lease = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM worktree_leases
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if lease is None or lease["owner_id"] != owner_id:
+                    raise PortableSessionCatalogError(
+                        "Portable execution capacity request does not own the "
+                        "session worktree lease."
+                    )
+                claim = connection.execute(
+                    "SELECT owner_id FROM execution_claims WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if claim is not None:
+                    if claim["owner_id"] != owner_id:
+                        raise PortableSessionCatalogError(
+                            "Portable execution capacity is owned by another "
+                            "application."
+                        )
+                    connection.execute(
+                        """
+                        UPDATE sessions
+                        SET status = ?, updated_at = ?
+                        WHERE session_id = ?
+                        """,
+                        (
+                            PortableSessionStatus.RUNNING.value,
+                            timestamp,
+                            session_id,
+                        ),
+                    )
+                    return True
+                request = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM execution_requests
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if request is not None and request["owner_id"] != owner_id:
+                    raise PortableSessionCatalogError(
+                        "Portable execution request is owned by another application."
+                    )
+                if request is None:
+                    next_order = connection.execute(
+                        """
+                        SELECT COALESCE(MAX(queue_order), 0) + 1
+                        FROM execution_requests
+                        """
+                    ).fetchone()[0]
+                    connection.execute(
+                        """
+                        INSERT INTO execution_requests (
+                            session_id, owner_id, process_id, queue_order, requested_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            owner_id,
+                            active_process_id,
+                            next_order,
+                            timestamp,
+                        ),
+                    )
+                limit = connection.execute(
+                    """
+                    SELECT integer_value
+                    FROM catalog_settings
+                    WHERE setting_key = ?
+                    """,
+                    (_CONCURRENCY_LIMIT_SETTING_KEY,),
+                ).fetchone()
+                if limit is None:
+                    raise PortableSessionCatalogError(
+                        "Portable Session Catalog concurrency setting is missing."
+                    )
+                active_count = connection.execute(
+                    "SELECT COUNT(*) FROM execution_claims"
+                ).fetchone()[0]
+                oldest_request = connection.execute(
+                    """
+                    SELECT session_id
+                    FROM execution_requests
+                    ORDER BY queue_order, session_id
+                    LIMIT 1
+                    """
+                ).fetchone()
+                granted = (
+                    active_count < _validate_concurrency_limit(limit["integer_value"])
+                    and oldest_request is not None
+                    and oldest_request["session_id"] == session_id
+                )
+                if granted:
+                    connection.execute(
+                        "DELETE FROM execution_requests WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO execution_claims (
+                            session_id, owner_id, process_id, acquired_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (session_id, owner_id, active_process_id, timestamp),
+                    )
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET status = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        (
+                            PortableSessionStatus.RUNNING.value
+                            if granted
+                            else PortableSessionStatus.QUEUED.value
+                        ),
+                        timestamp,
+                        session_id,
+                    ),
+                )
+                return granted
+        except (KeyError, PortableSessionCatalogError, ValueError):
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+
+    def release_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        status: PortableSessionStatus,
+        activity_summary: str = "",
+    ) -> bool:
+        """Atomically release a slot and persist the session's inactive status."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        if not isinstance(status, PortableSessionStatus):
+            raise ValueError("Portable session status must be a known lifecycle value.")
+        if status in {
+            PortableSessionStatus.RUNNING,
+            PortableSessionStatus.PAUSING,
+        }:
+            raise ValueError(
+                "Releasing execution capacity requires an inactive session status."
+            )
+        timestamp = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                session = connection.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    raise KeyError(f"Unknown portable session: {session_id}")
+                foreign_claim = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM execution_claims
+                    WHERE session_id = ? AND owner_id <> ?
+                    """,
+                    (session_id, owner_id),
+                ).fetchone()
+                foreign_request = connection.execute(
+                    """
+                    SELECT owner_id
+                    FROM execution_requests
+                    WHERE session_id = ? AND owner_id <> ?
+                    """,
+                    (session_id, owner_id),
+                ).fetchone()
+                if foreign_claim is not None or foreign_request is not None:
+                    raise PortableSessionCatalogError(
+                        "Portable execution capacity is owned by another application."
+                    )
+                cursor = connection.execute(
+                    """
+                    DELETE FROM execution_claims
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM execution_requests
+                    WHERE session_id = ? AND owner_id = ?
+                    """,
+                    (session_id, owner_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET status = ?, activity_summary = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        status.value,
+                        redact_persisted_evidence(activity_summary)[:500],
+                        timestamp,
+                        session_id,
+                    ),
+                )
+                return cursor.rowcount == 1
+        except (KeyError, PortableSessionCatalogError):
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+
     def list_sessions(self) -> tuple[PortableCatalogSession, ...]:
         try:
             with self._connection() as connection:
@@ -1343,10 +1662,46 @@ class PortableSessionCatalog:
                                 CHECK (typeof(heartbeat_at) IN ('integer', 'real')
                                     AND heartbeat_at >= 0)
                         );
-                        PRAGMA user_version = 2;
+                        CREATE TABLE IF NOT EXISTS catalog_settings (
+                            setting_key TEXT PRIMARY KEY
+                                CHECK (length(setting_key) BETWEEN 1 AND 128),
+                            integer_value INTEGER NOT NULL
+                                CHECK (typeof(integer_value) = 'integer')
+                        );
+                        INSERT OR IGNORE INTO catalog_settings (
+                            setting_key, integer_value
+                        ) VALUES ('session_concurrency_limit', 2);
+                        CREATE TABLE IF NOT EXISTS execution_requests (
+                            session_id TEXT PRIMARY KEY
+                                REFERENCES sessions(session_id),
+                            owner_id TEXT NOT NULL
+                                CHECK (length(owner_id) BETWEEN 1 AND 128),
+                            process_id INTEGER NOT NULL
+                                CHECK (typeof(process_id) = 'integer'
+                                    AND process_id > 0),
+                            queue_order INTEGER NOT NULL UNIQUE
+                                CHECK (typeof(queue_order) = 'integer'
+                                    AND queue_order > 0),
+                            requested_at REAL NOT NULL
+                                CHECK (typeof(requested_at) IN ('integer', 'real')
+                                    AND requested_at >= 0)
+                        );
+                        CREATE TABLE IF NOT EXISTS execution_claims (
+                            session_id TEXT PRIMARY KEY
+                                REFERENCES sessions(session_id),
+                            owner_id TEXT NOT NULL
+                                CHECK (length(owner_id) BETWEEN 1 AND 128),
+                            process_id INTEGER NOT NULL
+                                CHECK (typeof(process_id) = 'integer'
+                                    AND process_id > 0),
+                            acquired_at REAL NOT NULL
+                                CHECK (typeof(acquired_at) IN ('integer', 'real')
+                                    AND acquired_at >= 0)
+                        );
+                        PRAGMA user_version = 3;
                         """
                     )
-                elif version == 1:
+                if version == 1:
                     connection.executescript(
                         """
                         BEGIN IMMEDIATE;
@@ -1368,6 +1723,50 @@ class PortableSessionCatalog:
                                     AND heartbeat_at >= 0)
                         );
                         PRAGMA user_version = 2;
+                        """
+                    )
+                    version = 2
+                if version == 2:
+                    connection.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE IF NOT EXISTS catalog_settings (
+                            setting_key TEXT PRIMARY KEY
+                                CHECK (length(setting_key) BETWEEN 1 AND 128),
+                            integer_value INTEGER NOT NULL
+                                CHECK (typeof(integer_value) = 'integer')
+                        );
+                        INSERT OR IGNORE INTO catalog_settings (
+                            setting_key, integer_value
+                        ) VALUES ('session_concurrency_limit', 2);
+                        CREATE TABLE IF NOT EXISTS execution_requests (
+                            session_id TEXT PRIMARY KEY
+                                REFERENCES sessions(session_id),
+                            owner_id TEXT NOT NULL
+                                CHECK (length(owner_id) BETWEEN 1 AND 128),
+                            process_id INTEGER NOT NULL
+                                CHECK (typeof(process_id) = 'integer'
+                                    AND process_id > 0),
+                            queue_order INTEGER NOT NULL UNIQUE
+                                CHECK (typeof(queue_order) = 'integer'
+                                    AND queue_order > 0),
+                            requested_at REAL NOT NULL
+                                CHECK (typeof(requested_at) IN ('integer', 'real')
+                                    AND requested_at >= 0)
+                        );
+                        CREATE TABLE IF NOT EXISTS execution_claims (
+                            session_id TEXT PRIMARY KEY
+                                REFERENCES sessions(session_id),
+                            owner_id TEXT NOT NULL
+                                CHECK (length(owner_id) BETWEEN 1 AND 128),
+                            process_id INTEGER NOT NULL
+                                CHECK (typeof(process_id) = 'integer'
+                                    AND process_id > 0),
+                            acquired_at REAL NOT NULL
+                                CHECK (typeof(acquired_at) IN ('integer', 'real')
+                                    AND acquired_at >= 0)
+                        );
+                        PRAGMA user_version = 3;
                         """
                     )
                 self._validate_schema(connection)
@@ -1405,7 +1804,14 @@ class PortableSessionCatalog:
             raise PortableSessionCatalogError(
                 "Portable Session Catalog foreign key check failed."
             )
-        expected_tables = {"saved_projects", "sessions", "worktree_leases"}
+        expected_tables = {
+            "saved_projects",
+            "sessions",
+            "worktree_leases",
+            "catalog_settings",
+            "execution_requests",
+            "execution_claims",
+        }
         tables = {
             row[0]
             for row in connection.execute(
@@ -1444,6 +1850,23 @@ class PortableSessionCatalog:
                 ("process_id", "INTEGER", 1, 0),
                 ("acquired_at", "REAL", 1, 0),
                 ("heartbeat_at", "REAL", 1, 0),
+            ),
+            "catalog_settings": (
+                ("setting_key", "TEXT", 0, 1),
+                ("integer_value", "INTEGER", 1, 0),
+            ),
+            "execution_requests": (
+                ("session_id", "TEXT", 0, 1),
+                ("owner_id", "TEXT", 1, 0),
+                ("process_id", "INTEGER", 1, 0),
+                ("queue_order", "INTEGER", 1, 0),
+                ("requested_at", "REAL", 1, 0),
+            ),
+            "execution_claims": (
+                ("session_id", "TEXT", 0, 1),
+                ("owner_id", "TEXT", 1, 0),
+                ("process_id", "INTEGER", 1, 0),
+                ("acquired_at", "REAL", 1, 0),
             ),
         }
         for table, expected in expected_columns.items():
@@ -1494,6 +1917,23 @@ class PortableSessionCatalog:
             raise PortableSessionCatalogError(
                 "Portable Session Catalog schema is incompatible."
             )
+        for table in ("execution_requests", "execution_claims"):
+            capacity_foreign_keys = tuple(
+                (
+                    row["table"],
+                    row["from"],
+                    row["to"],
+                    row["on_update"],
+                    row["on_delete"],
+                )
+                for row in connection.execute(f"PRAGMA foreign_key_list({table})")
+            )
+            if capacity_foreign_keys != (
+                ("sessions", "session_id", "session_id", "NO ACTION", "NO ACTION"),
+            ):
+                raise PortableSessionCatalogError(
+                    "Portable Session Catalog schema is incompatible."
+                )
         required_constraints = {
             "saved_projects": (
                 "check(length(project_id)between1and128)",
@@ -1523,6 +1963,22 @@ class PortableSessionCatalog:
                 "check(typeof(process_id)='integer'andprocess_id>0)",
                 "check(typeof(acquired_at)in('integer','real')andacquired_at>=0)",
                 "check(typeof(heartbeat_at)in('integer','real')andheartbeat_at>=0)",
+            ),
+            "catalog_settings": (
+                "check(length(setting_key)between1and128)",
+                "check(typeof(integer_value)='integer')",
+            ),
+            "execution_requests": (
+                "check(length(owner_id)between1and128)",
+                "check(typeof(process_id)='integer'andprocess_id>0)",
+                "queue_orderintegernotnullunique",
+                "check(typeof(queue_order)='integer'andqueue_order>0)",
+                "check(typeof(requested_at)in('integer','real')andrequested_at>=0)",
+            ),
+            "execution_claims": (
+                "check(length(owner_id)between1and128)",
+                "check(typeof(process_id)='integer'andprocess_id>0)",
+                "check(typeof(acquired_at)in('integer','real')andacquired_at>=0)",
             ),
         }
         for table, fragments in required_constraints.items():
@@ -1557,6 +2013,35 @@ class PortableSessionCatalog:
                 _session_from_row(row)
             for row in connection.execute("SELECT * FROM worktree_leases"):
                 _lease_from_row(row)
+            concurrency_row = connection.execute(
+                """
+                SELECT integer_value
+                FROM catalog_settings
+                WHERE setting_key = ?
+                """,
+                (_CONCURRENCY_LIMIT_SETTING_KEY,),
+            ).fetchone()
+            if concurrency_row is None:
+                raise PortableSessionCatalogError(
+                    "Portable Session Catalog concurrency setting is missing."
+                )
+            _validate_concurrency_limit(concurrency_row["integer_value"])
+            for row in connection.execute("SELECT * FROM execution_requests"):
+                _validate_session_id(row["session_id"])
+                _validate_owner_id(row["owner_id"])
+                _validate_process_id(row["process_id"])
+                if (
+                    isinstance(row["queue_order"], bool)
+                    or not isinstance(row["queue_order"], int)
+                    or row["queue_order"] <= 0
+                ):
+                    raise ValueError("Portable execution queue order is invalid.")
+                _validate_timestamp(row["requested_at"])
+            for row in connection.execute("SELECT * FROM execution_claims"):
+                _validate_session_id(row["session_id"])
+                _validate_owner_id(row["owner_id"])
+                _validate_process_id(row["process_id"])
+                _validate_timestamp(row["acquired_at"])
         except PortableSessionCatalogError:
             raise
         except (sqlite3.DatabaseError, TypeError, ValueError) as error:
@@ -1742,6 +2227,22 @@ def _validate_process_id(process_id: int) -> None:
         or process_id <= 0
     ):
         raise ValueError("Portable lease process identity must be a positive integer.")
+
+
+def _validate_concurrency_limit(limit: int) -> int:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not (
+            MINIMUM_PORTABLE_SESSION_CONCURRENCY_LIMIT
+            <= limit
+            <= MAXIMUM_PORTABLE_SESSION_CONCURRENCY_LIMIT
+        )
+    ):
+        raise ValueError(
+            "Portable session concurrency limit must be an integer from 1 through 64."
+        )
+    return limit
 
 
 def _validate_project_id(project_id: str) -> None:

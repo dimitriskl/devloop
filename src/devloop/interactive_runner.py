@@ -32,7 +32,11 @@ from .portable_session_catalog import (
     active_portable_catalog_session,
     bind_active_catalog_session_checkout,
 )
-from .portable_sessions import PortableSessionLaunch, PortableWorkflowOperation
+from .portable_sessions import (
+    PortableSessionLaunch,
+    PortableWorkflowOperation,
+    run_portable_plain_session,
+)
 from .portable_workflow import (
     ANALYSIS_STEP_ID,
     ExecutionBudget,
@@ -224,7 +228,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return operation()
         with portable_plain_mode_session():
-            return operation()
+            if os.environ.get("DEVLOOP_PORTABLE_SESSION_ID"):
+                return operation()
+            return run_portable_plain_session(
+                PortableSessionLaunch(
+                    session_id=str(uuid.uuid4()),
+                    checkout=Path.cwd(),
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=raw_arguments,
+                ),
+                operation,
+            )
     except KeyboardInterrupt:
         # Top-level backstop: covers the chat loop, the /options menus, and the
         # handoff prompts so a mid-run Ctrl+C exits cleanly.

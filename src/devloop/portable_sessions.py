@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Condition, RLock, Thread
+from threading import Condition, Event as ThreadEvent, RLock, Thread
 from typing import IO, Protocol
 
 from .portable_protocol import (
@@ -175,6 +175,7 @@ class PortableWorkerProcess(Protocol):
 WorkerLauncher = Callable[[PortableSessionLaunch], PortableWorkerProcess]
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PROGRESS_REFRESH_INTERVAL_SECONDS = 1.0
+_CAPACITY_REFRESH_INTERVAL_SECONDS = 0.05
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -240,6 +241,27 @@ class PortableSessionCatalogController(Protocol):
         owner_id: str,
     ) -> None: ...
 
+    def get_concurrency_limit(self) -> int: ...
+
+    def set_concurrency_limit(self, limit: int) -> None: ...
+
+    def request_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> bool: ...
+
+    def release_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        status: PortableSessionStatus,
+        activity_summary: str = "",
+    ) -> bool: ...
+
 
 @dataclass
 class _RunningSession:
@@ -247,6 +269,21 @@ class _RunningSession:
     generation: int
     next_supervisor_sequence: int = 2
     next_worker_sequence: int = 1
+
+
+@dataclass(frozen=True)
+class _QueuedSession:
+    launch: PortableSessionLaunch
+    command_kind: SupervisorMessageKind
+    command_payload: dict[str, object]
+    rollback_new_session: bool = False
+
+
+@dataclass(frozen=True)
+class _QueuedInput:
+    value: str
+    request_id: str
+    request_generation: int
 
 
 class PortableSessionSupervisor:
@@ -276,12 +313,16 @@ class PortableSessionSupervisor:
         self._launches: dict[str, PortableSessionLaunch] = {}
         self._candidate_launches: dict[str, PortableSessionLaunch] = {}
         self._running: dict[str, _RunningSession] = {}
+        self._queued: dict[str, _QueuedSession | _QueuedInput] = {}
+        self._owned_session_ids: set[str] = set()
         self._next_worker_generation = 1
         self._last_progress_refresh: dict[str, float] = {}
         self._live_stage_session_ids: set[str] = set()
         self._threads: list[Thread] = []
         self._events: Queue[PortableSessionEvent] = Queue()
         self._condition = Condition(RLock())
+        self._scheduler_stop = ThreadEvent()
+        self._scheduler_thread: Thread | None = None
         self._resume_candidates_loader = resume_candidates_loader
         self._saved_projects = (
             tuple(catalog.list_saved_projects()) if catalog is not None else ()
@@ -388,6 +429,15 @@ class PortableSessionSupervisor:
             self._launches[candidate.candidate_id] = launch
             self._candidate_launches[candidate.candidate_id] = launch
             known_prd_paths.add(candidate_path)
+        if self._catalog is not None and callable(
+            getattr(self._catalog, "request_execution_capacity", None)
+        ):
+            self._scheduler_thread = Thread(
+                target=self._run_capacity_scheduler,
+                daemon=True,
+                name=f"portable-session-capacity-{self._owner_id}",
+            )
+            self._scheduler_thread.start()
 
     def start_session(
         self,
@@ -410,7 +460,7 @@ class PortableSessionSupervisor:
             focused = self._claim_new_session(normalized_launch)
             if focused is not None:
                 return focused
-            return self._launch_session(
+            return self._schedule_session(
                 normalized_launch,
                 SupervisorMessageKind.START,
                 {},
@@ -430,7 +480,7 @@ class PortableSessionSupervisor:
                 if focused is not None:
                     return focused
                 del self._candidate_launches[session_id]
-                return self._launch_session(
+                return self._schedule_session(
                     launch,
                     SupervisorMessageKind.START,
                     {},
@@ -453,11 +503,72 @@ class PortableSessionSupervisor:
                 if record.planning_thread_id is None:
                     command_kind = SupervisorMessageKind.START
                 self._acquire_existing_session_lease(session_id)
-            return self._launch_session(
+                if record.status.terminal:
+                    self._catalog.update_session_status(
+                        session_id,
+                        PortableSessionStatus.READY,
+                        activity_summary="Explicit resume requested",
+                    )
+            return self._schedule_session(
                 launch,
                 command_kind,
                 payload,
             )
+
+    def _schedule_session(
+        self,
+        launch: PortableSessionLaunch,
+        command_kind: SupervisorMessageKind,
+        command_payload: dict[str, object],
+        *,
+        rollback_new_session: bool = False,
+    ) -> PortableSessionSnapshot:
+        request_capacity = (
+            getattr(self._catalog, "request_execution_capacity", None)
+            if self._catalog is not None
+            else None
+        )
+        if not callable(request_capacity):
+            return self._launch_session(
+                launch,
+                command_kind,
+                command_payload,
+                rollback_new_session=rollback_new_session,
+            )
+        if request_capacity(launch.session_id, owner_id=self._owner_id):
+            return self._launch_session(
+                launch,
+                command_kind,
+                command_payload,
+                rollback_new_session=rollback_new_session,
+            )
+        previous = self._snapshots.get(
+            launch.session_id,
+            PortableSessionSnapshot(
+                session_id=launch.session_id,
+                checkout=launch.checkout,
+                status=PortableSessionStatus.READY,
+            ),
+        )
+        queued = replace(
+            previous,
+            checkout=launch.checkout,
+            status=PortableSessionStatus.QUEUED,
+            result=None,
+            input_request=None,
+            updated_at=time.time(),
+        )
+        self._snapshots[launch.session_id] = queued
+        self._launches[launch.session_id] = launch
+        self._queued[launch.session_id] = _QueuedSession(
+            launch=launch,
+            command_kind=command_kind,
+            command_payload=dict(command_payload),
+            rollback_new_session=rollback_new_session,
+        )
+        self._publish(queued)
+        self._condition.notify_all()
+        return queued
 
     def _launch_session(
         self,
@@ -613,35 +724,78 @@ class PortableSessionSupervisor:
                     "Portable session input is no longer the current input "
                     f"request: {session_id}"
                 )
-            frame = supervisor_frame(
+            request_capacity = (
+                getattr(self._catalog, "request_execution_capacity", None)
+                if self._catalog is not None
+                else None
+            )
+            if callable(request_capacity) and not request_capacity(
                 session_id,
-                running.next_supervisor_sequence,
-                SupervisorMessageKind.USER_INPUT,
-                {
-                    "value": value,
-                    "request_id": request.request_id,
-                    "request_generation": request.generation,
-                },
-            )
-            try:
-                self._write_frame(session_id, frame)
-            except (OSError, ValueError) as error:
-                message = (
-                    "Portable session worker input channel closed before input "
-                    f"could be sent: {session_id}."
+                owner_id=self._owner_id,
+            ):
+                self._queued[session_id] = _QueuedInput(
+                    value=value,
+                    request_id=request.request_id,
+                    request_generation=request.generation,
                 )
-                self._fail_session(session_id, message, running)
-                raise ValueError(message) from error
-            running.next_supervisor_sequence += 1
-            updated = replace(
-                snapshot,
-                status=PortableSessionStatus.RUNNING,
-                input_request=None,
-                updated_at=time.time(),
+                queued = replace(
+                    snapshot,
+                    status=PortableSessionStatus.QUEUED,
+                    input_request=None,
+                    updated_at=time.time(),
+                )
+                self._snapshots[session_id] = queued
+                self._publish(queued)
+                self._condition.notify_all()
+                return queued
+            return self._send_worker_input(
+                session_id,
+                value,
+                request_id=request.request_id,
+                request_generation=request.generation,
+                running=running,
             )
-            self._snapshots[session_id] = updated
-            self._publish(updated)
-            return updated
+
+    def _send_worker_input(
+        self,
+        session_id: str,
+        value: str,
+        *,
+        request_id: str,
+        request_generation: int,
+        running: _RunningSession,
+    ) -> PortableSessionSnapshot:
+        snapshot = self.snapshot(session_id)
+        frame = supervisor_frame(
+            session_id,
+            running.next_supervisor_sequence,
+            SupervisorMessageKind.USER_INPUT,
+            {
+                "value": value,
+                "request_id": request_id,
+                "request_generation": request_generation,
+            },
+        )
+        try:
+            self._write_frame(session_id, frame)
+        except (OSError, ValueError) as error:
+            message = (
+                "Portable session worker input channel closed before input "
+                f"could be sent: {session_id}."
+            )
+            self._fail_session(session_id, message, running)
+            raise ValueError(message) from error
+        running.next_supervisor_sequence += 1
+        updated = replace(
+            snapshot,
+            status=PortableSessionStatus.RUNNING,
+            input_request=None,
+            updated_at=time.time(),
+        )
+        self._snapshots[session_id] = updated
+        self._persist_snapshot(updated)
+        self._publish(updated)
+        return updated
 
     def snapshot(self, session_id: str) -> PortableSessionSnapshot:
         with self._condition:
@@ -656,6 +810,18 @@ class PortableSessionSupervisor:
 
     def list_saved_projects(self) -> tuple[PortableSavedProjectRecord, ...]:
         return self._saved_projects
+
+    def get_concurrency_limit(self) -> int:
+        if self._catalog is None:
+            return 2
+        return self._catalog.get_concurrency_limit()
+
+    def set_concurrency_limit(self, limit: int) -> None:
+        if self._catalog is None:
+            raise RuntimeError(
+                "Portable session concurrency requires a machine catalog."
+            )
+        self._catalog.set_concurrency_limit(limit)
 
     def try_next_event(self) -> PortableSessionEvent | None:
         try:
@@ -679,13 +845,171 @@ class PortableSessionSupervisor:
             return self.snapshot(session_id)
 
     def shutdown(self) -> None:
+        self._scheduler_stop.set()
+        scheduler_thread = self._scheduler_thread
+        if scheduler_thread is not None:
+            scheduler_thread.join(timeout=6)
         with self._condition:
             session_ids = tuple(self._running)
+            queued_ids = tuple(self._queued)
         for session_id in session_ids:
             self._shutdown_session(session_id)
+        for session_id in queued_ids:
+            self._shutdown_queued_session(session_id)
         for thread in tuple(self._threads):
             thread.join(timeout=1)
         self._threads = [thread for thread in self._threads if thread.is_alive()]
+
+    def _run_capacity_scheduler(self) -> None:
+        while not self._scheduler_stop.wait(_CAPACITY_REFRESH_INTERVAL_SECONDS):
+            self._synchronize_catalog_sessions()
+            with self._condition:
+                queued_ids = tuple(self._queued)
+            for session_id in queued_ids:
+                with self._condition:
+                    queued = self._queued.get(session_id)
+                    if queued is None:
+                        continue
+                    assert self._catalog is not None
+                    try:
+                        granted = self._catalog.request_execution_capacity(
+                            session_id,
+                            owner_id=self._owner_id,
+                        )
+                    except (KeyError, RuntimeError, ValueError) as error:
+                        self._queued.pop(session_id, None)
+                        previous = self._snapshots[session_id]
+                        failed = replace(
+                            previous,
+                            status=PortableSessionStatus.FAILED,
+                            result=1,
+                            diagnostics=(
+                                *previous.diagnostics,
+                                f"Execution capacity request failed: {error}",
+                            )[-100:],
+                            updated_at=time.time(),
+                        )
+                        self._snapshots[session_id] = failed
+                        self._persist_snapshot(failed)
+                        self._publish(failed)
+                        self._condition.notify_all()
+                        continue
+                    if not granted:
+                        continue
+                    self._queued.pop(session_id, None)
+                    if isinstance(queued, _QueuedInput):
+                        running = self._running.get(session_id)
+                        if running is None:
+                            failed = replace(
+                                self._snapshots[session_id],
+                                status=PortableSessionStatus.FAILED,
+                                result=1,
+                                diagnostics=(
+                                    *self._snapshots[session_id].diagnostics,
+                                    "Queued input lost its worker process.",
+                                )[-100:],
+                                updated_at=time.time(),
+                            )
+                            self._snapshots[session_id] = failed
+                            self._persist_snapshot(failed)
+                            self._publish(failed)
+                            self._condition.notify_all()
+                            continue
+                        try:
+                            self._send_worker_input(
+                                session_id,
+                                queued.value,
+                                request_id=queued.request_id,
+                                request_generation=queued.request_generation,
+                                running=running,
+                            )
+                        except ValueError:
+                            pass
+                        continue
+                    try:
+                        self._launch_session(
+                            queued.launch,
+                            queued.command_kind,
+                            queued.command_payload,
+                            rollback_new_session=queued.rollback_new_session,
+                        )
+                    except BaseException as error:
+                        current = self._snapshots.get(session_id)
+                        if current is not None:
+                            failed = replace(
+                                current,
+                                status=PortableSessionStatus.FAILED,
+                                result=1,
+                                diagnostics=(
+                                    *current.diagnostics,
+                                    f"Worker launch failed: {error}",
+                                )[-100:],
+                                updated_at=time.time(),
+                            )
+                            self._snapshots[session_id] = failed
+                            self._persist_snapshot(failed)
+                            self._publish(failed)
+                            self._condition.notify_all()
+
+    def _synchronize_catalog_sessions(self) -> None:
+        if self._catalog is None:
+            return
+        try:
+            records = self._catalog.list_sessions()
+        except RuntimeError:
+            return
+        with self._condition:
+            for record in records:
+                if (
+                    record.session_id in self._owned_session_ids
+                    or record.session_id in self._running
+                    or record.session_id in self._queued
+                ):
+                    continue
+                previous = self._snapshots.get(record.session_id)
+                activity = (
+                    (record.activity_summary,)
+                    if record.activity_summary
+                    else (() if previous is None else previous.activity)
+                )
+                synchronized = PortableSessionSnapshot(
+                    session_id=record.session_id,
+                    checkout=record.checkout,
+                    status=record.status,
+                    context=None if previous is None else previous.context,
+                    activity=activity,
+                    diagnostics=() if previous is None else previous.diagnostics,
+                    result=None if previous is None else previous.result,
+                    input_request=None,
+                    prd_path=record.prd_path,
+                    progress=(
+                        PortableSessionProgress()
+                        if previous is None
+                        else previous.progress
+                    ),
+                    updated_at=record.updated_at,
+                )
+                self._launches[record.session_id] = record.launch
+                if synchronized != previous:
+                    self._snapshots[record.session_id] = synchronized
+                    self._publish(synchronized)
+
+    def _shutdown_queued_session(self, session_id: str) -> None:
+        with self._condition:
+            queued = self._queued.pop(session_id, None)
+            if queued is None:
+                return
+            snapshot = self._snapshots[session_id]
+            ready = replace(
+                snapshot,
+                status=PortableSessionStatus.READY,
+                input_request=None,
+                updated_at=time.time(),
+            )
+            self._snapshots[session_id] = ready
+            self._release_execution_capacity(ready)
+            self._release_session_lease(session_id)
+            self._publish(ready)
 
     def _shutdown_session(self, session_id: str) -> None:
         with self._condition:
@@ -1195,6 +1519,20 @@ class PortableSessionSupervisor:
             return
         summary = snapshot.activity[-1] if snapshot.activity else ""
         try:
+            if snapshot.status not in {
+                PortableSessionStatus.RUNNING,
+                PortableSessionStatus.PAUSING,
+                PortableSessionStatus.QUEUED,
+            } and callable(
+                getattr(self._catalog, "release_execution_capacity", None)
+            ):
+                self._catalog.release_execution_capacity(
+                    snapshot.session_id,
+                    owner_id=self._owner_id,
+                    status=snapshot.status,
+                    activity_summary=summary,
+                )
+                return
             self._catalog.update_session_status(
                 snapshot.session_id,
                 snapshot.status,
@@ -1209,6 +1547,24 @@ class PortableSessionSupervisor:
                     f"Portable Session Catalog update failed: {error}",
                 )[-100:],
             )
+
+    def _release_execution_capacity(
+        self,
+        snapshot: PortableSessionSnapshot,
+    ) -> None:
+        if self._catalog is None:
+            return
+        release = getattr(self._catalog, "release_execution_capacity", None)
+        if not callable(release):
+            self._persist_snapshot(snapshot)
+            return
+        summary = snapshot.activity[-1] if snapshot.activity else ""
+        release(
+            snapshot.session_id,
+            owner_id=self._owner_id,
+            status=snapshot.status,
+            activity_summary=summary,
+        )
 
     def _claim_new_session(
         self,
@@ -1227,6 +1583,7 @@ class PortableSessionSupervisor:
                 if focused is not None:
                     return focused
             raise
+        self._owned_session_ids.add(launch.session_id)
         self._saved_projects = tuple(self._catalog.list_saved_projects())
         return None
 
@@ -1236,6 +1593,7 @@ class PortableSessionSupervisor:
         acquire = getattr(self._catalog, "acquire_session_lease", None)
         if callable(acquire):
             acquire(session_id, owner_id=self._owner_id)
+            self._owned_session_ids.add(session_id)
 
     def _release_session_lease(self, session_id: str) -> None:
         if self._catalog is None:
@@ -1273,6 +1631,87 @@ class PortableSessionSupervisor:
                 return
         self._mark_launch_failed(session_id)
         self._release_session_lease(session_id)
+
+
+def run_portable_plain_session(
+    launch: PortableSessionLaunch,
+    operation: Callable[[], int],
+    *,
+    catalog: PortableSessionCatalogController | None = None,
+    owner_id: str | None = None,
+    queue_notice: Callable[[str], None] | None = None,
+    poll_interval: float = _CAPACITY_REFRESH_INTERVAL_SECONDS,
+) -> int:
+    """Run one foreground Plain Mode operation under catalog leases and capacity."""
+    if poll_interval <= 0:
+        raise ValueError("Portable capacity polling interval must be positive.")
+    if catalog is None:
+        from .portable_session_catalog import PortableSessionCatalog
+
+        catalog = PortableSessionCatalog()
+    active_owner_id = owner_id or str(uuid.uuid4())
+    notice = queue_notice or print
+    from .portable_session_catalog import (
+        PORTABLE_SESSION_CATALOG_ENV,
+        PORTABLE_SESSION_ID_ENV,
+        PORTABLE_SESSION_OWNER_ID_ENV,
+    )
+
+    environment_keys = (
+        PORTABLE_SESSION_CATALOG_ENV,
+        PORTABLE_SESSION_ID_ENV,
+        PORTABLE_SESSION_OWNER_ID_ENV,
+    )
+    previous_environment = {key: os.environ.get(key) for key in environment_keys}
+    os.environ[PORTABLE_SESSION_CATALOG_ENV] = str(catalog.path)
+    os.environ[PORTABLE_SESSION_ID_ENV] = launch.session_id
+    os.environ[PORTABLE_SESSION_OWNER_ID_ENV] = active_owner_id
+    created = False
+    final_status = PortableSessionStatus.INTERRUPTED
+    try:
+        create_with_lease = getattr(catalog, "create_session_with_lease", None)
+        if not callable(create_with_lease):
+            raise RuntimeError(
+                "Portable Plain Mode requires catalog worktree leasing."
+            )
+        create_with_lease(launch, owner_id=active_owner_id)
+        created = True
+        queued_notice_written = False
+        while not catalog.request_execution_capacity(
+            launch.session_id,
+            owner_id=active_owner_id,
+        ):
+            if not queued_notice_written:
+                notice(f"Portable session {launch.session_id} [QUEUED]")
+                queued_notice_written = True
+            time.sleep(poll_interval)
+        result = operation()
+        final_status = (
+            PortableSessionStatus.COMPLETED
+            if result == 0
+            else PortableSessionStatus.FAILED
+        )
+        return result
+    finally:
+        if created:
+            try:
+                catalog.release_execution_capacity(
+                    launch.session_id,
+                    owner_id=active_owner_id,
+                    status=final_status,
+                )
+            finally:
+                release_lease = getattr(catalog, "release_worktree_lease", None)
+                if callable(release_lease):
+                    release_lease(
+                        launch.session_id,
+                        owner_id=active_owner_id,
+                    )
+        for key, previous in previous_environment.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
 
 
 def _payload_text(frame: PortableProtocolFrame, key: str) -> str:

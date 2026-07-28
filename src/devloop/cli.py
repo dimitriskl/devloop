@@ -428,7 +428,23 @@ def main(
             )
         return operation()
     with portable_plain_mode_session():
-        return operation()
+        if os.environ.get("DEVLOOP_PORTABLE_SESSION_ID"):
+            return operation()
+        from .portable_sessions import (
+            PortableSessionLaunch,
+            PortableWorkflowOperation,
+            run_portable_plain_session,
+        )
+
+        return run_portable_plain_session(
+            PortableSessionLaunch(
+                session_id=str(uuid.uuid4()),
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=raw_arguments,
+            ),
+            operation,
+        )
 
 
 def _run_devloop(
