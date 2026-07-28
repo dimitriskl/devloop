@@ -313,6 +313,7 @@ class _RunningSession:
     cleanup: _CleanupOwnership = field(default_factory=_CleanupOwnership)
     stop_requested: bool = False
     pending_lifecycle: _LifecycleCommandIdentity | None = None
+    launch_failure_rollback_new_session: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -649,16 +650,21 @@ class PortableSessionSupervisor:
     ) -> PortableSessionSnapshot:
         try:
             process = self._worker_launcher(launch)
-            register_process_tree(process)
         except BaseException:
             self._handle_launch_failure(
                 launch.session_id,
                 rollback_new_session=rollback_new_session,
             )
             raise
+        running = _RunningSession(
+            process,
+            generation=self._next_worker_generation,
+        )
+        self._next_worker_generation += 1
+        self._running[launch.session_id] = running
         try:
+            register_process_tree(process)
             if process.stdin is None or process.stdout is None or process.stderr is None:
-                process.terminate()
                 raise RuntimeError(
                     "Portable worker must redirect stdin, stdout, and stderr."
                 )
@@ -680,12 +686,6 @@ class PortableSessionSupervisor:
             )
             self._snapshots[launch.session_id] = snapshot
             self._launches[launch.session_id] = launch
-            running = _RunningSession(
-                process,
-                generation=self._next_worker_generation,
-            )
-            self._next_worker_generation += 1
-            self._running[launch.session_id] = running
             if self._catalog is not None:
                 try:
                     self._catalog.update_session_status(
@@ -710,16 +710,11 @@ class PortableSessionSupervisor:
                     },
                 ),
             )
-        except BaseException:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                process.wait(timeout=1)
-            self._handle_launch_failure(
-                launch.session_id,
+        except BaseException as error:
+            self._handle_post_launch_failure(
+                launch,
+                running,
+                error,
                 rollback_new_session=rollback_new_session,
             )
             raise
@@ -854,6 +849,11 @@ class PortableSessionSupervisor:
             queued = self._queued.pop(session_id, None)
             running = self._running.get(session_id)
             if queued is None and running is None:
+                if (
+                    command_kind is SupervisorMessageKind.FORCE_STOP
+                    and snapshot.status is PortableSessionStatus.INTERRUPTED
+                ):
+                    return snapshot
                 if snapshot.status in {
                     PortableSessionStatus.PAUSED,
                     PortableSessionStatus.INTERRUPTED,
@@ -1267,6 +1267,12 @@ class PortableSessionSupervisor:
                     except BaseException as error:
                         current = self._snapshots.get(session_id)
                         if current is not None:
+                            if (
+                                session_id in self._running
+                                and current.status
+                                is PortableSessionStatus.INTERRUPTED
+                            ):
+                                continue
                             failed = replace(
                                 current,
                                 status=PortableSessionStatus.FAILED,
@@ -1309,6 +1315,15 @@ class PortableSessionSupervisor:
                 running.cleanup.record(cleanup)
                 self._close_worker_streams(running)
                 self._running.pop(session_id, None)
+                if running.launch_failure_rollback_new_session is not None:
+                    self._finalize_post_launch_failure(
+                        session_id,
+                        rollback_new_session=(
+                            running.launch_failure_rollback_new_session
+                        ),
+                    )
+                    self._condition.notify_all()
+                    continue
                 snapshot = self._snapshots[session_id]
                 self._release_execution_capacity(snapshot)
                 self._release_session_lease(session_id)
@@ -2213,6 +2228,93 @@ class PortableSessionSupervisor:
             )
         except KeyError:
             return
+
+    def _handle_post_launch_failure(
+        self,
+        launch: PortableSessionLaunch,
+        running: _RunningSession,
+        error: BaseException,
+        *,
+        rollback_new_session: bool,
+    ) -> None:
+        cleanup = terminate_process(
+            running.process  # type: ignore[arg-type]
+        )
+        running.cleanup.record(cleanup)
+        if cleanup.state is ProcessTreeState.STOPPED:
+            self._close_worker_streams(running)
+            if self._running.get(launch.session_id) is running:
+                self._running.pop(launch.session_id, None)
+            self._finalize_post_launch_failure(
+                launch.session_id,
+                rollback_new_session=rollback_new_session,
+            )
+            return
+        running.stop_requested = True
+        running.launch_failure_rollback_new_session = rollback_new_session
+        previous = self._snapshots.get(
+            launch.session_id,
+            PortableSessionSnapshot(
+                session_id=launch.session_id,
+                checkout=launch.checkout,
+                status=PortableSessionStatus.READY,
+            ),
+        )
+        interrupted = replace(
+            previous,
+            checkout=launch.checkout,
+            status=PortableSessionStatus.INTERRUPTED,
+            result=130,
+            input_request=None,
+            diagnostics=(
+                *previous.diagnostics,
+                f"Worker launch setup failed: {error}",
+                cleanup.detail,
+            )[-100:],
+            updated_at=time.time(),
+        )
+        self._snapshots[launch.session_id] = interrupted
+        self._launches[launch.session_id] = launch
+        self._persist_snapshot(interrupted)
+        self._publish(interrupted)
+        self._condition.notify_all()
+        self._ensure_cleanup_reaper()
+
+    def _finalize_post_launch_failure(
+        self,
+        session_id: str,
+        *,
+        rollback_new_session: bool,
+    ) -> None:
+        rollback = (
+            getattr(self._catalog, "rollback_session_start", None)
+            if self._catalog is not None
+            else None
+        )
+        if rollback_new_session and callable(rollback):
+            self._handle_launch_failure(
+                session_id,
+                rollback_new_session=True,
+            )
+            return
+        current = self._snapshots.get(session_id)
+        if current is None:
+            self._handle_launch_failure(
+                session_id,
+                rollback_new_session=False,
+            )
+            return
+        failed = replace(
+            current,
+            status=PortableSessionStatus.FAILED,
+            result=1,
+            input_request=None,
+            updated_at=time.time(),
+        )
+        self._snapshots[session_id] = failed
+        self._persist_snapshot(failed)
+        self._release_session_lease(session_id)
+        self._publish(failed)
 
     def _handle_launch_failure(
         self,

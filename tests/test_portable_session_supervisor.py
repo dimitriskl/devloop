@@ -36,6 +36,143 @@ from devloop.subprocess_utils import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
+    def test_start_write_failure_retains_tree_and_lease_until_cleanup_is_confirmed(
+        self,
+    ) -> None:
+        grandchild_source = (
+            "import os,time;"
+            "from pathlib import Path;"
+            "Path('grandchild.pid').write_text(str(os.getpid()),encoding='utf-8');"
+            "heartbeat=Path('grandchild.heartbeat').open('a',encoding='utf-8');"
+            "[(heartbeat.write('x'),heartbeat.flush(),time.sleep(0.02))"
+            " for _index in range(3000)]"
+        )
+        child_source = (
+            "import os,subprocess,sys;"
+            "from pathlib import Path;"
+            f"p=subprocess.Popen([sys.executable,'-u','-c',{grandchild_source!r}]);"
+            "Path('child.pid').write_text(str(os.getpid()),encoding='utf-8');"
+            "p.wait()"
+        )
+        worker_source = (
+            "import subprocess,sys;"
+            f"p=subprocess.Popen([sys.executable,'-u','-c',{child_source!r}]);"
+            "p.wait()"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "start-write-failure-shell"
+            processes: list[subprocess.Popen[str]] = []
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                process = portable_sessions.launch_process_tree(
+                    [sys.executable, "-u", "-c", worker_source],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self._wait_for_pid(checkout / "grandchild.pid")
+                assert process.stdin is not None
+                process.stdin.close()
+                processes.append(process)
+                return process
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="start-write-tree",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            unknown = ProcessTerminationResult(
+                state=ProcessTreeState.UNKNOWN,
+                detail="Injected unconfirmed START cleanup.",
+            )
+            with (
+                mock.patch.object(
+                    portable_sessions,
+                    "terminate_process",
+                    return_value=unknown,
+                ) as terminate,
+                mock.patch.object(
+                    supervisor,
+                    "_ensure_cleanup_reaper",
+                ) as schedule_cleanup,
+            ):
+                with self.assertRaises(ValueError):
+                    supervisor.start_session(launch)
+
+            interrupted = supervisor.snapshot(launch.session_id)
+            child_pid = self._wait_for_pid(checkout / "child.pid")
+            grandchild_pid = self._wait_for_pid(checkout / "grandchild.pid")
+            heartbeat = checkout / "grandchild.heartbeat"
+            self.assertEqual(terminate.call_count, 1)
+            schedule_cleanup.assert_called_once_with()
+            self.assertEqual(
+                interrupted.status,
+                PortableSessionStatus.INTERRUPTED,
+            )
+            self.assertIn(
+                "Injected unconfirmed START cleanup.",
+                interrupted.diagnostics,
+            )
+            self.assertIn(launch.session_id, supervisor._running)
+            self.assertTrue(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            self.assertIsNotNone(catalog.get_worktree_lease(checkout))
+            self.assertIsNone(processes[0].poll())
+            heartbeat_before = heartbeat.stat().st_size
+            deadline = time.monotonic() + 1
+            while (
+                time.monotonic() < deadline
+                and heartbeat.stat().st_size <= heartbeat_before
+            ):
+                time.sleep(0.01)
+            self.assertGreater(
+                heartbeat.stat().st_size,
+                heartbeat_before,
+                "Descendant stopped before cleanup ownership was confirmed.",
+            )
+
+            supervisor._retry_pending_worker_cleanup(force=True)
+
+            self.assertNotIn(launch.session_id, supervisor._running)
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            self.assertIsNone(catalog.get_worktree_lease(checkout))
+            self.assertTrue(self._wait_for_process_dead(child_pid))
+            self.assertTrue(self._wait_for_process_dead(grandchild_pid))
+            heartbeat_after = heartbeat.stat().st_size
+            time.sleep(0.1)
+            self.assertEqual(
+                heartbeat.stat().st_size,
+                heartbeat_after,
+            )
+            with self.assertRaises(KeyError):
+                catalog.get_session(launch.session_id)
+            supervisor.shutdown()
+
     def test_cleanup_reaper_retries_after_scheduler_stops(self) -> None:
         class ExitedWorker:
             stdin = None
@@ -756,12 +893,16 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 self.fail("Worker did not publish partial-work evidence.")
 
             stopped = supervisor.force_stop_session(launch.session_id)
+            repeated_stop = supervisor.force_stop_session(launch.session_id)
+            cancelled = supervisor.cancel_session(launch.session_id)
             supervisor.shutdown()
             partial_work = (checkout / "partial-work.txt").read_text(
                 encoding="utf-8"
             )
 
         self.assertEqual(stopped.status, PortableSessionStatus.INTERRUPTED)
+        self.assertEqual(repeated_stop, stopped)
+        self.assertEqual(cancelled.status, PortableSessionStatus.CANCELLED)
         self.assertEqual(stopped.result, 130)
         self.assertEqual(partial_work, "kept\n")
         self.assertIn("Last durable issue checkpoint", stopped.activity)
@@ -1089,10 +1230,20 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
             supervisor = PortableSessionSupervisor(catalog=catalog)
 
+            repeated_stop = supervisor.force_stop_session(launch.session_id)
+            interrupted_status = catalog.get_session(launch.session_id).status
             cancelled = supervisor.cancel_session(launch.session_id)
             persisted_status = catalog.get_session(launch.session_id).status
             supervisor.shutdown()
 
+        self.assertEqual(
+            repeated_stop.status,
+            PortableSessionStatus.INTERRUPTED,
+        )
+        self.assertEqual(
+            interrupted_status,
+            PortableSessionStatus.INTERRUPTED,
+        )
         self.assertEqual(cancelled.status, PortableSessionStatus.CANCELLED)
         self.assertEqual(persisted_status, PortableSessionStatus.CANCELLED)
 
