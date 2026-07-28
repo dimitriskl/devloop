@@ -11,7 +11,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from devloop import subprocess_utils
 from devloop.execution_backend_id import ExecutionBackendId
 from devloop.model_catalog import (
     CatalogDiscoveryError,
@@ -21,6 +23,7 @@ from devloop.model_catalog import (
     ModelCatalogCache,
     model_catalog_cache_path,
 )
+from devloop.portable_execution_backend import claude_catalog
 from devloop.portable_execution_backend.claude_catalog import (
     ClaudeModelCatalogAdapter,
     ModelVerificationError,
@@ -156,6 +159,38 @@ class BundledClaudeCatalogTests(unittest.TestCase):
 
 
 class ClaudeModelCatalogAdapterTests(unittest.TestCase):
+    def test_unconfirmed_verification_cleanup_retains_process_tree_ownership(
+        self,
+    ) -> None:
+        session = claude_catalog._ClaudeVerificationSession(
+            "claude",
+            cwd=Path.cwd(),
+            timeout_seconds=1,
+        )
+        process = mock.Mock()
+        session._process = process
+        cleanup = subprocess_utils.ProcessTerminationResult(
+            tree_terminated=False,
+            detail="retained child is still alive",
+        )
+
+        with (
+            mock.patch.object(
+                claude_catalog,
+                "terminate_process",
+                return_value=cleanup,
+            ) as terminate,
+            mock.patch.object(
+                claude_catalog,
+                "unregister_process_tree",
+                create=True,
+            ) as unregister,
+        ):
+            session.__exit__()
+
+        terminate.assert_called_once_with(process)
+        unregister.assert_not_called()
+
     def test_discovery_makes_no_verification_call(self) -> None:
         """Opening `/options` must cost nothing, whatever the bundle lists."""
         calls: list[str] = []

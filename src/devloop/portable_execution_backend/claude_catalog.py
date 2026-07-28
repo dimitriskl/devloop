@@ -44,7 +44,6 @@ from ..subprocess_utils import (
     process_tree_creation_kwargs,
     register_process_tree,
     terminate_process,
-    unregister_process_tree,
 )
 from ..templates import installed_bundle_context
 from ..terminal_text import sanitize_terminal_text
@@ -357,7 +356,6 @@ class _ClaudeVerificationSession:
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
-        unregister_process_tree(process)
 
     def resolve_model(self, model_id: str) -> str:
         # Imported here, not at module scope: the backend module owns these

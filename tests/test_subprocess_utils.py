@@ -14,6 +14,57 @@ from devloop import subprocess_utils
 
 
 class ActiveProcessTreeTests(unittest.TestCase):
+    def test_windows_identity_mismatch_is_not_reported_alive(self) -> None:
+        process = mock.Mock()
+        process.pid = 123
+        original = subprocess_utils.ProcessIdentity(pid=123, creation_time=100)
+        replacement = subprocess_utils.ProcessIdentity(pid=123, creation_time=200)
+
+        with (
+            mock.patch.object(subprocess_utils.os, "name", "nt"),
+            mock.patch.object(
+                subprocess_utils,
+                "_refresh_windows_process_tree",
+                return_value={original},
+            ),
+            mock.patch.object(
+                subprocess_utils,
+                "_windows_process_identity",
+                return_value=replacement,
+            ),
+        ):
+            self.assertFalse(subprocess_utils._process_tree_is_alive(process))
+
+    def test_windows_identity_mismatch_is_never_terminated(self) -> None:
+        process = mock.Mock()
+        process.pid = 123
+        original = subprocess_utils.ProcessIdentity(pid=123, creation_time=100)
+        replacement = subprocess_utils.ProcessIdentity(pid=123, creation_time=200)
+
+        with (
+            mock.patch.object(subprocess_utils.os, "name", "nt"),
+            mock.patch.object(
+                subprocess_utils,
+                "_refresh_windows_process_tree",
+                return_value={original},
+            ),
+            mock.patch.object(
+                subprocess_utils,
+                "_windows_process_identity",
+                return_value=replacement,
+            ),
+            mock.patch.object(
+                subprocess_utils,
+                "_terminate_windows_process_tree",
+            ) as terminate,
+            mock.patch.object(subprocess_utils, "_signal_process") as signal_root,
+        ):
+            confirmed = subprocess_utils._signal_process_tree(process, force=True)
+
+        self.assertFalse(confirmed)
+        terminate.assert_not_called()
+        signal_root.assert_not_called()
+
     def test_registered_process_is_terminated_during_application_shutdown(
         self,
     ) -> None:
@@ -39,11 +90,9 @@ class ActiveProcessTreeTests(unittest.TestCase):
         subprocess_utils.os.name == "nt",
         "requires the Windows process-tree fallback",
     )
-    def test_failed_taskkill_falls_back_to_the_owned_process_handle(self) -> None:
+    def test_windows_cleanup_never_falls_back_to_pid_only_taskkill(self) -> None:
         process = mock.Mock()
         process.pid = 123
-        taskkill_result = mock.Mock(returncode=1)
-
         with (
             mock.patch.object(
                 subprocess_utils,
@@ -53,13 +102,12 @@ class ActiveProcessTreeTests(unittest.TestCase):
             mock.patch.object(
                 subprocess_utils.subprocess,
                 "run",
-                return_value=taskkill_result,
             ) as taskkill,
         ):
             subprocess_utils._signal_process_tree(process, force=False)
 
-        taskkill.assert_called_once()
-        process.terminate.assert_called_once_with()
+        taskkill.assert_not_called()
+        process.terminate.assert_not_called()
 
     @unittest.skipUnless(
         subprocess_utils.os.name == "nt",
