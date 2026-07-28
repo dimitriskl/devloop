@@ -1209,16 +1209,180 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                     raise subprocess.TimeoutExpired("fake-worker", timeout)
                 return self.return_code
 
-        process = FakeWorkerProcess()
-        supervisor = PortableSessionSupervisor(worker_launcher=lambda _launch: process)
+        stale_frames = (
+            ("STATUS", {"status": "RUNNING", "stage": "stale status"}),
+            (
+                "INPUT_REQUEST",
+                {
+                    "request_kind": "TEXT",
+                    "prompt": "Stale buffered request",
+                },
+            ),
+            ("COMPLETION", {"exit_code": 0}),
+        )
+        for stale_kind, stale_payload in stale_frames:
+            with self.subTest(stale_kind=stale_kind):
+                process = FakeWorkerProcess()
+                supervisor = PortableSessionSupervisor(
+                    worker_launcher=lambda _launch: process
+                )
+                launch = PortableSessionLaunch(
+                    session_id=f"session-broken-input-pipe-{stale_kind.casefold()}",
+                    checkout=Path.cwd(),
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+                supervisor.start_session(launch)
+                process.stdout.send(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "session_id": launch.session_id,
+                            "sequence": 1,
+                            "kind": "INPUT_REQUEST",
+                            "payload": {
+                                "request_kind": "TEXT",
+                                "prompt": "Value before worker exit",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                self._wait_for_status(
+                    supervisor,
+                    launch.session_id,
+                    PortableSessionStatus.WAITING_FOR_INPUT,
+                )
+                running = supervisor._running[launch.session_id]
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "worker input channel closed before input could be sent",
+                ):
+                    supervisor.provide_input(launch.session_id, "too late")
+
+                failed = supervisor.snapshot(launch.session_id)
+                self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+                self.assertIsNone(failed.input_request)
+                self.assertEqual(running.next_supervisor_sequence, 2)
+                self.assertNotIn(launch.session_id, supervisor._running)
+
+                process.stdout.send(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "session_id": launch.session_id,
+                            "sequence": 2,
+                            "kind": stale_kind,
+                            "payload": stale_payload,
+                        }
+                    )
+                    + "\n"
+                )
+                if stale_kind != "COMPLETION":
+                    process.stdout.send(
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "session_id": launch.session_id,
+                                "sequence": 3,
+                                "kind": "COMPLETION",
+                                "payload": {"exit_code": 0},
+                            }
+                        )
+                        + "\n"
+                    )
+                process.stdout.close()
+                process.stderr.close()
+                supervisor.shutdown()
+
+                unchanged = supervisor.snapshot(launch.session_id)
+                self.assertEqual(unchanged.status, PortableSessionStatus.FAILED)
+                self.assertEqual(unchanged.result, 1)
+                self.assertIsNone(unchanged.input_request)
+                self.assertEqual(unchanged.progress.stage, "")
+
+    def test_replacement_worker_ignores_buffered_frames_from_retired_generation(
+        self,
+    ) -> None:
+        class BlockingOutput:
+            def __init__(self) -> None:
+                self._lines: queue.Queue[str | None] = queue.Queue()
+
+            def __iter__(self) -> BlockingOutput:
+                return self
+
+            def __next__(self) -> str:
+                line = self._lines.get(timeout=5)
+                if line is None:
+                    raise StopIteration
+                return line
+
+            def send(self, line: str) -> None:
+                self._lines.put(line)
+
+            def close(self) -> None:
+                self._lines.put(None)
+
+        class WorkerInput:
+            def __init__(
+                self,
+                process: FakeWorkerProcess,
+                *,
+                fail_on_second_flush: bool,
+            ) -> None:
+                self._process = process
+                self._fail_on_second_flush = fail_on_second_flush
+                self.flush_count = 0
+
+            def write(self, value: str) -> int:
+                return len(value)
+
+            def flush(self) -> None:
+                self.flush_count += 1
+                if self._fail_on_second_flush and self.flush_count == 2:
+                    self._process.return_code = 17
+                    raise BrokenPipeError("retired worker closed stdin")
+
+            def close(self) -> None:
+                return None
+
+        class FakeWorkerProcess:
+            def __init__(self, *, fail_on_second_flush: bool) -> None:
+                self.return_code: int | None = None
+                self.stdout = BlockingOutput()
+                self.stderr = BlockingOutput()
+                self.stdin = WorkerInput(
+                    self,
+                    fail_on_second_flush=fail_on_second_flush,
+                )
+
+            def poll(self) -> int | None:
+                return self.return_code
+
+            def terminate(self) -> None:
+                self.return_code = -15
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.return_code is None:
+                    raise subprocess.TimeoutExpired("fake-worker", timeout)
+                return self.return_code
+
+        retired_process = FakeWorkerProcess(fail_on_second_flush=True)
+        replacement_process = FakeWorkerProcess(fail_on_second_flush=False)
+        processes = iter((retired_process, replacement_process))
+        supervisor = PortableSessionSupervisor(
+            worker_launcher=lambda _launch: next(processes)
+        )
         launch = PortableSessionLaunch(
-            session_id="session-broken-input-pipe",
+            session_id="session-worker-generation",
             checkout=Path.cwd(),
             operation=PortableWorkflowOperation.PLANNING,
             arguments=(),
         )
         supervisor.start_session(launch)
-        process.stdout.send(
+        retired_stdout_thread = supervisor._threads[-2]
+        retired_process.stdout.send(
             json.dumps(
                 {
                     "version": 1,
@@ -1227,7 +1391,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                     "kind": "INPUT_REQUEST",
                     "payload": {
                         "request_kind": "TEXT",
-                        "prompt": "Value before worker exit",
+                        "prompt": "Retired worker request",
                     },
                 }
             )
@@ -1238,22 +1402,99 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             launch.session_id,
             PortableSessionStatus.WAITING_FOR_INPUT,
         )
-        running = supervisor._running[launch.session_id]
-
         with self.assertRaisesRegex(
             ValueError,
             "worker input channel closed before input could be sent",
         ):
             supervisor.provide_input(launch.session_id, "too late")
 
-        failed = supervisor.snapshot(launch.session_id)
-        self.assertEqual(failed.status, PortableSessionStatus.FAILED)
-        self.assertIsNone(failed.input_request)
-        self.assertEqual(running.next_supervisor_sequence, 2)
-        self.assertNotIn(launch.session_id, supervisor._running)
-        process.stdout.close()
-        process.stderr.close()
+        resumed = supervisor.resume_session(launch.session_id)
+        self.assertEqual(resumed.status, PortableSessionStatus.RUNNING)
+        self.assertIs(
+            supervisor._running[launch.session_id].process,
+            replacement_process,
+        )
+
+        retired_process.stdout.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": launch.session_id,
+                    "sequence": 2,
+                    "kind": "STATUS",
+                    "payload": {
+                        "status": "RUNNING",
+                        "stage": "retired generation",
+                    },
+                }
+            )
+            + "\n"
+        )
+        retired_process.stdout.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": launch.session_id,
+                    "sequence": 3,
+                    "kind": "COMPLETION",
+                    "payload": {"exit_code": 0},
+                }
+            )
+            + "\n"
+        )
+        retired_stdout_thread.join(timeout=1)
+        self.assertFalse(retired_stdout_thread.is_alive())
+
+        after_retired_frames = supervisor.snapshot(launch.session_id)
+        self.assertEqual(
+            after_retired_frames.status,
+            PortableSessionStatus.RUNNING,
+        )
+        self.assertEqual(after_retired_frames.progress.stage, "")
+        self.assertIs(
+            supervisor._running[launch.session_id].process,
+            replacement_process,
+        )
+
+        replacement_process.stdout.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": launch.session_id,
+                    "sequence": 1,
+                    "kind": "INPUT_REQUEST",
+                    "payload": {
+                        "request_kind": "TEXT",
+                        "prompt": "Replacement worker request",
+                    },
+                }
+            )
+            + "\n"
+        )
+        waiting = self._wait_for_status(
+            supervisor,
+            launch.session_id,
+            PortableSessionStatus.WAITING_FOR_INPUT,
+        )
+        self.assertIsNotNone(waiting.input_request)
+        assert waiting.input_request is not None
+        self.assertEqual(waiting.input_request.prompt, "Replacement worker request")
+
+        replacement_process.stdout.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": launch.session_id,
+                    "sequence": 2,
+                    "kind": "COMPLETION",
+                    "payload": {"exit_code": 0},
+                }
+            )
+            + "\n"
+        )
+        completed = supervisor.wait_for_terminal(launch.session_id, timeout=1)
         supervisor.shutdown()
+        self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
 
     def test_two_workers_route_interleaved_input_and_isolate_one_failure(self) -> None:
         worker_source = textwrap.dedent(

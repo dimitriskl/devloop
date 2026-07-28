@@ -8,6 +8,7 @@ import tempfile
 import textwrap
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1314,6 +1315,131 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     value=value,
                 )
                 for value in adversarial_values
+            ],
+        )
+
+    async def test_queued_choice_from_previous_tab_cannot_use_rebuilt_mapping(
+        self,
+    ) -> None:
+        session_a = PortableSessionSnapshot(
+            session_id="session-alpha",
+            checkout=Path("choice-alpha").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.CHOICE,
+                prompt="Alpha choice",
+                options=(("alpha-value", "Send alpha"),),
+                default_key="alpha-value",
+            ),
+        )
+        session_b = PortableSessionSnapshot(
+            session_id="session-beta",
+            checkout=Path("choice-beta").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.CHOICE,
+                prompt="Beta choice",
+                options=(("__sessions__", "Send adversarial beta value"),),
+                default_key="__sessions__",
+            ),
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (session_a, session_b)
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return PortableSessionSnapshot(
+                    session_id=intent.session_id,
+                    checkout=session_b.checkout,
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            app._active_session_id = session_a.session_id
+            app._show_session_snapshot(session_a)
+            menu = app.query_one("#portable-navigation", OptionList)
+            queued_alpha_option = menu.get_option_at_index(0)
+
+            app._active_session_id = session_b.session_id
+            app._show_session_snapshot(session_b)
+            current_beta_option = menu.get_option_at_index(0)
+            beta_option_id = current_beta_option.id
+            self.assertNotEqual(queued_alpha_option.id, beta_option_id)
+            self.assertIn(session_a.session_id, queued_alpha_option.id or "")
+            self.assertIn(session_b.session_id, beta_option_id or "")
+
+            app.post_message(
+                OptionList.OptionSelected(menu, queued_alpha_option, 0)
+            )
+            await pilot.pause()
+
+            self.assertEqual(supervisor.intents, [])
+            self.assertIn(
+                "INPUT NOT SENT",
+                str(app.query_one("#portable-status", Static).render()),
+            )
+            self.assertEqual(
+                str(menu.get_option_at_index(0).prompt),
+                "Send adversarial beta value",
+            )
+
+            menu.highlighted = 0
+            await pilot.press("enter")
+            await pilot.pause()
+
+            next_session_b = replace(
+                session_b,
+                input_request=PortableSessionInputRequest(
+                    kind=PortableSessionInputKind.CHOICE,
+                    prompt="Next beta choice",
+                    options=(("__sessions__", "Send next beta value"),),
+                    default_key="__sessions__",
+                ),
+            )
+            app._show_session_snapshot(next_session_b)
+            self.assertNotEqual(
+                current_beta_option.id,
+                menu.get_option_at_index(0).id,
+            )
+            app.post_message(
+                OptionList.OptionSelected(menu, current_beta_option, 0)
+            )
+            await pilot.pause()
+
+        self.assertEqual(
+            supervisor.intents,
+            [
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.PROVIDE_INPUT,
+                    session_id=session_b.session_id,
+                    value="__sessions__",
+                )
             ],
         )
 

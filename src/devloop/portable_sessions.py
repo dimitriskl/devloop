@@ -718,7 +718,8 @@ class PortableSessionSupervisor:
                     expected_sequence=running.next_worker_sequence,
                 )
                 running.next_worker_sequence += 1
-                self._apply_worker_frame(session_id, frame, running)
+                if not self._apply_worker_frame(session_id, frame, running):
+                    return
                 if frame.kind in {
                     WorkerMessageKind.COMPLETION.value,
                     WorkerMessageKind.FAILURE.value,
@@ -734,7 +735,13 @@ class PortableSessionSupervisor:
             self._fail_session(session_id, str(error), running)
         finally:
             self._reap_worker(running)
-            self._release_session_lease(session_id)
+            with self._condition:
+                current_running = self._running.get(session_id)
+                replacement_is_running = (
+                    current_running is not None and current_running is not running
+                )
+            if not replacement_is_running:
+                self._release_session_lease(session_id)
 
     def _read_worker_stderr(
         self,
@@ -748,6 +755,11 @@ class PortableSessionSupervisor:
                 continue
             with self._condition:
                 snapshot = self._snapshots[session_id]
+                if (
+                    self._running.get(session_id) is not running
+                    or snapshot.status.terminal
+                ):
+                    return
                 updated = replace(
                     snapshot,
                     diagnostics=(*snapshot.diagnostics, diagnostic)[-100:],
@@ -761,7 +773,7 @@ class PortableSessionSupervisor:
         session_id: str,
         frame: PortableProtocolFrame,
         running: _RunningSession,
-    ) -> None:
+    ) -> bool:
         try:
             kind = WorkerMessageKind(frame.kind)
         except ValueError as error:
@@ -770,6 +782,11 @@ class PortableSessionSupervisor:
             ) from error
         with self._condition:
             snapshot = self._snapshots[session_id]
+            if (
+                self._running.get(session_id) is not running
+                or snapshot.status.terminal
+            ):
+                return False
             if kind is WorkerMessageKind.HELLO:
                 updated = snapshot
             elif kind is WorkerMessageKind.CONTEXT:
@@ -956,6 +973,7 @@ class PortableSessionSupervisor:
                 self._retire_running_session(session_id, running)
             self._publish(updated)
             self._condition.notify_all()
+            return True
 
     def _synchronize_catalog_checkout(
         self,
@@ -1070,7 +1088,10 @@ class PortableSessionSupervisor:
     ) -> None:
         with self._condition:
             snapshot = self._snapshots[session_id]
-            if snapshot.status.terminal:
+            if (
+                self._running.get(session_id) is not running
+                or snapshot.status.terminal
+            ):
                 return
             updated = replace(
                 snapshot,
