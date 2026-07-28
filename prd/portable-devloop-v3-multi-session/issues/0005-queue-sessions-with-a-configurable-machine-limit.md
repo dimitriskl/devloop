@@ -65,6 +65,10 @@ Completed: [x]
 - Final review passed for `9a522a7..a7972b7`. Final QA passed 107 focused `unittest`
   tests plus compile and diff checks, covering scheduling, fairness, capacity, input,
   Options, Plain Mode, migration, cross-process behavior, crash recovery, and labels.
+- Post-completion stabilization in `a01288f..d9a7b4d` hardened claim and revision
+  ordering against stale status regressions, released capacity after worker launch
+  failures, and stabilized cooperative pause concurrency coverage.
+- Final review and strict QA passed for `a01288f..d9a7b4d`: 57/57 focused tests passed.
 - Environment limitation: pytest, Ruff, and mypy were unavailable, so the focused
   standard-library `unittest` suite was used as the executable fallback.
 - Stale-application recovery remains excluded here and belongs to Issue 0007.
