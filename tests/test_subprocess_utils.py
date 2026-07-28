@@ -656,23 +656,26 @@ class ActiveProcessTreeTests(unittest.TestCase):
     def test_registered_process_is_terminated_during_application_shutdown(
         self,
     ) -> None:
-        process = mock.Mock()
-        process.poll.return_value = None
-        subprocess_utils.register_process_tree(process)
+        process = subprocess_utils.launch_process_tree(
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                "import time; time.sleep(60)",
+            ],
+        )
         try:
-            with mock.patch.object(
-                subprocess_utils,
-                "terminate_process",
-            ) as terminate, mock.patch.object(
-                subprocess_utils,
-                "_process_tree_is_alive",
-                return_value=True,
-            ):
-                subprocess_utils.terminate_active_process_trees()
+            results = subprocess_utils.terminate_active_process_trees()
 
-            terminate.assert_called_once_with(process)
+            self.assertEqual(len(results), 1)
+            self.assertTrue(results[0].tree_terminated)
+            self.assertIsNotNone(process.poll())
+            self.assertNotIn(process, subprocess_utils._ACTIVE_PROCESS_TREES)
         finally:
-            subprocess_utils.unregister_process_tree(process)
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            subprocess_utils.release_process_tree_if_stopped(process)
 
     @unittest.skipUnless(
         subprocess_utils.os.name == "nt",
