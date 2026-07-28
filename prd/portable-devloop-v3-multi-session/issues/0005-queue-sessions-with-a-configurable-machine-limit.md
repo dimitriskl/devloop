@@ -52,4 +52,19 @@ Covers parent PRD user stories 56–65.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Implemented in commits `11c8b80` through `a7972b7`.
+- The catalog-backed scheduler enforces the user-wide default/configured capacity
+  transactionally across application processes, advances eligible queued sessions fairly,
+  preserves running work when the limit is reduced, and recovers abandoned capacity after
+  a process crash.
+- Paused and input-waiting sessions release capacity; input submission reacquires a slot or
+  leaves the session visibly queued. Sessions, session details, Options, and Plain Mode use
+  the same queue/capacity state and labels.
+- Final review passed for `9a522a7..a7972b7`. Final QA passed 107 focused `unittest`
+  tests plus compile and diff checks, covering scheduling, fairness, capacity, input,
+  Options, Plain Mode, migration, cross-process behavior, crash recovery, and labels.
+- Environment limitation: pytest, Ruff, and mypy were unavailable, so the focused
+  standard-library `unittest` suite was used as the executable fallback.
+- Stale-application recovery remains excluded here and belongs to Issue 0007.
