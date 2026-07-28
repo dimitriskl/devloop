@@ -1031,7 +1031,7 @@ class PortableApplicationShell(App[None]):
             checkout_name = snapshot.checkout.name or str(snapshot.checkout)
             workflow_name = (
                 f" · {snapshot.prd_path.stem}"
-                if snapshot.prd_path is not None
+                if snapshot.prd_path is not None and not snapshot.status.terminal
                 else ""
             )
             menu.add_option(

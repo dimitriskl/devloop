@@ -698,6 +698,9 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#portable-detail", Static).render()
                 )
                 app._show_sessions_tab()
+                sessions_detail = str(
+                    app.query_one("#portable-detail", Static).render()
+                )
                 menu = app.query_one("#portable-navigation", OptionList)
                 prompts = [
                     str(menu.get_option_at_index(index).prompt)
@@ -720,6 +723,10 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(catalog_session.checkout, worktree.resolve())
             self.assertEqual(cached_launch.checkout, worktree.resolve())
+            self.assertIn(
+                f"PRD: {worktree.resolve() / prd.relative_to(source)}",
+                sessions_detail,
+            )
             self.assertTrue(
                 any(
                     prompt == f"{worktree.name} [SAVED PROJECT]"
@@ -732,6 +739,78 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     for prompt in prompts
                 )
             )
+
+    async def test_sessions_menu_keeps_workflow_name_for_non_terminal_sessions(
+        self,
+    ) -> None:
+        queued_checkout = Path("queued-worktree").resolve()
+        running_checkout = Path("running-worktree").resolve()
+        completed_checkout = Path("completed-worktree").resolve()
+        snapshots = (
+            PortableSessionSnapshot(
+                session_id="queued-session",
+                checkout=queued_checkout,
+                status=PortableSessionStatus.QUEUED,
+                prd_path=queued_checkout / "prd" / "queued-change.md",
+            ),
+            PortableSessionSnapshot(
+                session_id="running-session",
+                checkout=running_checkout,
+                status=PortableSessionStatus.RUNNING,
+                prd_path=running_checkout / "prd" / "running-change.md",
+            ),
+            PortableSessionSnapshot(
+                session_id="completed-session",
+                checkout=completed_checkout,
+                status=PortableSessionStatus.COMPLETED,
+                prd_path=completed_checkout / "prd" / "completed-change.md",
+            ),
+        )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return snapshots
+
+            def list_saved_projects(self):
+                return ()
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            prompts = [
+                str(menu.get_option_at_index(index).prompt)
+                for index in range(menu.option_count)
+            ]
+            detail = str(app.query_one("#portable-detail", Static).render())
+
+        self.assertIn("queued-worktree · queued-change [QUEUED]", prompts)
+        self.assertIn("running-worktree · running-change [RUNNING]", prompts)
+        self.assertIn("completed-worktree [COMPLETED]", prompts)
+        self.assertNotIn(
+            "completed-worktree · completed-change [COMPLETED]",
+            prompts,
+        )
+        self.assertIn(
+            f"PRD: {completed_checkout / 'prd' / 'completed-change.md'}",
+            detail,
+        )
 
     async def test_restored_session_requires_explicit_resume_from_sessions_tab(
         self,
