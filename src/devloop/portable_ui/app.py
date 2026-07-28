@@ -83,6 +83,14 @@ SESSION_INPUT_OPTION_ID_PREFIX = "__session_input_option__:"
 SESSION_INPUT_ERROR_MAX_LENGTH = 160
 SESSION_CONCURRENCY_LIMIT_ID = "__session_concurrency_limit__"
 SESSION_OPTIONS_BACK_ID = "__session_options_back__"
+EXIT_CONFIRM_ID = "__exit_confirm__"
+EXIT_CANCEL_ID = "__exit_cancel__"
+SESSION_PAUSE_ID = "__session_pause__"
+SESSION_FORCE_STOP_ID = "__session_force_stop__"
+SESSION_CANCEL_ID = "__session_cancel__"
+SESSION_ACTIONS_BACK_ID = "__session_actions_back__"
+SESSION_ACTION_CONFIRM_ID = "__session_action_confirm__"
+SESSION_ACTION_CANCEL_ID = "__session_action_cancel__"
 STALE_SESSION_INPUT_MESSAGE = (
     "INPUT NOT SENT: That selection no longer belongs to the active input request."
 )
@@ -220,6 +228,90 @@ class PortableLogOverlay(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss()
+
+
+class PortableSessionExitConfirmation(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, session_count: int) -> None:
+        super().__init__()
+        self._session_count = session_count
+
+    def compose(self) -> ComposeResult:
+        noun = "session" if self._session_count == 1 else "sessions"
+        with Vertical(classes="portable-overlay"):
+            yield Static(
+                "Exit Dev Loop",
+                classes="portable-overlay-title",
+            )
+            yield Static(
+                f"Pause and stop {self._session_count} live {noun} before exit?",
+                classes="portable-overlay-content",
+                markup=False,
+            )
+            yield OptionList(
+                Option("Pause sessions and exit", id=EXIT_CONFIRM_ID),
+                Option("Cancel", id=EXIT_CANCEL_ID),
+                id="portable-exit-confirmation",
+            )
+            yield Static(
+                "Enter Select | Esc Cancel",
+                classes="portable-overlay-actions",
+            )
+
+    def on_mount(self) -> None:
+        menu = self.query_one("#portable-exit-confirmation", OptionList)
+        menu.highlighted = 1
+        menu.focus()
+
+    @on(OptionList.OptionSelected, "#portable-exit-confirmation")
+    def select_action(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id == EXIT_CONFIRM_ID)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class PortableSessionActionConfirmation(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, title: str, warning: str) -> None:
+        super().__init__()
+        self._title = title
+        self._warning = warning
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="portable-overlay"):
+            yield Static(self._title, classes="portable-overlay-title")
+            yield Static(
+                self._warning,
+                classes="portable-overlay-content",
+                markup=False,
+            )
+            yield OptionList(
+                Option("Confirm", id=SESSION_ACTION_CONFIRM_ID),
+                Option("Cancel", id=SESSION_ACTION_CANCEL_ID),
+                id="portable-session-action-confirmation",
+            )
+            yield Static(
+                "Enter Select | Esc Cancel",
+                classes="portable-overlay-actions",
+            )
+
+    def on_mount(self) -> None:
+        menu = self.query_one(
+            "#portable-session-action-confirmation",
+            OptionList,
+        )
+        menu.highlighted = 1
+        menu.focus()
+
+    @on(OptionList.OptionSelected, "#portable-session-action-confirmation")
+    def select_action(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id == SESSION_ACTION_CONFIRM_ID)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class PortableApplicationShell(App[None]):
@@ -459,6 +551,7 @@ class PortableApplicationShell(App[None]):
         self._new_session_repository: Path | None = None
         self._new_session_worktree: Path | None = None
         self._session_options_active = False
+        self._session_actions_active = False
         self._concurrency_limit_input_active = False
         self._active_request_id: int | None = None
         self._cancel_key: str | None = None
@@ -476,6 +569,7 @@ class PortableApplicationShell(App[None]):
         self._pending_working_state: tuple[int, str] | None = None
         self._terminal_too_small = False
         self._operation_stop_requested = False
+        self._exit_confirmation_open = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="portable-shell"):
@@ -712,6 +806,7 @@ class PortableApplicationShell(App[None]):
         self._new_session_repository = None
         self._new_session_worktree = None
         self._session_options_active = False
+        self._session_actions_active = False
         self._concurrency_limit_input_active = False
         input_widget = self.query_one("#portable-input", PortableRequestInput)
         input_widget.display = False
@@ -737,6 +832,7 @@ class PortableApplicationShell(App[None]):
         self._active_session_id = None
         self._new_session_flow_active = False
         self._session_options_active = True
+        self._session_actions_active = False
         self._concurrency_limit_input_active = False
         input_widget = self.query_one("#portable-input", PortableRequestInput)
         input_widget.display = False
@@ -771,6 +867,39 @@ class PortableApplicationShell(App[None]):
         self.query_one("#portable-status", Static).update("READY")
         self.query_one("#portable-actions", Static).update(
             "Enter Select | Esc Back to Sessions"
+        )
+
+    def _show_session_actions(self) -> None:
+        assert self._active_session_id is not None
+        snapshot = self._session_snapshots[self._active_session_id]
+        self._session_actions_active = True
+        self._session_options_active = False
+        self.query_one("#portable-header", Static).update(
+            f"Dev Loop > {snapshot.checkout.name} > Session Actions"
+        )
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
+        menu.clear_options()
+        if snapshot.status in {
+            PortableSessionStatus.QUEUED,
+            PortableSessionStatus.RUNNING,
+            PortableSessionStatus.WAITING_FOR_INPUT,
+        }:
+            menu.add_option(Option("Pause", id=SESSION_PAUSE_ID))
+            menu.add_option(Option("Force Stop", id=SESSION_FORCE_STOP_ID))
+            menu.add_option(Option("Cancel Session", id=SESSION_CANCEL_ID))
+        menu.add_option(Option("Back to Session", id=SESSION_ACTIONS_BACK_ID))
+        menu.highlighted = 0
+        menu.focus()
+        self.query_one("#portable-detail", Static).update(
+            "Session Lifecycle\n\n"
+            "Pause reaches a durable checkpoint. Force Stop interrupts active "
+            "work while preserving partial files and diagnostics. Cancel records "
+            "the session as cancelled. Closing or hiding a tab does none of these."
+        )
+        self.query_one("#portable-status", Static).update(snapshot.status.value)
+        self.query_one("#portable-actions", Static).update(
+            "Enter Select | Esc Back to Session"
         )
 
     def _show_concurrency_limit_input(self) -> None:
@@ -1078,6 +1207,7 @@ class PortableApplicationShell(App[None]):
         self._show_session_snapshot(snapshot)
 
     def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
+        self._session_actions_active = False
         previous = self._session_snapshots.get(snapshot.session_id)
         self._session_snapshots[snapshot.session_id] = snapshot
         if (
@@ -1285,14 +1415,14 @@ class PortableApplicationShell(App[None]):
             f"INPUT NOT SENT · {rejection}" if rejection else snapshot.status.value
         )
         action_bar = (
-            "Enter Resume | Esc Hide to Sessions | F4 Logs | F5 Context"
+            "Enter Resume | F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
             if snapshot.status
             in {
                 PortableSessionStatus.READY,
                 PortableSessionStatus.PAUSED,
                 PortableSessionStatus.INTERRUPTED,
             }
-            else "Esc Hide to Sessions | F4 Logs | F5 Context"
+            else "F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
         )
         self.query_one("#portable-actions", Static).update(action_bar)
 
@@ -1393,6 +1523,43 @@ class PortableApplicationShell(App[None]):
             )
         )
         self._show_session_snapshot(snapshot)
+
+    def _apply_session_lifecycle(
+        self,
+        kind: PortableSessionIntentKind,
+    ) -> None:
+        assert self._session_supervisor is not None
+        assert self._active_session_id is not None
+        snapshot = self._session_supervisor.handle_intent(
+            PortableSessionIntent(
+                kind=kind,
+                session_id=self._active_session_id,
+            )
+        )
+        self._show_session_snapshot(snapshot)
+
+    def _confirm_session_lifecycle(
+        self,
+        kind: PortableSessionIntentKind,
+        *,
+        title: str,
+        warning: str,
+    ) -> None:
+        self.push_screen(
+            PortableSessionActionConfirmation(title, warning),
+            lambda confirmed: self._finish_session_lifecycle_confirmation(
+                kind,
+                confirmed,
+            ),
+        )
+
+    def _finish_session_lifecycle_confirmation(
+        self,
+        kind: PortableSessionIntentKind,
+        confirmed: bool | None,
+    ) -> None:
+        if confirmed:
+            self._apply_session_lifecycle(kind)
 
     def _handle_runtime_event(self, event: PortableRuntimeEvent) -> None:
         if event.kind is PortableRuntimeEventKind.CHOICE_REQUESTED:
@@ -1650,6 +1817,28 @@ class PortableApplicationShell(App[None]):
                     self._show_session_options()
                 else:
                     self._show_sessions_tab()
+            elif option_id == SESSION_PAUSE_ID:
+                self._apply_session_lifecycle(PortableSessionIntentKind.PAUSE)
+            elif option_id == SESSION_FORCE_STOP_ID:
+                self._confirm_session_lifecycle(
+                    PortableSessionIntentKind.FORCE_STOP,
+                    title="Force Stop Session",
+                    warning=(
+                        "Interrupt active work now? Partial filesystem changes, "
+                        "diagnostics, and the last durable checkpoint are retained."
+                    ),
+                )
+            elif option_id == SESSION_CANCEL_ID:
+                self._confirm_session_lifecycle(
+                    PortableSessionIntentKind.CANCEL,
+                    title="Cancel Session",
+                    warning="Record this session as CANCELLED and stop its worker?",
+                )
+            elif option_id == SESSION_ACTIONS_BACK_ID:
+                assert self._active_session_id is not None
+                self._show_session_snapshot(
+                    self._session_snapshots[self._active_session_id]
+                )
             elif (
                 isinstance(option_id, str)
                 and option_id.startswith(NEW_SESSION_SAVED_PREFIX)
@@ -1768,6 +1957,12 @@ class PortableApplicationShell(App[None]):
 
     def action_back(self) -> None:
         if self._session_supervisor is not None:
+            if self._session_actions_active:
+                assert self._active_session_id is not None
+                self._show_session_snapshot(
+                    self._session_snapshots[self._active_session_id]
+                )
+                return
             if self._concurrency_limit_input_active:
                 self._show_session_options()
                 return
@@ -1987,7 +2182,10 @@ class PortableApplicationShell(App[None]):
         if self._respond_to_shortcut("f9"):
             return
         if self._session_supervisor is not None:
-            self._show_session_options()
+            if self._active_session_id is not None:
+                self._show_session_actions()
+            else:
+                self._show_session_options()
             return
         menu = self.query_one("#portable-navigation", OptionList)
         for index in range(menu.option_count):
@@ -2015,9 +2213,42 @@ class PortableApplicationShell(App[None]):
 
     def action_request_stop(self) -> None:
         if self._session_supervisor is not None:
-            self.exit()
+            if self._exit_confirmation_open:
+                return
+            list_sessions = getattr(self._session_supervisor, "list_sessions", None)
+            snapshots = (
+                tuple(list_sessions())
+                if callable(list_sessions)
+                else tuple(self._session_snapshots.values())
+            )
+            live_count = sum(
+                snapshot.status
+                in {
+                    PortableSessionStatus.QUEUED,
+                    PortableSessionStatus.RUNNING,
+                    PortableSessionStatus.WAITING_FOR_INPUT,
+                    PortableSessionStatus.PAUSING,
+                }
+                for snapshot in snapshots
+            )
+            if live_count == 0:
+                self.exit()
+                return
+            self._exit_confirmation_open = True
+            self.push_screen(
+                PortableSessionExitConfirmation(live_count),
+                self._finish_exit_confirmation,
+            )
             return
         self._stop_operation()
+        self.exit()
+
+    def _finish_exit_confirmation(self, confirmed: bool | None) -> None:
+        self._exit_confirmation_open = False
+        if not confirmed:
+            return
+        if self.operation_result is None:
+            self.operation_result = 130
         self.exit()
 
 

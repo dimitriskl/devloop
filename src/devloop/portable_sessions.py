@@ -22,6 +22,12 @@ from .portable_protocol import (
     supervisor_frame,
 )
 from .portable_runtime import PortableRunContext
+from .subprocess_utils import (
+    process_tree_creation_kwargs,
+    register_process_tree,
+    terminate_process,
+    unregister_process_tree,
+)
 
 
 class PortableSessionStatus(str, Enum):
@@ -55,6 +61,9 @@ class PortableSessionIntentKind(str, Enum):
     START = "START"
     RESUME = "RESUME"
     PROVIDE_INPUT = "PROVIDE_INPUT"
+    PAUSE = "PAUSE"
+    FORCE_STOP = "FORCE_STOP"
+    CANCEL = "CANCEL"
 
 
 @dataclass(frozen=True)
@@ -157,6 +166,12 @@ class PortableSessionController(Protocol):
 
     def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]: ...
 
+    def pause_session(self, session_id: str) -> PortableSessionSnapshot: ...
+
+    def force_stop_session(self, session_id: str) -> PortableSessionSnapshot: ...
+
+    def cancel_session(self, session_id: str) -> PortableSessionSnapshot: ...
+
     def shutdown(self) -> None: ...
 
 
@@ -176,6 +191,7 @@ WorkerLauncher = Callable[[PortableSessionLaunch], PortableWorkerProcess]
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PROGRESS_REFRESH_INTERVAL_SECONDS = 1.0
 _CAPACITY_REFRESH_INTERVAL_SECONDS = 0.05
+_COOPERATIVE_PAUSE_TIMEOUT_SECONDS = 2.0
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -470,7 +486,18 @@ class PortableSessionSupervisor:
     def resume_session(self, session_id: str) -> PortableSessionSnapshot:
         with self._condition:
             if session_id in self._running:
-                raise ValueError(f"Portable session is already running: {session_id}")
+                snapshot = self._snapshots.get(session_id)
+                if (
+                    snapshot is None
+                    or snapshot.status is not PortableSessionStatus.PAUSED
+                    or not self._condition.wait_for(
+                        lambda: session_id not in self._running,
+                        timeout=_COOPERATIVE_PAUSE_TIMEOUT_SECONDS,
+                    )
+                ):
+                    raise ValueError(
+                        f"Portable session is already running: {session_id}"
+                    )
             try:
                 launch = self._launches[session_id]
             except KeyError as error:
@@ -687,7 +714,135 @@ class PortableSessionSupervisor:
                 request_id=intent.request_id,
                 request_generation=intent.request_generation,
             )
+        if intent.kind is PortableSessionIntentKind.PAUSE:
+            return self.pause_session(intent.session_id)
+        if intent.kind is PortableSessionIntentKind.FORCE_STOP:
+            return self.force_stop_session(intent.session_id)
+        if intent.kind is PortableSessionIntentKind.CANCEL:
+            return self.cancel_session(intent.session_id)
         raise ValueError(f"Unsupported portable session intent: {intent.kind}")
+
+    def pause_session(self, session_id: str) -> PortableSessionSnapshot:
+        with self._condition:
+            snapshot = self.snapshot(session_id)
+            if snapshot.status in {
+                PortableSessionStatus.PAUSING,
+                PortableSessionStatus.PAUSED,
+            }:
+                return snapshot
+            if snapshot.status.terminal:
+                raise ValueError(
+                    f"Portable session is terminal and cannot be paused: {session_id}"
+                )
+            queued = self._queued.pop(session_id, None)
+            running = self._running.get(session_id)
+            if running is None:
+                if queued is None:
+                    raise ValueError(
+                        f"Portable session is not active and cannot be paused: {session_id}"
+                    )
+                paused = replace(
+                    snapshot,
+                    status=PortableSessionStatus.PAUSED,
+                    input_request=None,
+                    updated_at=time.time(),
+                )
+                self._snapshots[session_id] = paused
+                self._release_execution_capacity(paused)
+                self._release_session_lease(session_id)
+                self._publish(paused)
+                self._condition.notify_all()
+                return paused
+            pausing = replace(
+                snapshot,
+                status=PortableSessionStatus.PAUSING,
+                input_request=None,
+                updated_at=time.time(),
+            )
+            self._snapshots[session_id] = pausing
+            self._persist_snapshot(pausing)
+            self._publish(pausing)
+            frame = supervisor_frame(
+                session_id,
+                running.next_supervisor_sequence,
+                SupervisorMessageKind.PAUSE,
+            )
+            try:
+                self._write_frame(session_id, frame)
+            except (BrokenPipeError, OSError) as error:
+                self._fail_session(
+                    session_id,
+                    f"Portable session worker could not accept Pause: {error}",
+                    running,
+                )
+                return self._snapshots[session_id]
+            running.next_supervisor_sequence += 1
+            self._condition.notify_all()
+            return pausing
+
+    def force_stop_session(self, session_id: str) -> PortableSessionSnapshot:
+        return self._terminate_session(
+            session_id,
+            command_kind=SupervisorMessageKind.FORCE_STOP,
+            status=PortableSessionStatus.INTERRUPTED,
+            activity="Force Stop preserved partial work at the last durable checkpoint",
+        )
+
+    def cancel_session(self, session_id: str) -> PortableSessionSnapshot:
+        return self._terminate_session(
+            session_id,
+            command_kind=SupervisorMessageKind.CANCEL,
+            status=PortableSessionStatus.CANCELLED,
+            activity="Session cancelled by explicit user action",
+        )
+
+    def _terminate_session(
+        self,
+        session_id: str,
+        *,
+        command_kind: SupervisorMessageKind,
+        status: PortableSessionStatus,
+        activity: str,
+    ) -> PortableSessionSnapshot:
+        with self._condition:
+            snapshot = self.snapshot(session_id)
+            if snapshot.status.terminal:
+                return snapshot
+            queued = self._queued.pop(session_id, None)
+            running = self._running.pop(session_id, None)
+            if queued is None and running is None:
+                raise ValueError(
+                    f"Portable session is not active and cannot be stopped: {session_id}"
+                )
+            if running is not None and running.process.poll() is None:
+                frame = supervisor_frame(
+                    session_id,
+                    running.next_supervisor_sequence,
+                    command_kind,
+                )
+                running.next_supervisor_sequence += 1
+                try:
+                    process_input = running.process.stdin
+                    if process_input is not None:
+                        process_input.write(frame.to_json_line() + "\n")
+                        process_input.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+                terminate_process(running.process)  # type: ignore[arg-type]
+            updated = replace(
+                snapshot,
+                status=status,
+                result=130,
+                input_request=None,
+                activity=(*snapshot.activity, activity)[-100:],
+                updated_at=time.time(),
+            )
+            self._snapshots[session_id] = updated
+            self._persist_snapshot(updated)
+            self._release_session_lease(session_id)
+            self._publish(updated)
+            self._condition.notify_all()
+            return updated
 
     def provide_input(
         self,
@@ -850,12 +1005,39 @@ class PortableSessionSupervisor:
         if scheduler_thread is not None:
             scheduler_thread.join(timeout=6)
         with self._condition:
-            session_ids = tuple(self._running)
-            queued_ids = tuple(self._queued)
-        for session_id in session_ids:
-            self._shutdown_session(session_id)
-        for session_id in queued_ids:
-            self._shutdown_queued_session(session_id)
+            live_session_ids = tuple(
+                dict.fromkeys((*self._running, *self._queued))
+            )
+        for session_id in live_session_ids:
+            try:
+                self.pause_session(session_id)
+            except ValueError:
+                continue
+        deadline = time.monotonic() + _COOPERATIVE_PAUSE_TIMEOUT_SECONDS
+        with self._condition:
+            while any(
+                session_id in self._running
+                for session_id in live_session_ids
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=remaining)
+            unresponsive_ids = tuple(
+                session_id
+                for session_id in live_session_ids
+                if session_id in self._running
+            )
+        for session_id in unresponsive_ids:
+            self._terminate_session(
+                session_id,
+                command_kind=SupervisorMessageKind.SHUTDOWN,
+                status=PortableSessionStatus.INTERRUPTED,
+                activity=(
+                    "Application exit interrupted a worker that did not reach "
+                    "a cooperative checkpoint"
+                ),
+            )
         for thread in tuple(self._threads):
             thread.join(timeout=1)
         self._threads = [thread for thread in self._threads if thread.is_alive()]
@@ -994,65 +1176,6 @@ class PortableSessionSupervisor:
                     self._snapshots[record.session_id] = synchronized
                     self._publish(synchronized)
 
-    def _shutdown_queued_session(self, session_id: str) -> None:
-        with self._condition:
-            queued = self._queued.pop(session_id, None)
-            if queued is None:
-                return
-            snapshot = self._snapshots[session_id]
-            ready = replace(
-                snapshot,
-                status=PortableSessionStatus.READY,
-                input_request=None,
-                updated_at=time.time(),
-            )
-            self._snapshots[session_id] = ready
-            self._release_execution_capacity(ready)
-            self._release_session_lease(session_id)
-            self._publish(ready)
-
-    def _shutdown_session(self, session_id: str) -> None:
-        with self._condition:
-            running = self._running.get(session_id)
-            if running is None:
-                return
-            if running.process.poll() is None:
-                frame = supervisor_frame(
-                    session_id,
-                    running.next_supervisor_sequence,
-                    SupervisorMessageKind.SHUTDOWN,
-                )
-                running.next_supervisor_sequence += 1
-                try:
-                    self._write_frame(session_id, frame)
-                    running.process.wait(timeout=1)
-                except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                    running.process.terminate()
-            try:
-                running.process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                running.process.terminate()
-                running.process.wait(timeout=1)
-            for stream in (
-                running.process.stdin,
-                running.process.stdout,
-                running.process.stderr,
-            ):
-                if stream is not None:
-                    stream.close()
-            self._running.pop(session_id, None)
-            self._release_session_lease(session_id)
-            snapshot = self._snapshots[session_id]
-            if not snapshot.status.terminal:
-                ready = replace(
-                    snapshot,
-                    status=PortableSessionStatus.READY,
-                    input_request=None,
-                    updated_at=time.time(),
-                )
-                self._snapshots[session_id] = ready
-                self._persist_snapshot(ready)
-
     def _write_frame(self, session_id: str, frame: PortableProtocolFrame) -> None:
         process = self._running[session_id].process
         assert process.stdin is not None
@@ -1076,11 +1199,17 @@ class PortableSessionSupervisor:
                 if not self._apply_worker_frame(session_id, frame, running):
                     return
                 if frame.kind in {
+                    WorkerMessageKind.CHECKPOINT.value,
                     WorkerMessageKind.COMPLETION.value,
                     WorkerMessageKind.FAILURE.value,
                 }:
                     return
-            if not self.snapshot(session_id).status.terminal:
+            if (
+                self._running.get(session_id) is running
+                and not self.snapshot(session_id).status.terminal
+                and self.snapshot(session_id).status
+                is not PortableSessionStatus.PAUSED
+            ):
                 self._fail_session(
                     session_id,
                     "Worker exited without a terminal result.",
@@ -1092,8 +1221,16 @@ class PortableSessionSupervisor:
             self._reap_worker(running)
             with self._condition:
                 current_running = self._running.get(session_id)
+                if (
+                    current_running is running
+                    and self._snapshots[session_id].status
+                    is PortableSessionStatus.PAUSED
+                ):
+                    self._running.pop(session_id, None)
+                    current_running = None
                 if current_running is None:
                     self._release_session_lease(session_id)
+                self._condition.notify_all()
 
     def _read_worker_stderr(
         self,
@@ -1297,6 +1434,22 @@ class PortableSessionSupervisor:
                         cancel_key=cancel_key,
                     ),
                 )
+            elif kind is WorkerMessageKind.CHECKPOINT:
+                if snapshot.status is not PortableSessionStatus.PAUSING:
+                    raise PortableProtocolError(
+                        "Worker CHECKPOINT requires a pausing session."
+                    )
+                summary = _payload_text(frame, "summary")
+                updated = replace(
+                    snapshot,
+                    status=PortableSessionStatus.PAUSED,
+                    input_request=None,
+                    activity=(
+                        (*snapshot.activity, summary)[-100:]
+                        if summary
+                        else snapshot.activity
+                    ),
+                )
             elif kind is WorkerMessageKind.COMPLETION:
                 exit_code = frame.payload.get("exit_code")
                 if not isinstance(exit_code, int) or isinstance(exit_code, bool):
@@ -1343,6 +1496,7 @@ class PortableSessionSupervisor:
                 WorkerMessageKind.SAFE_OUTPUT,
                 WorkerMessageKind.STATUS,
                 WorkerMessageKind.INPUT_REQUEST,
+                WorkerMessageKind.CHECKPOINT,
             }:
                 updated = self._refresh_authoritative_progress(updated)
             updated = replace(updated, updated_at=time.time())
@@ -1504,16 +1658,19 @@ class PortableSessionSupervisor:
         try:
             running.process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            running.process.terminate()
-            running.process.wait(timeout=1)
+            terminate_process(running.process)  # type: ignore[arg-type]
         finally:
+            unregister_process_tree(running.process)  # type: ignore[arg-type]
             for stream in (
                 running.process.stdin,
                 running.process.stdout,
                 running.process.stderr,
             ):
                 if stream is not None:
-                    stream.close()
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
 
     def _publish(self, snapshot: PortableSessionSnapshot) -> None:
         self._events.put(PortableSessionEvent(snapshot))
@@ -1801,7 +1958,7 @@ def _launch_portable_worker(
         environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog_path)
     if owner_id is not None:
         environment["DEVLOOP_PORTABLE_SESSION_OWNER_ID"] = owner_id
-    return subprocess.Popen(
+    process = subprocess.Popen(
         [
             sys.executable,
             "-u",
@@ -1818,4 +1975,7 @@ def _launch_portable_worker(
         text=True,
         encoding="utf-8",
         errors="replace",
+        **process_tree_creation_kwargs(),
     )
+    register_process_tree(process)
+    return process

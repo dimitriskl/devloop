@@ -10,12 +10,64 @@ from unittest import mock
 
 from devloop import cli
 from devloop.portable_protocol import PortableProtocolError, PortableProtocolFrame
-from devloop.portable_runtime import portable_runtime_session
+from devloop.portable_runtime import PortableRuntimeStopped, portable_runtime_session
 from devloop.portable_worker import PortableWorkerRuntimeBridge
 from devloop.statusui import Stage
 
 
 class PortableWorkerRuntimeBridgeTests(unittest.TestCase):
+    def test_pause_releases_a_worker_waiting_for_input(self) -> None:
+        command_stream = io.StringIO(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "session-pause",
+                    "sequence": 2,
+                    "kind": "PAUSE",
+                    "payload": {},
+                }
+            )
+            + "\n"
+        )
+        bridge = PortableWorkerRuntimeBridge(
+            "session-pause",
+            command_stream=command_stream,
+            event_stream=io.StringIO(),
+        )
+
+        with self.assertRaises(PortableRuntimeStopped):
+            bridge.read_line("Planning prompt")
+
+        self.assertEqual(bridge.lifecycle_request, "PAUSE")
+
+    def test_active_worker_observes_pause_at_runtime_checkpoint(self) -> None:
+        command_stream = io.StringIO(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "session-active-pause",
+                    "sequence": 2,
+                    "kind": "PAUSE",
+                    "payload": {},
+                }
+            )
+            + "\n"
+        )
+        bridge = PortableWorkerRuntimeBridge(
+            "session-active-pause",
+            command_stream=command_stream,
+            event_stream=io.StringIO(),
+        )
+        bridge.start_control_reader()
+        deadline = threading.Event()
+        for _ in range(100):
+            if bridge.lifecycle_request == "PAUSE":
+                break
+            deadline.wait(0.001)
+
+        with self.assertRaises(PortableRuntimeStopped):
+            bridge.show_screen("Next durable runtime boundary")
+
     def test_choice_request_identity_round_trips_through_user_input(self) -> None:
         command_stream = io.StringIO(
             json.dumps(

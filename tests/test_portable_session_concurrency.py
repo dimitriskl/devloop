@@ -20,6 +20,92 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionConcurrencyTests(unittest.TestCase):
+    def test_cooperative_pause_releases_capacity_and_retains_checkout(self) -> None:
+        worker_source = (
+            "import json,sys\n"
+            "session_id=sys.argv[1]\n"
+            "json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':1,'kind':'ACTIVITY','payload':{"
+            "'message':'Capacity is active'}}),flush=True)\n"
+            "command=json.loads(sys.stdin.readline())\n"
+            "assert command['kind']=='PAUSE',command\n"
+            "print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':2,'kind':'CHECKPOINT','payload':{"
+            "'summary':'Capacity-safe checkpoint'}}),flush=True)\n"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            owner_id = "pause-capacity-shell"
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                return subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="pause-capacity",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if supervisor.snapshot(launch.session_id).activity:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("Active worker did not publish activity.")
+            self.assertTrue(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+
+            supervisor.pause_session(launch.session_id)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+            deadline = time.monotonic() + 5
+            while (
+                time.monotonic() < deadline
+                and catalog.get_worktree_lease(checkout) is not None
+            ):
+                time.sleep(0.01)
+            record = catalog.get_session(launch.session_id)
+            supervisor.shutdown()
+            owns_capacity_after_pause = catalog.owns_execution_capacity(
+                launch.session_id,
+                owner_id=owner_id,
+            )
+            lease_after_pause = catalog.get_worktree_lease(checkout)
+
+        self.assertFalse(owns_capacity_after_pause)
+        self.assertIsNone(lease_after_pause)
+        self.assertEqual(record.status, PortableSessionStatus.PAUSED)
+        self.assertEqual(record.checkout, checkout.resolve())
+
     def test_worker_status_cannot_release_capacity_with_inactive_lifecycle_states(
         self,
     ) -> None:

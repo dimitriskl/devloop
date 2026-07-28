@@ -29,6 +29,472 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
+    def test_pause_waiting_session_persists_checkpoint_and_stops_worker(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "INPUT_REQUEST", {
+                "request_id": "planning-choice",
+                "request_generation": 1,
+                "request_kind": "TEXT",
+                "prompt": "What should we build?",
+            })
+            command = json.loads(sys.stdin.readline())
+            assert command["kind"] == "PAUSE", command
+            send(2, "CHECKPOINT", {
+                "summary": "Planning thread and settings are durable",
+            })
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="pause-waiting",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+
+            pausing = supervisor.pause_session(launch.session_id)
+            paused = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+            supervisor.shutdown()
+
+        self.assertEqual(pausing.status, PortableSessionStatus.PAUSING)
+        self.assertEqual(paused.status, PortableSessionStatus.PAUSED)
+        self.assertIsNone(paused.input_request)
+        self.assertIn(
+            "Planning thread and settings are durable",
+            paused.activity,
+        )
+
+    def test_pause_active_worker_reaches_runtime_checkpoint(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import sys
+            import time
+
+            from devloop import portable_worker
+            from devloop.portable_runtime import active_portable_runtime
+
+            def active_operation(_operation, _arguments):
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                while True:
+                    bridge.show_screen("Active operation boundary")
+                    time.sleep(0.01)
+
+            portable_worker._run_operation = active_operation
+            raise SystemExit(
+                portable_worker.main(["--session-id", sys.argv[1]])
+            )
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            environment = os.environ.copy()
+            source_path = str(Path(cli.__file__).resolve().parents[1])
+            environment["PYTHONPATH"] = source_path
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="pause-active",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if "Active operation boundary" in supervisor.snapshot(
+                    launch.session_id
+                ).activity:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("Active worker did not publish a runtime boundary.")
+
+            supervisor.pause_session(launch.session_id)
+            paused = self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+            supervisor.shutdown()
+
+        self.assertEqual(paused.status, PortableSessionStatus.PAUSED)
+        self.assertIn(
+            "Latest durable workflow checkpoint persisted",
+            paused.activity,
+        )
+
+    def test_resume_after_pause_continues_from_persisted_checkpoint(self) -> None:
+        first_worker = textwrap.dedent(
+            """
+            import json
+            import sys
+            from pathlib import Path
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            Path("completed-role.checkpoint").write_text("done", encoding="utf-8")
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "INPUT_REQUEST",
+                "payload": {
+                    "request_id": "checkpoint-wait",
+                    "request_generation": 1,
+                    "request_kind": "TEXT",
+                    "prompt": "Continue",
+                },
+            }), flush=True)
+            command = json.loads(sys.stdin.readline())
+            assert command["kind"] == "PAUSE", command
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 2,
+                "kind": "CHECKPOINT",
+                "payload": {"summary": "Completed role persisted"},
+            }), flush=True)
+            """
+        )
+        resumed_worker = textwrap.dedent(
+            """
+            import json
+            import sys
+            from pathlib import Path
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            assert Path("completed-role.checkpoint").read_text(
+                encoding="utf-8"
+            ) == "done"
+            for sequence, kind, payload in (
+                (1, "ACTIVITY", {"message": "Continued after completed role"}),
+                (2, "COMPLETION", {"exit_code": 0}),
+            ):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+            """
+        )
+        worker_sources = iter((first_worker, resumed_worker))
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    next(worker_sources),
+                    launch.session_id,
+                ],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="resume-checkpoint",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            supervisor.pause_session(launch.session_id)
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+
+            supervisor.resume_session(launch.session_id)
+            completed = supervisor.wait_for_terminal(launch.session_id, timeout=5)
+            supervisor.shutdown()
+
+        self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
+        self.assertIn("Continued after completed role", completed.activity)
+
+    def test_force_stop_preserves_partial_work_and_diagnostics(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+            from pathlib import Path
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            Path("partial-work.txt").write_text("kept\\n", encoding="utf-8")
+            print("partial command diagnostic", file=sys.stderr, flush=True)
+            send(1, "ACTIVITY", {"message": "Last durable issue checkpoint"})
+            sys.stdin.readline()
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="force-stop-active",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                current = supervisor.snapshot(launch.session_id)
+                if (
+                    current.activity
+                    and current.diagnostics
+                    and (checkout / "partial-work.txt").exists()
+                ):
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("Worker did not publish partial-work evidence.")
+
+            stopped = supervisor.force_stop_session(launch.session_id)
+            supervisor.shutdown()
+            partial_work = (checkout / "partial-work.txt").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(stopped.status, PortableSessionStatus.INTERRUPTED)
+        self.assertEqual(stopped.result, 130)
+        self.assertEqual(partial_work, "kept\n")
+        self.assertIn("Last durable issue checkpoint", stopped.activity)
+        self.assertIn("partial command diagnostic", stopped.diagnostics)
+
+    def test_explicit_cancel_records_cancelled_and_stops_worker(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            json.loads(sys.stdin.readline())
+            command = json.loads(sys.stdin.readline())
+            assert command["kind"] == "CANCEL", command
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="cancel-active",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+
+            cancelled = supervisor.cancel_session(launch.session_id)
+            terminal = supervisor.wait_for_terminal(launch.session_id, timeout=1)
+            supervisor.shutdown()
+
+        self.assertEqual(cancelled.status, PortableSessionStatus.CANCELLED)
+        self.assertEqual(terminal.status, PortableSessionStatus.CANCELLED)
+        self.assertEqual(cancelled.result, 130)
+
+    def test_shutdown_cooperatively_pauses_all_live_sessions(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            waiting = sys.argv[2] == "waiting"
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            if waiting:
+                send(1, "INPUT_REQUEST", {
+                    "request_id": f"{session_id}-input",
+                    "request_generation": 1,
+                    "request_kind": "TEXT",
+                    "prompt": "Planning input",
+                })
+            else:
+                send(1, "ACTIVITY", {"message": "Active delivery work"})
+            command = json.loads(sys.stdin.readline())
+            assert command["kind"] == "PAUSE", command
+            send(2, "CHECKPOINT", {
+                "summary": f"{session_id} exit checkpoint",
+            })
+            """
+        )
+        processes: list[subprocess.Popen[str]] = []
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    worker_source,
+                    launch.session_id,
+                    "waiting" if launch.session_id.endswith("waiting") else "active",
+                ],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            processes.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launches = (
+                PortableSessionLaunch(
+                    session_id="exit-active",
+                    checkout=Path(directory),
+                    operation=PortableWorkflowOperation.DELIVERY,
+                    arguments=(),
+                ),
+                PortableSessionLaunch(
+                    session_id="exit-waiting",
+                    checkout=Path(directory),
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                ),
+            )
+            for launch in launches:
+                supervisor.start_session(launch)
+            self._wait_for_status(
+                supervisor,
+                "exit-waiting",
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+
+            supervisor.shutdown()
+            snapshots = tuple(
+                supervisor.snapshot(launch.session_id) for launch in launches
+            )
+
+        self.assertEqual(
+            tuple(snapshot.status for snapshot in snapshots),
+            (PortableSessionStatus.PAUSED, PortableSessionStatus.PAUSED),
+        )
+        self.assertTrue(all(process.poll() is not None for process in processes))
+
     def test_default_planning_handoff_confirms_worktree_only_after_start_transfer(
         self,
     ) -> None:

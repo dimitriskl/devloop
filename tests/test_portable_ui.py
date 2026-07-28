@@ -45,6 +45,234 @@ from devloop.portable_ui.app import (
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelling_aggregate_exit_keeps_sessions_unchanged(self) -> None:
+        running = PortableSessionSnapshot(
+            session_id="exit-confirmation",
+            checkout=Path("exit-confirmation").resolve(),
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.shutdown_count = 0
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (running,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                self.shutdown_count += 1
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            confirmation = app.screen.query_one(
+                "#portable-exit-confirmation",
+                OptionList,
+            )
+            self.assertEqual(confirmation.option_count, 2)
+            self.assertTrue(app.is_running)
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            self.assertTrue(app.is_running)
+            self.assertEqual(supervisor.shutdown_count, 0)
+            self.assertEqual(
+                supervisor.list_sessions()[0].status,
+                PortableSessionStatus.RUNNING,
+            )
+
+    async def test_confirmed_aggregate_exit_shuts_down_once(self) -> None:
+        running = PortableSessionSnapshot(
+            session_id="confirmed-exit",
+            checkout=Path("confirmed-exit").resolve(),
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.shutdown_count = 0
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (running,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                self.shutdown_count += 1
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            await pilot.press("up", "enter")
+            await pilot.pause()
+
+        self.assertFalse(app.is_running)
+        self.assertEqual(app.operation_result, 130)
+        self.assertEqual(supervisor.shutdown_count, 1)
+
+    async def test_session_actions_pause_only_the_active_session(self) -> None:
+        running = PortableSessionSnapshot(
+            session_id="pause-from-actions",
+            checkout=Path("pause-from-actions").resolve(),
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+                self.current = running
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (self.current,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                self.current = replace(
+                    self.current,
+                    status=PortableSessionStatus.PAUSED,
+                )
+                return self.current
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter", "f9")
+            await pilot.pause()
+            actions = tuple(
+                str(menu.get_option_at_index(index).prompt)
+                for index in range(menu.option_count)
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertEqual(
+            actions,
+            ("Pause", "Force Stop", "Cancel Session", "Back to Session"),
+        )
+        self.assertEqual(
+            [intent.kind for intent in supervisor.intents],
+            [PortableSessionIntentKind.PAUSE],
+        )
+        self.assertEqual(supervisor.current.status, PortableSessionStatus.PAUSED)
+
+    async def test_force_stop_requires_confirmation(self) -> None:
+        running = PortableSessionSnapshot(
+            session_id="force-stop-confirmation",
+            checkout=Path("force-stop-confirmation").resolve(),
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (running,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return replace(
+                    running,
+                    status=PortableSessionStatus.INTERRUPTED,
+                    result=130,
+                )
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter", "f9", "down", "enter")
+            await pilot.pause()
+            confirmation = app.screen.query_one(
+                "#portable-session-action-confirmation",
+                OptionList,
+            )
+            self.assertEqual(confirmation.highlighted, 1)
+            self.assertEqual(supervisor.intents, [])
+
+            await pilot.press("up", "enter")
+            await pilot.pause()
+
+        self.assertEqual(
+            [intent.kind for intent in supervisor.intents],
+            [PortableSessionIntentKind.FORCE_STOP],
+        )
+
     async def test_sessions_options_updates_machine_concurrency_limit(self) -> None:
         class FakeSupervisor:
             def __init__(self) -> None:

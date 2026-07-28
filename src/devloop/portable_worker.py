@@ -8,7 +8,8 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from itertools import count
-from threading import RLock
+from queue import Queue
+from threading import RLock, Thread
 from typing import Any, TextIO
 
 from .portable_protocol import (
@@ -18,7 +19,11 @@ from .portable_protocol import (
     SupervisorMessageKind,
     WorkerMessageKind,
 )
-from .portable_runtime import PortableRunContext, portable_runtime_session
+from .portable_runtime import (
+    PortableRunContext,
+    PortableRuntimeStopped,
+    portable_runtime_session,
+)
 from .portable_sessions import PortableWorkflowOperation
 
 
@@ -55,7 +60,32 @@ class PortableWorkerRuntimeBridge:
         self._expected_command_sequence = 2
         self._request_generations = count(1)
         self._write_lock = RLock()
+        self._lifecycle_request: SupervisorMessageKind | None = None
+        self._command_queue: Queue[PortableProtocolFrame | PortableProtocolError] = (
+            Queue()
+        )
+        self._control_reader_started = False
         self._content_size: tuple[int, int] | None = None
+
+    @property
+    def lifecycle_request(self) -> str | None:
+        request = self._lifecycle_request
+        return None if request is None else request.value
+
+    def start_control_reader(
+        self,
+        *,
+        on_lifecycle: Callable[[], None] | None = None,
+    ) -> None:
+        if self._control_reader_started:
+            return
+        self._control_reader_started = True
+        Thread(
+            target=self._read_commands,
+            args=(on_lifecycle,),
+            daemon=True,
+            name=f"portable-worker-{self._session_id}-control",
+        ).start()
 
     def choose(
         self,
@@ -66,6 +96,7 @@ class PortableWorkerRuntimeBridge:
         render: Callable[[str], None],
         shortcuts: Mapping[str, str] | None = None,
     ) -> str:
+        self._raise_if_stopping()
         render(default_key)
         request_id = str(uuid.uuid4())
         request_generation = next(self._request_generations)
@@ -89,6 +120,7 @@ class PortableWorkerRuntimeBridge:
         return selected
 
     def read_line(self, prompt: str, *, history: Sequence[str] = ()) -> str:
+        self._raise_if_stopping()
         request_id = str(uuid.uuid4())
         request_generation = next(self._request_generations)
         self._send(
@@ -107,12 +139,14 @@ class PortableWorkerRuntimeBridge:
         )
 
     def request_stop(self) -> None:
-        return None
+        self._lifecycle_request = SupervisorMessageKind.SHUTDOWN
 
     def show_screen(self, content: str) -> None:
+        self._raise_if_stopping()
         self._send(WorkerMessageKind.SAFE_OUTPUT, {"content": content})
 
     def update_run_context(self, context: PortableRunContext) -> None:
+        self._raise_if_stopping()
         self._send(WorkerMessageKind.CONTEXT, asdict(context))
 
     def update_session_status(
@@ -121,6 +155,7 @@ class PortableWorkerRuntimeBridge:
         stage: str,
         active_issue: str | None = None,
     ) -> None:
+        self._raise_if_stopping()
         payload: dict[str, Any] = {
             "status": "RUNNING",
             "stage": stage,
@@ -144,6 +179,9 @@ class PortableWorkerRuntimeBridge:
 
     def send_completion(self, exit_code: int) -> None:
         self._send(WorkerMessageKind.COMPLETION, {"exit_code": exit_code})
+
+    def send_checkpoint(self, summary: str) -> None:
+        self._send(WorkerMessageKind.CHECKPOINT, {"summary": summary})
 
     def send_hello(self) -> None:
         self._send(WorkerMessageKind.HELLO, {})
@@ -172,15 +210,21 @@ class PortableWorkerRuntimeBridge:
         request_id: str,
         request_generation: int,
     ) -> str:
-        line = self._command_stream.readline()
-        if not line:
-            raise PortableProtocolError("Supervisor closed worker input.")
-        frame = PortableProtocolFrame.parse(
-            line,
-            expected_session_id=self._session_id,
-            expected_sequence=self._expected_command_sequence,
-        )
-        self._expected_command_sequence += 1
+        frame = self._next_command()
+        try:
+            lifecycle_kind = SupervisorMessageKind(frame.kind)
+        except ValueError:
+            lifecycle_kind = None
+        if lifecycle_kind in {
+            SupervisorMessageKind.PAUSE,
+            SupervisorMessageKind.FORCE_STOP,
+            SupervisorMessageKind.CANCEL,
+            SupervisorMessageKind.SHUTDOWN,
+        }:
+            self._lifecycle_request = lifecycle_kind
+            raise PortableRuntimeStopped(
+                f"Portable worker received {lifecycle_kind.value}."
+            )
         if frame.kind != SupervisorMessageKind.USER_INPUT.value:
             raise PortableProtocolError(
                 f"Expected USER_INPUT; received {frame.kind!r}."
@@ -197,6 +241,68 @@ class PortableWorkerRuntimeBridge:
             raise PortableProtocolError("Supervisor USER_INPUT value must be text.")
         return value
 
+    def _next_command(self) -> PortableProtocolFrame:
+        if self._control_reader_started:
+            queued = self._command_queue.get()
+            if isinstance(queued, PortableProtocolError):
+                raise queued
+            return queued
+        line = self._command_stream.readline()
+        if not line:
+            raise PortableProtocolError("Supervisor closed worker input.")
+        frame = PortableProtocolFrame.parse(
+            line,
+            expected_session_id=self._session_id,
+            expected_sequence=self._expected_command_sequence,
+        )
+        self._expected_command_sequence += 1
+        return frame
+
+    def _read_commands(
+        self,
+        on_lifecycle: Callable[[], None] | None,
+    ) -> None:
+        while True:
+            line = self._command_stream.readline()
+            if not line:
+                self._command_queue.put(
+                    PortableProtocolError("Supervisor closed worker input.")
+                )
+                return
+            try:
+                frame = PortableProtocolFrame.parse(
+                    line,
+                    expected_session_id=self._session_id,
+                    expected_sequence=self._expected_command_sequence,
+                )
+            except PortableProtocolError as error:
+                self._command_queue.put(error)
+                return
+            self._expected_command_sequence += 1
+            try:
+                kind = SupervisorMessageKind(frame.kind)
+            except ValueError:
+                kind = None
+            if kind in {
+                SupervisorMessageKind.PAUSE,
+                SupervisorMessageKind.FORCE_STOP,
+                SupervisorMessageKind.CANCEL,
+                SupervisorMessageKind.SHUTDOWN,
+            }:
+                self._lifecycle_request = kind
+                if on_lifecycle is not None:
+                    on_lifecycle()
+                self._command_queue.put(frame)
+                return
+            self._command_queue.put(frame)
+
+    def _raise_if_stopping(self) -> None:
+        request = self._lifecycle_request
+        if request is not None:
+            raise PortableRuntimeStopped(
+                f"Portable worker received {request.value}."
+            )
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
@@ -212,6 +318,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sys.stdout = _ProtocolOutputStream(bridge, is_error=False)
     try:
         bridge.send_hello()
+        from .subprocess_utils import terminate_active_process_trees
+
+        bridge.start_control_reader(on_lifecycle=terminate_active_process_trees)
         if start.payload.get("restore_catalog_session") is True:
             os.environ["DEVLOOP_PORTABLE_SESSION_RESTORE"] = "1"
         if start.kind == SupervisorMessageKind.RESUME.value:
@@ -237,6 +346,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             result = _run_operation(operation, arguments)
+    except PortableRuntimeStopped:
+        result = 0
     except SystemExit as error:
         result = error.code if isinstance(error.code, int) else 1
     except BaseException as error:
@@ -245,6 +356,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         sys.stdout = protocol_stdout
+    if bridge.lifecycle_request == SupervisorMessageKind.PAUSE.value:
+        bridge.send_checkpoint("Latest durable workflow checkpoint persisted")
+        return 0
+    if bridge.lifecycle_request in {
+        SupervisorMessageKind.FORCE_STOP.value,
+        SupervisorMessageKind.CANCEL.value,
+        SupervisorMessageKind.SHUTDOWN.value,
+    }:
+        return 0
     bridge.send_completion(result)
     return result
 

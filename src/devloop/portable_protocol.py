@@ -14,6 +14,9 @@ class SupervisorMessageKind(str, Enum):
     START = "START"
     RESUME = "RESUME"
     USER_INPUT = "USER_INPUT"
+    PAUSE = "PAUSE"
+    FORCE_STOP = "FORCE_STOP"
+    CANCEL = "CANCEL"
     SHUTDOWN = "SHUTDOWN"
 
 
@@ -24,6 +27,7 @@ class WorkerMessageKind(str, Enum):
     ACTIVITY = "ACTIVITY"
     SAFE_OUTPUT = "SAFE_OUTPUT"
     INPUT_REQUEST = "INPUT_REQUEST"
+    CHECKPOINT = "CHECKPOINT"
     COMPLETION = "COMPLETION"
     FAILURE = "FAILURE"
 
