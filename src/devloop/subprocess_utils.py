@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Sequence
 
 
+_REAL_POPEN_TYPE = subprocess.Popen
 PROCESS_EXIT_GRACE_SECONDS = 1.0
 PROCESS_TERMINATE_GRACE_SECONDS = 5.0
 BUDGET_POLL_SECONDS = 0.05
@@ -22,6 +23,7 @@ BUDGET_POLL_SECONDS = 0.05
 # number.
 EXECUTION_BUDGET_EXPIRY_RETURNCODE = 124
 PROCESS_TREE_ATTRIBUTE = "_devloop_process_group_id"
+PROCESS_TREE_STOPPED_ATTRIBUTE = "_devloop_process_tree_confirmed_stopped"
 WINDOWS_PROCESS_SNAPSHOT = 0x00000002
 WINDOWS_PROCESS_TERMINATE = 0x0001
 WINDOWS_SYNCHRONIZE = 0x00100000
@@ -29,7 +31,13 @@ WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 WINDOWS_WAIT_OBJECT_0 = 0x00000000
 WINDOWS_WAIT_TIMEOUT = 0x00000102
 WINDOWS_WAIT_FAILED = 0xFFFFFFFF
+WINDOWS_CREATE_SUSPENDED = 0x00000004
+WINDOWS_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+WINDOWS_THREAD_SNAPSHOT = 0x00000004
+WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 WINDOWS_ERROR_INVALID_PARAMETER = 87
+WINDOWS_ERROR_ACCESS_DENIED = 5
+WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 PROCESS_TREE_REAPER_INTERVAL_SECONDS = 0.5
@@ -61,6 +69,23 @@ class ProcessTreeState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class WindowsJobAssignmentState(str, Enum):
+    """Whether a Windows process tree has authoritative Job Object ownership."""
+
+    PENDING = "PENDING"
+    ASSIGNED = "ASSIGNED"
+    ASSIGNMENT_FAILED = "ASSIGNMENT_FAILED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class WindowsJobOwnership:
+    state: WindowsJobAssignmentState
+    handle: object | None = None
+    failure_stage: str | None = None
+    error_code: int | None = None
+
+
 _ACTIVE_PROCESS_TREES: set[subprocess.Popen[str]] = set()
 _ACTIVE_PROCESS_TREE_IDENTITIES: dict[
     subprocess.Popen[str],
@@ -70,7 +95,10 @@ _ACTIVE_POSIX_PROCESS_GROUPS: dict[
     subprocess.Popen[str],
     PosixProcessGroupIdentity,
 ] = {}
-_ACTIVE_WINDOWS_JOB_HANDLES: dict[subprocess.Popen[str], object] = {}
+_ACTIVE_WINDOWS_JOBS: dict[
+    subprocess.Popen[str],
+    WindowsJobOwnership,
+] = {}
 _ACTIVE_PROCESS_TREES_LOCK = threading.RLock()
 _PROCESS_TREE_REAPER_WAKEUP = threading.Event()
 _PROCESS_TREE_REAPER_THREAD: threading.Thread | None = None
@@ -264,6 +292,190 @@ def process_tree_creation_kwargs() -> dict[str, int | bool]:
     return {"start_new_session": True}
 
 
+class ProcessTreeLaunchError(OSError):
+    """Raised before user code runs when its process tree cannot be contained."""
+
+
+def launch_process_tree(
+    command: Sequence[str],
+    **popen_kwargs: object,
+) -> subprocess.Popen[str]:
+    """Launch user code only after its process tree has authoritative ownership."""
+    if os.name != "nt":
+        popen_kwargs.setdefault("start_new_session", True)
+        process = subprocess.Popen(  # type: ignore[arg-type]
+            list(command),
+            **popen_kwargs,
+        )
+        register_process_tree(process)
+        return process
+
+    creationflags = int(popen_kwargs.pop("creationflags", 0))
+    process = _launch_suspended_windows_process(
+        command,
+        popen_kwargs,
+        creationflags=creationflags,
+    )
+    ownership = _ACTIVE_WINDOWS_JOBS.get(process)
+    if (
+        ownership is not None
+        and ownership.state is WindowsJobAssignmentState.UNAVAILABLE
+        and not isinstance(process, _REAL_POPEN_TYPE)
+    ):
+        # Unit-test Popen doubles have no Win32 handle or thread to resume.
+        return process
+    if (
+        ownership is not None
+        and ownership.state is WindowsJobAssignmentState.ASSIGNED
+        and _resume_windows_process(process)
+    ):
+        return process
+
+    retry_with_breakaway = (
+        ownership is not None
+        and ownership.failure_stage == "assign"
+        and ownership.error_code == WINDOWS_ERROR_ACCESS_DENIED
+    )
+    _discard_suspended_windows_process(process)
+    if retry_with_breakaway:
+        process = _launch_suspended_windows_process(
+            command,
+            popen_kwargs,
+            creationflags=(
+                creationflags | WINDOWS_CREATE_BREAKAWAY_FROM_JOB
+            ),
+        )
+        ownership = _ACTIVE_WINDOWS_JOBS.get(process)
+        if (
+            ownership is not None
+            and ownership.state is WindowsJobAssignmentState.ASSIGNED
+            and _resume_windows_process(process)
+        ):
+            return process
+        _discard_suspended_windows_process(process)
+
+    failure = ownership or WindowsJobOwnership(
+        state=WindowsJobAssignmentState.UNAVAILABLE,
+    )
+    detail = failure.failure_stage or failure.state.value.lower()
+    error = (
+        f" Win32 error {failure.error_code}"
+        if failure.error_code is not None
+        else ""
+    )
+    raise ProcessTreeLaunchError(
+        "Could not launch an authoritatively owned Windows process tree: "
+        f"{detail}{error}."
+    )
+
+
+def _launch_suspended_windows_process(
+    command: Sequence[str],
+    popen_kwargs: dict[str, object],
+    *,
+    creationflags: int,
+) -> subprocess.Popen[str]:
+    process = subprocess.Popen(  # type: ignore[arg-type]
+        list(command),
+        **popen_kwargs,
+        creationflags=(
+            creationflags
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | WINDOWS_CREATE_SUSPENDED
+        ),
+    )
+    register_process_tree(process)
+    return process
+
+
+def _discard_suspended_windows_process(
+    process: subprocess.Popen[str],
+) -> None:
+    """Discard a root that has not executed and therefore has no descendants."""
+    try:
+        process.kill()
+        process.wait(timeout=PROCESS_EXIT_GRACE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ProcessTreeLaunchError(
+            "Could not discard an uncontained suspended Windows process."
+        ) from error
+    unregister_process_tree(process)
+
+
+def _resume_windows_process(process: subprocess.Popen[str]) -> bool:
+    """Resume every initial thread after the suspended root joins its Job."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return False
+
+    class ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD),
+            ("usage", wintypes.DWORD),
+            ("thread_id", wintypes.DWORD),
+            ("owner_process_id", wintypes.DWORD),
+            ("base_priority", wintypes.LONG),
+            ("delta_priority", wintypes.LONG),
+            ("flags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    create_snapshot.restype = wintypes.HANDLE
+    thread_first = kernel32.Thread32First
+    thread_first.argtypes = (wintypes.HANDLE, ctypes.POINTER(ThreadEntry32))
+    thread_first.restype = wintypes.BOOL
+    thread_next = kernel32.Thread32Next
+    thread_next.argtypes = (wintypes.HANDLE, ctypes.POINTER(ThreadEntry32))
+    thread_next.restype = wintypes.BOOL
+    open_thread = kernel32.OpenThread
+    open_thread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_thread.restype = wintypes.HANDLE
+    resume_thread = kernel32.ResumeThread
+    resume_thread.argtypes = (wintypes.HANDLE,)
+    resume_thread.restype = wintypes.DWORD
+    close = kernel32.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+
+    snapshot = create_snapshot(WINDOWS_THREAD_SNAPSHOT, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        return False
+    thread_handles: list[object] = []
+    try:
+        entry = ThreadEntry32()
+        entry.size = ctypes.sizeof(ThreadEntry32)
+        if thread_first(snapshot, ctypes.byref(entry)):
+            while True:
+                if int(entry.owner_process_id) == process.pid:
+                    handle = open_thread(
+                        WINDOWS_THREAD_SUSPEND_RESUME,
+                        False,
+                        entry.thread_id,
+                    )
+                    if not handle:
+                        return False
+                    thread_handles.append(handle)
+                if not thread_next(snapshot, ctypes.byref(entry)):
+                    break
+    finally:
+        close(snapshot)
+
+    if not thread_handles:
+        return False
+    try:
+        for handle in thread_handles:
+            if resume_thread(handle) == WINDOWS_WAIT_FAILED:
+                return False
+        return True
+    finally:
+        for handle in thread_handles:
+            close(handle)
+
+
 def _retain_posix_group_leader(process: subprocess.Popen[str]) -> bool:
     """Make wait/poll observe exit without reaping the process-group leader.
 
@@ -338,19 +550,22 @@ def register_process_tree(process: subprocess.Popen[str]) -> None:
         if process in _ACTIVE_PROCESS_TREES:
             return
         _ACTIVE_PROCESS_TREES.add(process)
+        if os.name == "nt":
+            _ACTIVE_WINDOWS_JOBS[process] = WindowsJobOwnership(
+                state=WindowsJobAssignmentState.PENDING,
+            )
         process_id = getattr(process, "pid", None)
         if isinstance(process_id, int):
             process_identity = _process_identity(process_id)
             if process_identity is not None:
                 _ACTIVE_PROCESS_TREE_IDENTITIES[process] = {process_identity}
     if os.name == "nt":
-        job_handle = _create_windows_kill_on_close_job(process)
-        if job_handle is not None:
-            with _ACTIVE_PROCESS_TREES_LOCK:
-                if process in _ACTIVE_PROCESS_TREES:
-                    _ACTIVE_WINDOWS_JOB_HANDLES[process] = job_handle
-                else:
-                    _close_windows_handle(job_handle)
+        windows_job = _create_windows_kill_on_close_job(process)
+        with _ACTIVE_PROCESS_TREES_LOCK:
+            if process in _ACTIVE_PROCESS_TREES:
+                _ACTIVE_WINDOWS_JOBS[process] = windows_job
+            elif windows_job.handle is not None:
+                _close_windows_handle(windows_job.handle)
         _refresh_windows_process_tree(process)
     else:
         try:
@@ -376,16 +591,16 @@ def register_process_tree(process: subprocess.Popen[str]) -> None:
 
 def unregister_process_tree(process: subprocess.Popen[str]) -> None:
     group: PosixProcessGroupIdentity | None
-    job_handle: object | None
+    windows_job: WindowsJobOwnership | None
     with _ACTIVE_PROCESS_TREES_LOCK:
         _ACTIVE_PROCESS_TREES.discard(process)
         _ACTIVE_PROCESS_TREE_IDENTITIES.pop(process, None)
         group = _ACTIVE_POSIX_PROCESS_GROUPS.pop(process, None)
-        job_handle = _ACTIVE_WINDOWS_JOB_HANDLES.pop(process, None)
+        windows_job = _ACTIVE_WINDOWS_JOBS.pop(process, None)
     if group is not None and group.leader_retained:
         _reap_posix_group_leader(process)
-    if job_handle is not None:
-        _close_windows_handle(job_handle)
+    if windows_job is not None and windows_job.handle is not None:
+        _close_windows_handle(windows_job.handle)
     _PROCESS_TREE_REAPER_WAKEUP.set()
 
 
@@ -393,6 +608,7 @@ def release_process_tree_if_stopped(process: subprocess.Popen[str]) -> bool:
     """Release ownership only after the entire registered tree has stopped."""
     if _process_tree_is_alive(process):
         return False
+    _mark_process_tree_stopped(process)
     unregister_process_tree(process)
     return True
 
@@ -406,6 +622,7 @@ def terminate_active_process_trees() -> tuple[ProcessTerminationResult, ...]:
         if _process_tree_is_alive(process):
             results.append(terminate_process(process))
         else:
+            _mark_process_tree_stopped(process)
             unregister_process_tree(process)
             results.append(
                 ProcessTerminationResult(
@@ -425,6 +642,7 @@ def owned_process_trees_are_stopped() -> bool:
     for process in processes:
         if _process_tree_is_alive(process):
             return False
+        _mark_process_tree_stopped(process)
         unregister_process_tree(process)
     return True
 
@@ -432,6 +650,11 @@ def owned_process_trees_are_stopped() -> bool:
 def terminate_process(
     process: subprocess.Popen[str],
 ) -> ProcessTerminationResult:
+    if _process_tree_was_confirmed_stopped(process):
+        return ProcessTerminationResult(
+            state=ProcessTreeState.STOPPED,
+            detail="Owned process tree had already been confirmed stopped.",
+        )
     register_process_tree(process)
     _signal_process_tree(process, force=False)
     try:
@@ -447,6 +670,7 @@ def terminate_process(
             pass
         state = _process_tree_state(process)
     if state is ProcessTreeState.STOPPED:
+        _mark_process_tree_stopped(process)
         unregister_process_tree(process)
         return ProcessTerminationResult(
             state=ProcessTreeState.STOPPED,
@@ -461,6 +685,16 @@ def terminate_process(
             "ownership remains registered."
         ),
     )
+
+
+def _mark_process_tree_stopped(process: subprocess.Popen[str]) -> None:
+    setattr(process, PROCESS_TREE_STOPPED_ATTRIBUTE, True)
+
+
+def _process_tree_was_confirmed_stopped(
+    process: subprocess.Popen[str],
+) -> bool:
+    return getattr(process, PROCESS_TREE_STOPPED_ATTRIBUTE, False) is True
 
 
 def _ensure_process_tree_reaper() -> None:
@@ -505,6 +739,18 @@ def _signal_process_tree(
 ) -> bool:
     tree_signalled = False
     if os.name == "nt":
+        with _ACTIVE_PROCESS_TREES_LOCK:
+            windows_job = _ACTIVE_WINDOWS_JOBS.get(process)
+        if (
+            windows_job is not None
+            and windows_job.state is WindowsJobAssignmentState.ASSIGNED
+        ):
+            job_state = _terminate_windows_job(windows_job)
+            root_signalled = _signal_owned_process(process, force=force)
+            return (
+                job_state is ProcessTreeState.STOPPED
+                or root_signalled
+            )
         pid = getattr(process, "pid", None)
         if isinstance(pid, int):
             retained_identities = _refresh_windows_process_tree(process)
@@ -635,16 +881,20 @@ def _terminate_windows_process_tree(
 
 def _create_windows_kill_on_close_job(
     process: subprocess.Popen[str],
-) -> object | None:
+) -> WindowsJobOwnership:
     """Guard a registered Windows tree against parent-interpreter exit."""
     process_handle = getattr(process, "_handle", None)
     if not isinstance(process_handle, int):
-        return None
+        return WindowsJobOwnership(
+            state=WindowsJobAssignmentState.UNAVAILABLE,
+        )
     try:
         import ctypes
         from ctypes import wintypes
     except ImportError:
-        return None
+        return WindowsJobOwnership(
+            state=WindowsJobAssignmentState.ASSIGNMENT_FAILED,
+        )
 
     class BasicLimitInformation(ctypes.Structure):
         _fields_ = [
@@ -697,7 +947,11 @@ def _create_windows_kill_on_close_job(
 
     job_handle = create_job(None, None)
     if not job_handle:
-        return None
+        return WindowsJobOwnership(
+            state=WindowsJobAssignmentState.ASSIGNMENT_FAILED,
+            failure_stage="create",
+            error_code=ctypes.get_last_error(),
+        )
     information = ExtendedLimitInformation()
     information.basic_limit_information.limit_flags = (
         WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -707,10 +961,26 @@ def _create_windows_kill_on_close_job(
         WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
         ctypes.byref(information),
         ctypes.sizeof(information),
-    ) or not assign_process(job_handle, process_handle):
+    ):
+        error_code = ctypes.get_last_error()
         _close_windows_handle(job_handle)
-        return None
-    return job_handle
+        return WindowsJobOwnership(
+            state=WindowsJobAssignmentState.ASSIGNMENT_FAILED,
+            failure_stage="set",
+            error_code=error_code,
+        )
+    if not assign_process(job_handle, process_handle):
+        error_code = ctypes.get_last_error()
+        _close_windows_handle(job_handle)
+        return WindowsJobOwnership(
+            state=WindowsJobAssignmentState.ASSIGNMENT_FAILED,
+            failure_stage="assign",
+            error_code=error_code,
+        )
+    return WindowsJobOwnership(
+        state=WindowsJobAssignmentState.ASSIGNED,
+        handle=job_handle,
+    )
 
 
 def _close_windows_handle(handle: object) -> None:
@@ -728,10 +998,85 @@ def _close_windows_handle(handle: object) -> None:
 
 def _close_active_windows_job_handles() -> None:
     with _ACTIVE_PROCESS_TREES_LOCK:
-        handles = tuple(_ACTIVE_WINDOWS_JOB_HANDLES.values())
-        _ACTIVE_WINDOWS_JOB_HANDLES.clear()
-    for handle in handles:
-        _close_windows_handle(handle)
+        jobs = tuple(_ACTIVE_WINDOWS_JOBS.values())
+        _ACTIVE_WINDOWS_JOBS.clear()
+    for job in jobs:
+        if job.handle is not None:
+            _close_windows_handle(job.handle)
+
+
+def _query_windows_job_active_processes(handle: object) -> int | None:
+    """Return authoritative Job Object membership, or None when it is unknown."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    class BasicAccountingInformation(ctypes.Structure):
+        _fields_ = [
+            ("total_user_time", ctypes.c_longlong),
+            ("total_kernel_time", ctypes.c_longlong),
+            ("this_period_total_user_time", ctypes.c_longlong),
+            ("this_period_total_kernel_time", ctypes.c_longlong),
+            ("total_page_fault_count", wintypes.DWORD),
+            ("total_processes", wintypes.DWORD),
+            ("active_processes", wintypes.DWORD),
+            ("total_terminated_processes", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    query_information = kernel32.QueryInformationJobObject
+    query_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    )
+    query_information.restype = wintypes.BOOL
+    information = BasicAccountingInformation()
+    if not query_information(
+        handle,
+        WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        None,
+    ):
+        return None
+    return int(information.active_processes)
+
+
+def _terminate_windows_job(
+    ownership: WindowsJobOwnership,
+) -> ProcessTreeState:
+    """Terminate an assigned Job Object and keep its handle until it is empty."""
+    if (
+        ownership.state is not WindowsJobAssignmentState.ASSIGNED
+        or ownership.handle is None
+    ):
+        return ProcessTreeState.UNKNOWN
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return ProcessTreeState.UNKNOWN
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    terminate_job = kernel32.TerminateJobObject
+    terminate_job.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    terminate_job.restype = wintypes.BOOL
+    termination_requested = bool(terminate_job(ownership.handle, 1))
+    deadline = time.monotonic() + PROCESS_TERMINATE_GRACE_SECONDS
+    while True:
+        active_processes = _query_windows_job_active_processes(ownership.handle)
+        if active_processes is None:
+            return ProcessTreeState.UNKNOWN
+        if active_processes == 0:
+            return ProcessTreeState.STOPPED
+        if not termination_requested or time.monotonic() >= deadline:
+            return ProcessTreeState.UNKNOWN
+        time.sleep(0.01)
 
 
 def _windows_process_depth(
@@ -752,6 +1097,9 @@ def _process_tree_state(
     process: subprocess.Popen[str],
 ) -> ProcessTreeState:
     if os.name == "nt":
+        job_state = _windows_job_process_tree_state(process)
+        if job_state is not None:
+            return job_state
         retained_identities = _refresh_windows_process_tree(process)
         if not retained_identities:
             with _ACTIVE_PROCESS_TREES_LOCK:
@@ -769,6 +1117,28 @@ def _process_tree_state(
             return ProcessTreeState.UNKNOWN
         return ProcessTreeState.STOPPED
     return _posix_process_group_state(process)
+
+
+def _windows_job_process_tree_state(
+    process: subprocess.Popen[str],
+) -> ProcessTreeState | None:
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        ownership = _ACTIVE_WINDOWS_JOBS.get(process)
+    if ownership is None:
+        return None
+    if ownership.state is WindowsJobAssignmentState.UNAVAILABLE:
+        return None
+    if (
+        ownership.state is not WindowsJobAssignmentState.ASSIGNED
+        or ownership.handle is None
+    ):
+        return ProcessTreeState.UNKNOWN
+    active_processes = _query_windows_job_active_processes(ownership.handle)
+    if active_processes is None:
+        return ProcessTreeState.UNKNOWN
+    if active_processes > 0:
+        return ProcessTreeState.RUNNING
+    return ProcessTreeState.STOPPED
 
 
 def _process_tree_is_alive(process: subprocess.Popen[str]) -> bool:

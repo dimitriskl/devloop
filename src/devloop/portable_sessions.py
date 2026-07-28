@@ -25,7 +25,7 @@ from .portable_runtime import PortableRunContext
 from .subprocess_utils import (
     ProcessTreeState,
     ProcessTerminationResult,
-    process_tree_creation_kwargs,
+    launch_process_tree,
     register_process_tree,
     terminate_process,
 )
@@ -649,6 +649,7 @@ class PortableSessionSupervisor:
     ) -> PortableSessionSnapshot:
         try:
             process = self._worker_launcher(launch)
+            register_process_tree(process)
         except BaseException:
             self._handle_launch_failure(
                 launch.session_id,
@@ -2390,7 +2391,7 @@ def _launch_portable_worker(
         environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog_path)
     if owner_id is not None:
         environment["DEVLOOP_PORTABLE_SESSION_OWNER_ID"] = owner_id
-    process = subprocess.Popen(
+    process = launch_process_tree(
         [
             sys.executable,
             "-u",
@@ -2407,7 +2408,5 @@ def _launch_portable_worker(
         text=True,
         encoding="utf-8",
         errors="replace",
-        **process_tree_creation_kwargs(),
     )
-    register_process_tree(process)
     return process

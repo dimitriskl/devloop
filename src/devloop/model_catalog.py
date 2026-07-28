@@ -17,8 +17,7 @@ from typing import Any, Callable, Mapping, Protocol
 from .execution_backend_id import ExecutionBackendId, parse_execution_backend_id
 from .terminal_text import has_unsafe_terminal_controls
 from .subprocess_utils import (
-    process_tree_creation_kwargs,
-    register_process_tree,
+    launch_process_tree,
     terminate_process,
 )
 
@@ -645,7 +644,7 @@ class _AppServerCatalogSession:
 
     def __enter__(self) -> _AppServerCatalogSession:
         try:
-            self._process = subprocess.Popen(
+            self._process = launch_process_tree(
                 [self._codex, "app-server", "--listen", "stdio://"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -655,13 +654,11 @@ class _AppServerCatalogSession:
                 errors="replace",
                 bufsize=1,
                 cwd=self._cwd,
-                **process_tree_creation_kwargs(),
             )
         except OSError as error:
             raise CatalogDiscoveryError(
                 f"Could not start Codex Model Catalog discovery: {error}"
             ) from error
-        register_process_tree(self._process)
         assert self._process.stdout is not None
         assert self._process.stderr is not None
         self._reader_threads = [

@@ -28,8 +28,7 @@ from .portable_workflow import (
 from .statusui import Stage, WaitingIndicator, format_duration as _format_duration
 from .subprocess_utils import (
     ProcessExecutionBudget,
-    process_tree_creation_kwargs,
-    register_process_tree,
+    launch_process_tree,
     reap_process_after_terminal_event,
     release_process_tree_if_stopped,
     terminate_process,
@@ -221,7 +220,7 @@ def run_streaming(
         resolved_command[0] = resolve_codex_executable(resolved_command[0])
     json_mode = "--json" in resolved_command
     try:
-        process = subprocess.Popen(
+        process = launch_process_tree(
             resolved_command,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
@@ -231,13 +230,11 @@ def run_streaming(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            **process_tree_creation_kwargs(),
         )
     except FileNotFoundError:
         message = f"Codex executable not found: {command[0]}. Is Codex CLI installed and on PATH?"
         print(message, file=sys.stderr)
         return 127, message
-    register_process_tree(process)
     captured: list[str] = []
     assert process.stdout is not None
     waiting_indicator = WaitingIndicator(

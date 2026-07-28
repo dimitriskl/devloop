@@ -34,10 +34,9 @@ from ..subprocess_utils import (
     EXECUTION_BUDGET_EXPIRY_RETURNCODE,
     AttemptExecutionBudget,
     ProcessExecutionBudget,
+    launch_process_tree,
     output_text,
-    process_tree_creation_kwargs,
     reap_process_after_terminal_event,
-    register_process_tree,
     release_process_tree_if_stopped,
     run_captured_text,
     terminate_process,
@@ -346,7 +345,7 @@ def run_streaming_codex_command(
     execution_budget: ExecutionBudget | None = None,
     attempt_budget: AttemptExecutionBudget | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(
+    process = launch_process_tree(
         command,
         cwd=cwd,
         stdin=subprocess.PIPE,
@@ -356,9 +355,7 @@ def run_streaming_codex_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        **process_tree_creation_kwargs(),
     )
-    register_process_tree(process)
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None

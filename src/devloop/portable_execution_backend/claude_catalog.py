@@ -41,8 +41,7 @@ from ..model_catalog import (
     ModelCatalog,
 )
 from ..subprocess_utils import (
-    process_tree_creation_kwargs,
-    register_process_tree,
+    launch_process_tree,
     terminate_process,
 )
 from ..templates import installed_bundle_context
@@ -386,7 +385,7 @@ class _ClaudeVerificationSession:
             str(uuid.uuid4()),
         ]
         try:
-            process = subprocess.Popen(
+            process = launch_process_tree(
                 command,
                 cwd=self._cwd,
                 stdin=subprocess.PIPE,
@@ -396,7 +395,6 @@ class _ClaudeVerificationSession:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                **process_tree_creation_kwargs(),
             )
         except OSError as error:
             # The process never started, so nothing here is evidence about the
@@ -408,7 +406,6 @@ class _ClaudeVerificationSession:
                 f"{error}",
                 failure=ModelVerificationFailure.PROVIDER_UNREACHABLE,
             ) from error
-        register_process_tree(process)
         self._process = process
         assert process.stdin is not None
         assert process.stdout is not None

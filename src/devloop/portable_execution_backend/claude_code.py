@@ -37,9 +37,8 @@ from ..subprocess_utils import (
     EXECUTION_BUDGET_EXPIRY_RETURNCODE,
     AttemptExecutionBudget,
     ProcessExecutionBudget,
-    process_tree_creation_kwargs,
+    launch_process_tree,
     reap_process_after_terminal_event,
-    register_process_tree,
     release_process_tree_if_stopped,
     terminate_process,
 )
@@ -730,7 +729,7 @@ def run_streaming_claude_command(
     it a second full deadline, so the caller that retries owns the budget and this
     process enforces it rather than starting its own.
     """
-    process = subprocess.Popen(
+    process = launch_process_tree(
         command,
         cwd=cwd,
         stdin=subprocess.PIPE,
@@ -740,9 +739,7 @@ def run_streaming_claude_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        **process_tree_creation_kwargs(),
     )
-    register_process_tree(process)
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
