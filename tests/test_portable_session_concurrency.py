@@ -327,6 +327,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
         worker_source = textwrap.dedent(
             """
             import sys
+            import time
             from pathlib import Path
 
             from devloop import portable_worker
@@ -337,6 +338,8 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
 
             prd_path = Path(sys.argv[2]).resolve()
             issues_index = Path(sys.argv[3]).resolve()
+            ready_path = Path(sys.argv[4])
+            release_path = Path(sys.argv[5])
 
             def wait_for_pause(_operation, _arguments):
                 bind_active_catalog_session_checkout(
@@ -346,6 +349,9 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 )
                 bridge = active_portable_runtime()
                 assert bridge is not None
+                ready_path.write_text("ready\\n", encoding="utf-8")
+                while not release_path.exists():
+                    time.sleep(0.01)
                 bridge.read_line("Durable PRD checkpoint ready")
                 return 0
 
@@ -369,10 +375,14 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
             issue.write_text("# Capacity\n\nCompleted: [ ]\n", encoding="utf-8")
             catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
             owner_id = "pause-capacity-shell"
+            worker_ready = root / "worker-ready"
+            release_worker = root / "release-worker"
+            worker_process: subprocess.Popen[str] | None = None
 
             def launch_worker(
                 launch: PortableSessionLaunch,
             ) -> subprocess.Popen[str]:
+                nonlocal worker_process
                 environment = os.environ.copy()
                 environment["DEVLOOP_UI_MODE"] = "application"
                 environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog.path)
@@ -385,7 +395,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                     if not existing_python_path
                     else os.pathsep.join((source_path, existing_python_path))
                 )
-                return subprocess.Popen(
+                worker_process = subprocess.Popen(
                     [
                         sys.executable,
                         "-u",
@@ -394,6 +404,8 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                         launch.session_id,
                         str(prd),
                         str(issues),
+                        str(worker_ready),
+                        str(release_worker),
                     ],
                     cwd=launch.checkout,
                     env=environment,
@@ -403,6 +415,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                     text=True,
                     encoding="utf-8",
                 )
+                return worker_process
 
             supervisor = PortableSessionSupervisor(
                 worker_launcher=launch_worker,
@@ -415,38 +428,100 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 operation=PortableWorkflowOperation.PLANNING,
                 arguments=(),
             )
-            supervisor.start_session(launch)
-            self._wait_for_status(
-                supervisor,
-                launch.session_id,
-                PortableSessionStatus.WAITING_FOR_INPUT,
-            )
-            self.assertFalse(
-                catalog.owns_execution_capacity(
+
+            def wait_for_worker_ready(process: subprocess.Popen[str]) -> None:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if worker_ready.exists():
+                        return
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.01)
+
+                snapshot = supervisor.snapshot(launch.session_id)
+                catalog_record = catalog.get_session(launch.session_id)
+                owns_claim = catalog.owns_execution_capacity(
                     launch.session_id,
                     owner_id=owner_id,
                 )
-            )
+                stderr = "<worker still running; stderr pipe not drained>"
+                if (
+                    process.poll() is not None
+                    and process.stderr is not None
+                    and not process.stderr.closed
+                ):
+                    stderr = process.stderr.read()
+                elif process.poll() is not None:
+                    stderr = "<stderr pipe already drained by supervisor>"
+                self.fail(
+                    "Real worker did not reach the ready barrier.\n"
+                    f"process_pid={process.pid} process_returncode={process.poll()!r}\n"
+                    f"process_args={process.args!r}\n"
+                    f"snapshot={snapshot!r}\n"
+                    f"catalog_record={catalog_record!r}\n"
+                    f"claim_owned={owns_claim!r}\n"
+                    f"diagnostics={snapshot.diagnostics!r}\n"
+                    f"stderr={stderr!r}"
+                )
 
-            supervisor.pause_session(launch.session_id)
-            self._wait_for_status(
-                supervisor,
-                launch.session_id,
-                PortableSessionStatus.PAUSED,
-            )
-            deadline = time.monotonic() + 5
-            while (
-                time.monotonic() < deadline
-                and catalog.get_worktree_lease(checkout) is not None
-            ):
-                time.sleep(0.01)
-            record = catalog.get_session(launch.session_id)
-            supervisor.shutdown()
-            owns_capacity_after_pause = catalog.owns_execution_capacity(
-                launch.session_id,
-                owner_id=owner_id,
-            )
-            lease_after_pause = catalog.get_worktree_lease(checkout)
+            try:
+                supervisor.start_session(launch)
+                process = worker_process
+                self.assertIsNotNone(process)
+                assert process is not None
+                wait_for_worker_ready(process)
+
+                running_snapshot = supervisor.snapshot(launch.session_id)
+                running_record = catalog.get_session(launch.session_id)
+                self.assertEqual(
+                    running_snapshot.status,
+                    PortableSessionStatus.RUNNING,
+                )
+                self.assertEqual(
+                    running_record.status,
+                    PortableSessionStatus.RUNNING,
+                )
+                self.assertTrue(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+
+                release_worker.touch()
+                self._wait_for_status(
+                    supervisor,
+                    launch.session_id,
+                    PortableSessionStatus.WAITING_FOR_INPUT,
+                )
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+
+                supervisor.pause_session(launch.session_id)
+                self._wait_for_status(
+                    supervisor,
+                    launch.session_id,
+                    PortableSessionStatus.PAUSED,
+                )
+                deadline = time.monotonic() + 5
+                while (
+                    time.monotonic() < deadline
+                    and catalog.get_worktree_lease(checkout) is not None
+                ):
+                    time.sleep(0.01)
+                record = catalog.get_session(launch.session_id)
+                owns_capacity_after_pause = catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+                lease_after_pause = catalog.get_worktree_lease(checkout)
+            finally:
+                release_worker.touch()
+                supervisor.shutdown()
 
         self.assertFalse(owns_capacity_after_pause)
         self.assertIsNone(lease_after_pause)
