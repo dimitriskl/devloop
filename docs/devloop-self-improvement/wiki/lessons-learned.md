@@ -72,9 +72,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: coder rework, reviewer fix lists and security-sensitive parsing
 - Lesson: When a later review finds a close variant of the same defect, treat the blocker as an invariant or boundary-design failure instead of adding another example-specific guard.
-- Evidence: Five July 24 Issue 0001 rework cycles passed growing focused suites, but reviews successively found unexpected objects, malformed array rows, one-field partial rows, recursive metadata matches, and conflicting identity envelopes accepted by the same permissive boundary.
-- Action: State the invariant, replace heuristic helpers with endpoint-specific contracts or typed boundaries, enumerate every producer and consumer, and test adversarial equivalence classes before requesting another review.
-- Last seen: 2026-07-24
+- Evidence: Five July 24 Issue 0001 rework cycles exposed variants of one permissive parsing defect. Five July 27 Issue 0003 retries similarly progressed from malformed stale outcomes to an incompletely validated replacement proposal despite passing focused suites.
+- Action: State the full invariant before patching, replace heuristic helpers with endpoint-specific contracts or typed boundaries, enumerate every producer and consumer, and test malformed, unknown, incomplete, and identity-substitution equivalence classes before requesting another review.
+- Last seen: 2026-07-27
 
 ## Bound Aggregate External Fan-Out
 
@@ -88,9 +88,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: coder rework, reviewer fix lists, Codex execution timeouts and resumed attempts
 - Lesson: A broad review fix list needs a dependency-ordered, time-budgeted rework plan that leaves enough time for focused verification and a valid structured result.
-- Evidence: Issue 0001 rework reached the 1,800-second timeout after a six-fix review. On July 24, two Issue 0002 coder attempts also exhausted 1,800 seconds after partial edits, while another successful attempt used 1,774 seconds.
+- Evidence: Issue 0001 rework reached the 1,800-second timeout after a six-fix review. Two Issue 0002 coder attempts and the fifth July 27 Issue 0004 blocker-resolution attempt also exhausted 1,800 seconds after partial edits without returning a final role result.
 - Action: At rework start, inspect the current partial diff, group fixes into coherent high-severity-first slices, reserve time for gates and schema output, and make the next attempt continue verified partial edits instead of restarting.
-- Last seen: 2026-07-24
+- Last seen: 2026-07-27
 
 ## Classify Mutation Outcomes From Durable Side Effects
 
@@ -99,6 +99,46 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Evidence: July 24 Issue 0002 reviews found a mismatched 2xx acknowledgement classified as retryable stale, 404/409 responses classified as stale after earlier writes, and a retry proposal still exposed when terminal audit persistence failed.
 - Action: Track completed writes independently, treat uncorrelated success or failed terminal audit as non-retryable partial or unknown, expose a fresh proposal only when no write occurred and durable terminal evidence succeeded, and test the cross-product of response, prior writes, and audit result.
 - Last seen: 2026-07-24
+
+## Treat Replacement Proposals As New Approval Boundaries
+
+- Applies to: coder, reviewer, QA, preview-confirm workflows and non-idempotent mutations
+- Lesson: A server-supplied replacement proposal must not inherit approval merely because its outer response is recognized; it is a new mutation contract that must be complete and bound to the operator's original target.
+- Evidence: The final July 27 Issue 0003 review found that a structurally plausible stale-response proposal could substitute order, connection, line, article, or facility identity, or omit rendered operation details, and still become executable.
+- Action: Runtime-validate every proposal field and operation, bind immutable target identities to the rejected proposal and current context, clear all approvals on any mismatch, and test fully shaped target substitution plus missing nested data.
+- Last seen: 2026-07-27
+
+## Bind Execution Evidence To The Approved Operation Plan
+
+- Applies to: coder, reviewer, QA, preview-confirm workflows and mutation-result rendering
+- Lesson: A terminal response is trustworthy only when its complete ordered evidence matches the operation plan the operator approved.
+- Evidence: The final July 27 Issue 0003 review found that truncated results, renumbered steps, or mismatched operation codes and request bodies could pass broad status checks and render as actionable despite differing from the backend producer contract.
+- Action: Snapshot the approved plan immutably; validate result count, sequence, operation code, request body, and allowed success/failure/skipped ordering; build fixtures from the real producer and test truncation and substitution.
+- Last seen: 2026-07-27
+
+## Bind Destructive Approval To Mutable Safety Evidence
+
+- Applies to: coder, reviewer, QA, destructive preview-confirm workflows
+- Lesson: Identity and version checks are insufficient when quantity, reservations, or other safety evidence can change independently; approval must bind every mutable fact the operator reviewed.
+- Evidence: July 27 Issue 0004 security review found cleanup could proceed after quantity or reservation evidence changed without a version change, with newly discovered reservations shown only after deletion.
+- Action: Include a server-verifiable fingerprint of all displayed safety evidence in the approval contract, reread immediately before mutation, and require fresh approval on any difference or ambiguity.
+- Last seen: 2026-07-27
+
+## Minimize Untrusted Evidence At Every Producer
+
+- Applies to: coder, reviewer, QA, external JSON, operator DTOs and durable audits
+- Lesson: Sanitizing one projection is not enough when another endpoint or composition path can still publish raw, unbounded third-party structures.
+- Evidence: July 27 Issue 0004 review first found raw reservation objects in stock evidence and later found order-scoped reservation-search rows bypassing the bounded display path into trace DTOs, UI responses, and audits.
+- Action: Route every evidence producer through one bounded allowlisted minimizer, derive safety state from original values without reproducing them, and add adversarial tests at each source and combined-output boundary.
+- Last seen: 2026-07-27
+
+## Confirm Destructive Effects Through Exact Identity
+
+- Applies to: coder, reviewer, QA, external deletes and post-mutation verification
+- Lesson: Absence from a filtered or reclassified collection does not prove that the exact entity was deleted.
+- Evidence: July 27 Issue 0004 review found cleanup reported success when a StockId disappeared from a case-only facility projection even though the same ID could remain live under changed classification.
+- Action: Probe the exact immutable identity after mutation; accept only explicit authoritative absence, treat live, unreadable, or ambiguous results as unconfirmed, and test survival outside the original projection.
+- Last seen: 2026-07-27
 
 ## Reread Remote Absence Immediately Before Create
 
@@ -111,10 +151,18 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 ## Keep Guardrails Aligned With Conditional Behavior
 
 - Applies to: coder, reviewer, QA, mandatory pattern docs, checklists and executable branch rules
-- Lesson: A guardrail stated as an unconditional rule is a defect when implementation correctness depends on prior writes, audit success, or another branch predicate.
-- Evidence: The final July 24 Issue 0002 review found `DOTNET_PATTERNS.md` said every repair 404/409 was stale, while the implemented and checklist rule required a partial outcome after an earlier completed write.
-- Action: Express the full decision table in code, tests, pattern docs, and checklists together; grep for older absolute wording whenever a branch rule is refined.
-- Last seen: 2026-07-24
+- Lesson: Guardrails, feature history, and completion checklists are part of the delivered contract; stale or missing guidance can block an otherwise verified fix.
+- Evidence: The final July 24 Issue 0002 review found an unconditional pattern rule that contradicted implemented conditional behavior. On July 27, Issue 0004 passed implementation and security gates but remained blocked because its feature history and completion-checklist guard were not updated for the reviewed fix.
+- Action: In the same change, express the full decision table in code, tests, pattern docs, feature history, and checklists; grep for older wording and verify every repository-required completion artifact before requesting review.
+- Last seen: 2026-07-27
+
+## Keep Mutation Results Outside Refreshable Collections
+
+- Applies to: coder, reviewer, QA, operator UIs that refresh data after mutations
+- Lesson: A terminal mutation outcome must remain visible even when the successful refresh removes or replaces the row that initiated the operation.
+- Evidence: July 27 Issue 0004 review found a successful cleanup result disappeared when refreshed data removed the mutated row; moving the result to an independent host made the outcome persist.
+- Action: Render terminal results in stable operation-level state, refresh the collection independently, and add a browser regression proving the result remains DOM-visible after the source row disappears.
+- Last seen: 2026-07-27
 
 ## Enforce Watchdog Deadlines Within A Bounded Grace Period
 
@@ -308,13 +356,13 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: For JSON-updating SQL scripts, add a read-only SQL simulation or focused guard that checks `JSON_VALUE` and `JSON_QUERY` behavior against the persisted contract.
 - Last seen: 2026-07-03
 
-## Treat ChromeHeadless Startup Failures As Local Gate Residuals
+## Try Repository-Supported Chrome Launchers Before Waiving Browser Execution
 
 - Applies to: coder, reviewer, QA, Angular Karma gates on Windows
-- Lesson: When focused Karma compiles the selected spec bundle but ChromeHeadless cannot start because of the known GPU or persistent-cache failure, do not treat that as an application regression.
-- Evidence: Issues 0003, 0004, and 0005 repeatedly compiled the selected Angular spec bundles, then ChromeHeadless failed before executing assertions with GPU/cache startup errors.
-- Action: Pair the compile-only Karma attempt with TypeScript, ESLint, production build, and focused backend checks, then report browser assertions as a local-environment residual risk.
-- Last seen: 2026-06-30
+- Lesson: A standard `ChromeHeadless` GPU or persistent-cache startup failure is environmental, but browser execution is not waived when the repository provides a supported alternate launcher.
+- Evidence: On July 27, standard ChromeHeadless compiled the Issue 0003 bundle but failed before Jasmine; `ChromeHeadlessNoSandbox` then ran 4 focused specs and `ChromeHeadlessNoGpu` later ran 7 focused and 36 feature specs successfully.
+- Action: After confirming the known startup signature, retry with the repository's configured no-GPU or no-sandbox launcher; only fall back to TypeScript, ESLint, production build, and an explicit browser residual when every supported launcher fails.
+- Last seen: 2026-07-27
 
 ## Strip Generated Filters By Structure
 
