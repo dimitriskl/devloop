@@ -54,4 +54,22 @@ Covers parent PRD user stories 1–3, 21–30, 35, and 56.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Implemented across commits `eb5f962` through `4575289`.
+- The supervisor runs concurrent workers with retained per-session projections,
+  isolated lifecycle and failure state, and stable session/request routing for
+  protocol events, approvals, and text input.
+- Sessions and workflow tabs retain worktree/context/stage progress across focus,
+  hide, and reopen; background activity and `[INPUT!]` remain scoped to the owning
+  tab without stealing focus.
+- Active-tab input is bound to its owning live request. Queued, replaced, retired,
+  and concurrently resolved requests are rejected or cleared so input cannot cross
+  sessions or satisfy a stale request.
+- Final review passed for `5e761c1..4575289`. Independent QA passed 72
+  supervisor/full-shell tests, 4 worker tests, and 50 compatibility tests with one
+  platform skip, plus real concurrent subprocess isolation, compilation,
+  diff-check, and product-boundary checks. Broader failures matched unchanged,
+  unrelated baselines.
+- `pytest`, Ruff, and mypy were unavailable in this environment; validation used
+  the repository's `unittest` fallback.
