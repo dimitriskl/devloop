@@ -35,6 +35,7 @@ from .portable_session_catalog import (
 from .portable_sessions import (
     PortableSessionLaunch,
     PortableWorkflowOperation,
+    active_portable_session_execution,
     run_portable_plain_session,
 )
 from .portable_workflow import (
@@ -228,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return operation()
         with portable_plain_mode_session():
-            if os.environ.get("DEVLOOP_PORTABLE_SESSION_ID"):
+            if active_portable_session_execution():
                 return operation()
             return run_portable_plain_session(
                 PortableSessionLaunch(

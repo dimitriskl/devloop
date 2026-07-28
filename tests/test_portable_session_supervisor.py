@@ -367,6 +367,12 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 arguments=("--repo", str(source)),
             )
             catalog.create_session_with_lease(launch, owner_id=owner_id)
+            self.assertTrue(
+                catalog.request_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
             catalog.publish_workflow(
                 launch.session_id,
                 prd_path=source_prd,

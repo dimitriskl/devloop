@@ -428,14 +428,15 @@ def main(
             )
         return operation()
     with portable_plain_mode_session():
-        if os.environ.get("DEVLOOP_PORTABLE_SESSION_ID"):
-            return operation()
         from .portable_sessions import (
             PortableSessionLaunch,
             PortableWorkflowOperation,
+            active_portable_session_execution,
             run_portable_plain_session,
         )
 
+        if active_portable_session_execution():
+            return operation()
         return run_portable_plain_session(
             PortableSessionLaunch(
                 session_id=str(uuid.uuid4()),

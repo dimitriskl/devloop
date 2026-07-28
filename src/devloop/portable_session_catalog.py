@@ -1424,6 +1424,40 @@ class PortableSessionCatalog:
                 f"Portable Session Catalog write failed: {error}"
             ) from error
 
+    def owns_execution_capacity(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_id: int | None = None,
+    ) -> bool:
+        """Return whether this exact live process owns both session leases."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        active_process_id = os.getpid() if process_id is None else process_id
+        _validate_process_id(active_process_id)
+        try:
+            with self._connection() as connection:
+                owned = connection.execute(
+                    """
+                    SELECT 1
+                    FROM worktree_leases AS worktree
+                    JOIN execution_claims AS execution
+                      ON execution.session_id = worktree.session_id
+                     AND execution.owner_id = worktree.owner_id
+                     AND execution.process_id = worktree.process_id
+                    WHERE worktree.session_id = ?
+                      AND worktree.owner_id = ?
+                      AND worktree.process_id = ?
+                    """,
+                    (session_id, owner_id, active_process_id),
+                ).fetchone()
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog read failed: {error}"
+            ) from error
+        return owned is not None
+
     def release_execution_capacity(
         self,
         session_id: str,
@@ -2071,6 +2105,29 @@ def active_portable_catalog_session(
             f"Portable Session Catalog has no resumable session {session_id!r}."
         )
     return catalog, record, restore_requested
+
+
+def active_process_owns_portable_execution(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Verify catalog-backed execution ownership projected into this process."""
+    values = os.environ if environment is None else environment
+    catalog_path = values.get(PORTABLE_SESSION_CATALOG_ENV)
+    session_id = values.get(PORTABLE_SESSION_ID_ENV)
+    owner_id = values.get(PORTABLE_SESSION_OWNER_ID_ENV)
+    if not catalog_path or not session_id or not owner_id:
+        return False
+    path = Path(catalog_path)
+    if not path.is_file():
+        return False
+    try:
+        return PortableSessionCatalog(path).owns_execution_capacity(
+            session_id,
+            owner_id=owner_id,
+        )
+    except (OSError, PortableSessionCatalogError, ValueError):
+        return False
 
 
 def bind_active_catalog_session_checkout(

@@ -1191,6 +1191,10 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker STATUS cannot claim a terminal session status."
                     )
+                if status is not PortableSessionStatus.RUNNING:
+                    # Generic worker progress cannot authorize supervisor-owned
+                    # lifecycle transitions or release machine capacity.
+                    return True
                 progress = snapshot.progress
                 if any(
                     key in frame.payload
@@ -1599,8 +1603,14 @@ class PortableSessionSupervisor:
         if self._catalog is None:
             return
         release = getattr(self._catalog, "release_worktree_lease", None)
-        if callable(release):
-            release(session_id, owner_id=self._owner_id)
+        if not callable(release):
+            return
+        with self._condition:
+            if release(
+                session_id,
+                owner_id=self._owner_id,
+            ):
+                self._owned_session_ids.discard(session_id)
 
     def _mark_launch_failed(self, session_id: str) -> None:
         if self._catalog is None:
@@ -1624,6 +1634,7 @@ class PortableSessionSupervisor:
             rollback = getattr(self._catalog, "rollback_session_start", None)
             if callable(rollback):
                 rollback(session_id, owner_id=self._owner_id)
+                self._owned_session_ids.discard(session_id)
                 self._snapshots.pop(session_id, None)
                 self._launches.pop(session_id, None)
                 self._running.pop(session_id, None)
@@ -1712,6 +1723,25 @@ def run_portable_plain_session(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = previous
+
+
+def active_portable_session_execution() -> bool:
+    """Return whether this process is already inside supervised execution."""
+    from .portable_session_catalog import (
+        PORTABLE_SESSION_ID_ENV,
+        PORTABLE_SESSION_OWNER_ID_ENV,
+        active_process_owns_portable_execution,
+    )
+    from .portable_runtime import active_portable_runtime
+
+    if (
+        not os.environ.get(PORTABLE_SESSION_ID_ENV)
+        or not os.environ.get(PORTABLE_SESSION_OWNER_ID_ENV)
+    ):
+        return False
+    if active_portable_runtime() is not None:
+        return True
+    return active_process_owns_portable_execution()
 
 
 def _payload_text(frame: PortableProtocolFrame, key: str) -> str:

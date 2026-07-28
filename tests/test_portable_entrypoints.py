@@ -7,12 +7,17 @@ from unittest import mock
 from pathlib import Path
 
 from devloop import cli, interactive_runner
+from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_runtime import (
     PortableRuntimeBridge,
     PortableRuntimeEvent,
     PortableRuntimeEventKind,
     portable_plain_mode_active,
     portable_runtime_session,
+)
+from devloop.portable_sessions import (
+    PortableSessionLaunch,
+    PortableWorkflowOperation,
 )
 from devloop.terminal_menu import WorkflowOptionsMenuState, read_workflow_command
 from devloop.workflow_editor import EditorResult, WORKFLOW_ACTIONS, run_workflow_editor
@@ -44,6 +49,95 @@ class PortableEntrypointTests(unittest.TestCase):
 
         self.assertTrue(planning.plain)
         self.assertTrue(delivery.plain)
+
+    def test_planning_plain_mode_does_not_trust_an_orphan_session_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="orphan-planning-session",
+                checkout=root,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session_with_lease(
+                launch,
+                owner_id="orphan-planning-owner",
+                process_id=999_991,
+            )
+            catalog.request_execution_capacity(
+                launch.session_id,
+                owner_id="orphan-planning-owner",
+                process_id=999_991,
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "DEVLOOP_PORTABLE_SESSION_CATALOG": str(catalog.path),
+                    "DEVLOOP_PORTABLE_SESSION_ID": launch.session_id,
+                    "DEVLOOP_PORTABLE_SESSION_OWNER_ID": "orphan-planning-owner",
+                },
+                clear=True,
+            ), mock.patch.object(
+                interactive_runner,
+                "_run_planning",
+                return_value=0,
+            ), mock.patch.object(
+                interactive_runner,
+                "run_portable_plain_session",
+                side_effect=lambda _launch, operation: operation(),
+            ) as run_plain:
+                result = interactive_runner.main(["--plain"])
+
+        self.assertEqual(result, 0)
+        run_plain.assert_called_once()
+
+    def test_delivery_plain_mode_does_not_trust_an_orphan_session_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            launch = PortableSessionLaunch(
+                session_id="orphan-delivery-session",
+                checkout=root,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=("--prd", "prd.md", "--issues", "issues.md"),
+            )
+            catalog.create_session_with_lease(
+                launch,
+                owner_id="orphan-delivery-owner",
+                process_id=999_992,
+            )
+            catalog.request_execution_capacity(
+                launch.session_id,
+                owner_id="orphan-delivery-owner",
+                process_id=999_992,
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "DEVLOOP_PORTABLE_SESSION_CATALOG": str(catalog.path),
+                    "DEVLOOP_PORTABLE_SESSION_ID": launch.session_id,
+                    "DEVLOOP_PORTABLE_SESSION_OWNER_ID": "orphan-delivery-owner",
+                },
+                clear=True,
+            ), mock.patch.object(
+                cli,
+                "_run_devloop",
+                return_value=0,
+            ), mock.patch(
+                "devloop.portable_sessions.run_portable_plain_session",
+                side_effect=lambda _launch, operation: operation(),
+            ) as run_plain:
+                result = cli.main(
+                    ["--prd", "prd.md", "--issues", "issues.md", "--plain"]
+                )
+
+        self.assertEqual(result, 0)
+        run_plain.assert_called_once()
 
     def test_workflow_options_have_seven_numbered_choices_inside_the_application(
         self,

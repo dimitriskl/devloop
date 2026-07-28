@@ -20,6 +20,94 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionConcurrencyTests(unittest.TestCase):
+    def test_worker_status_cannot_release_capacity_with_inactive_lifecycle_states(
+        self,
+    ) -> None:
+        worker_source = (
+            "import json,sys,time\n"
+            "from pathlib import Path\n"
+            "session_id,status,root=sys.argv[1:]\n"
+            "root=Path(root)\n"
+            "json.loads(sys.stdin.readline())\n"
+            "if session_id == 'malicious-session':\n"
+            " print(json.dumps({'version':1,'session_id':session_id,'sequence':1,"
+            "'kind':'STATUS','payload':{'status':status,'stage':'still-live'}}),"
+            "flush=True)\n"
+            " while not (root / 'release-malicious').exists(): time.sleep(0.01)\n"
+            " sequence=2\n"
+            "else:\n"
+            " (root / 'queued-worker-launched').touch()\n"
+            " sequence=1\n"
+            "print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':sequence,'kind':'COMPLETION','payload':{'exit_code':0}}),"
+            "flush=True)\n"
+        )
+        for malicious_status in ("READY", "PAUSED", "WAITING_FOR_INPUT"):
+            with (
+                self.subTest(status=malicious_status),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+                catalog.set_concurrency_limit(1)
+                processes: list[subprocess.Popen[str]] = []
+
+                def launch_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    process = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                            malicious_status,
+                            str(root),
+                        ],
+                        cwd=launch.checkout,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+                    processes.append(process)
+                    return process
+
+                supervisor = PortableSessionSupervisor(
+                    worker_launcher=launch_worker,
+                    catalog=catalog,
+                    owner_id=f"malicious-{malicious_status.lower()}",
+                )
+                launches = []
+                for session_id in ("malicious-session", "queued-session"):
+                    checkout = root / session_id
+                    checkout.mkdir()
+                    launches.append(
+                        PortableSessionLaunch(
+                            session_id=session_id,
+                            checkout=checkout,
+                            operation=PortableWorkflowOperation.PLANNING,
+                            arguments=(),
+                        )
+                    )
+                try:
+                    supervisor.start_session(launches[0])
+                    queued = supervisor.start_session(launches[1])
+
+                    self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+                    time.sleep(0.4)
+                    self.assertFalse((root / "queued-worker-launched").exists())
+                    self.assertIsNone(processes[0].poll())
+                    self.assertEqual(
+                        supervisor.snapshot("malicious-session").status,
+                        PortableSessionStatus.RUNNING,
+                    )
+                finally:
+                    (root / "release-malicious").touch()
+                    supervisor.shutdown()
+
     def test_separate_processes_cannot_exceed_one_machine_slot(self) -> None:
         worker_source = (
             "import sys,time\n"
@@ -556,6 +644,99 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
             finally:
                 active.shutdown()
                 observer.shutdown()
+
+    def test_former_owner_observes_later_updates_from_another_supervisor(self) -> None:
+        completing_worker = (
+            "import json,sys\n"
+            "session_id=sys.argv[1]\n"
+            "json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'version':1,'session_id':session_id,'sequence':1,"
+            "'kind':'COMPLETION','payload':{'exit_code':0}}),flush=True)\n"
+        )
+        resumed_worker = (
+            "import json,sys,time\n"
+            "from pathlib import Path\n"
+            "session_id,release=sys.argv[1:]\n"
+            "json.loads(sys.stdin.readline())\n"
+            "while not Path(release).exists(): time.sleep(0.01)\n"
+            "print(json.dumps({'version':1,'session_id':session_id,'sequence':1,"
+            "'kind':'COMPLETION','payload':{'exit_code':0}}),flush=True)\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            checkout = root / "former-owner"
+            checkout.mkdir()
+            prd = checkout / "change.md"
+            issues = checkout / "README.md"
+            prd.write_text("# Change\n", encoding="utf-8")
+            issues.write_text("# Issues\n", encoding="utf-8")
+            launch = PortableSessionLaunch(
+                session_id="former-owner-session",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.DELIVERY,
+                arguments=("--prd", str(prd), "--issues", str(issues)),
+            )
+            release = root / "release-resumed"
+
+            def start_process(source: str, *arguments: str) -> subprocess.Popen[str]:
+                return subprocess.Popen(
+                    [sys.executable, "-u", "-c", source, *arguments],
+                    cwd=checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            former_owner = PortableSessionSupervisor(
+                worker_launcher=lambda item: start_process(
+                    completing_worker,
+                    item.session_id,
+                ),
+                catalog=catalog,
+                owner_id="former-owner-shell",
+            )
+            later_owner: PortableSessionSupervisor | None = None
+            try:
+                former_owner.start_session(launch)
+                completed = former_owner.wait_for_terminal(
+                    launch.session_id,
+                    timeout=5,
+                )
+                self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
+                deadline = time.monotonic() + 5
+                while (
+                    time.monotonic() < deadline
+                    and catalog.get_worktree_lease(checkout) is not None
+                ):
+                    time.sleep(0.01)
+                self.assertIsNone(catalog.get_worktree_lease(checkout))
+
+                later_owner = PortableSessionSupervisor(
+                    worker_launcher=lambda item: start_process(
+                        resumed_worker,
+                        item.session_id,
+                        str(release),
+                    ),
+                    catalog=PortableSessionCatalog(catalog.path),
+                    owner_id="later-owner-shell",
+                )
+                resumed = later_owner.resume_session(launch.session_id)
+                self.assertEqual(resumed.status, PortableSessionStatus.RUNNING)
+
+                observed = self._wait_for_status(
+                    former_owner,
+                    launch.session_id,
+                    PortableSessionStatus.RUNNING,
+                )
+                self.assertEqual(observed.status, PortableSessionStatus.RUNNING)
+            finally:
+                release.touch()
+                if later_owner is not None:
+                    later_owner.shutdown()
+                former_owner.shutdown()
 
     def test_plain_mode_waits_for_the_same_machine_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
