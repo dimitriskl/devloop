@@ -1165,6 +1165,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                             status=PortableSessionStatus.WAITING_FOR_INPUT,
                             input_request=PortableSessionInputRequest(
                                 kind=PortableSessionInputKind.APPROVAL,
+                                request_id="alpha-approval",
+                                generation=3,
                                 prompt="Approve alpha command?",
                                 options=(
                                     ("approve", "Approve"),
@@ -1181,6 +1183,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                             status=PortableSessionStatus.WAITING_FOR_INPUT,
                             input_request=PortableSessionInputRequest(
                                 kind=PortableSessionInputKind.TEXT,
+                                request_id="beta-text",
+                                generation=4,
                                 prompt="Beta response",
                             ),
                         )
@@ -1208,6 +1212,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 kind=PortableSessionIntentKind.PROVIDE_INPUT,
                 session_id=session_b.session_id,
                 value="beta only",
+                request_id="beta-text",
+                request_generation=4,
             ),
         )
 
@@ -1237,12 +1243,15 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 self.intents: list[PortableSessionIntent] = []
 
             def waiting_snapshot(self, value: str) -> PortableSessionSnapshot:
+                generation = adversarial_values.index(value) + 1
                 return PortableSessionSnapshot(
                     session_id="session-alpha",
                     checkout=checkout_a,
                     status=PortableSessionStatus.WAITING_FOR_INPUT,
                     input_request=PortableSessionInputRequest(
                         kind=PortableSessionInputKind.CHOICE,
+                        request_id=f"choice-request-{generation}",
+                        generation=generation,
                         prompt="Choose the exact worker value",
                         options=((value, f"Send {value}"),),
                         default_key=value,
@@ -1313,8 +1322,10 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     kind=PortableSessionIntentKind.PROVIDE_INPUT,
                     session_id="session-alpha",
                     value=value,
+                    request_id=f"choice-request-{index + 1}",
+                    request_generation=index + 1,
                 )
-                for value in adversarial_values
+                for index, value in enumerate(adversarial_values)
             ],
         )
 
@@ -1327,6 +1338,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             status=PortableSessionStatus.WAITING_FOR_INPUT,
             input_request=PortableSessionInputRequest(
                 kind=PortableSessionInputKind.CHOICE,
+                request_id="alpha-request",
+                generation=1,
                 prompt="Alpha choice",
                 options=(("alpha-value", "Send alpha"),),
                 default_key="alpha-value",
@@ -1338,6 +1351,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             status=PortableSessionStatus.WAITING_FOR_INPUT,
             input_request=PortableSessionInputRequest(
                 kind=PortableSessionInputKind.CHOICE,
+                request_id="beta-request",
+                generation=1,
                 prompt="Beta choice",
                 options=(("__sessions__", "Send adversarial beta value"),),
                 default_key="__sessions__",
@@ -1417,6 +1432,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 session_b,
                 input_request=PortableSessionInputRequest(
                     kind=PortableSessionInputKind.CHOICE,
+                    request_id="beta-request",
+                    generation=2,
                     prompt="Next beta choice",
                     options=(("__sessions__", "Send next beta value"),),
                     default_key="__sessions__",
@@ -1439,6 +1456,8 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     kind=PortableSessionIntentKind.PROVIDE_INPUT,
                     session_id=session_b.session_id,
                     value="__sessions__",
+                    request_id="beta-request",
+                    request_generation=1,
                 )
             ],
         )
@@ -1819,6 +1838,98 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("hidden-session [RUNNING]", reopened_tabs)
         self.assertIn("Latest activity: Continued while hidden", reopened_detail)
         self.assertEqual(supervisor.intents, [])
+
+    async def test_escape_hides_input_views_without_cancelling_the_worker(
+        self,
+    ) -> None:
+        for input_kind in (
+            PortableSessionInputKind.CHOICE,
+            PortableSessionInputKind.APPROVAL,
+            PortableSessionInputKind.TEXT,
+        ):
+            with self.subTest(input_kind=input_kind):
+                checkout = Path(f"hide-{input_kind.value.casefold()}").resolve()
+                request = PortableSessionInputRequest(
+                    kind=input_kind,
+                    request_id=f"{input_kind.value.casefold()}-request",
+                    generation=7,
+                    prompt=f"{input_kind.value} input",
+                    options=(
+                        (("accept", "Accept"), ("cancel", "Cancel"))
+                        if input_kind is not PortableSessionInputKind.TEXT
+                        else ()
+                    ),
+                    default_key="cancel",
+                    cancel_key="cancel",
+                )
+                waiting = PortableSessionSnapshot(
+                    session_id=f"session-{input_kind.value.casefold()}",
+                    checkout=checkout,
+                    status=PortableSessionStatus.WAITING_FOR_INPUT,
+                    input_request=request,
+                )
+
+                class FakeSupervisor:
+                    def __init__(self) -> None:
+                        self.intents: list[PortableSessionIntent] = []
+
+                    def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                        return (waiting,)
+
+                    def handle_intent(
+                        self,
+                        intent: PortableSessionIntent,
+                    ) -> PortableSessionSnapshot:
+                        self.intents.append(intent)
+                        raise AssertionError(f"Unexpected input intent: {intent}")
+
+                    def try_next_event(self) -> None:
+                        return None
+
+                    def shutdown(self) -> None:
+                        return None
+
+                supervisor = FakeSupervisor()
+                app = PortableApplicationShell(
+                    PortableRuntimeBridge(),
+                    session_supervisor=supervisor,
+                    session_launch=PortableSessionLaunch(
+                        session_id="new-session",
+                        checkout=Path.cwd(),
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    ),
+                )
+
+                async with app.run_test(size=(120, 34)) as pilot:
+                    await pilot.pause()
+                    menu = app.query_one("#portable-navigation", OptionList)
+                    menu.highlighted = 1
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    visible_actions = [
+                        str(menu.get_option_at_index(index).prompt)
+                        for index in range(menu.option_count)
+                    ]
+                    self.assertTrue(
+                        any("Cancel" in action for action in visible_actions)
+                    )
+                    self.assertIn(
+                        "Hide to Sessions",
+                        str(app.query_one("#portable-actions", Static).render()),
+                    )
+
+                    await pilot.press("escape")
+                    await pilot.pause()
+
+                    self.assertEqual(
+                        str(app.query_one("#portable-tabs", Static).render()),
+                        "Sessions",
+                    )
+                    self.assertEqual(supervisor.intents, [])
+                    self.assertEqual(waiting.status, PortableSessionStatus.WAITING_FOR_INPUT)
+                    self.assertEqual(waiting.input_request, request)
+                    self.assertTrue(app.is_running)
 
     async def test_background_session_failure_is_the_application_result_on_exit(
         self,

@@ -71,6 +71,8 @@ class PortableSessionIntent:
     launch: PortableSessionLaunch | None = None
     session_id: str = ""
     value: str = ""
+    request_id: str = ""
+    request_generation: int = 0
 
 
 class PortableSessionInputKind(str, Enum):
@@ -82,6 +84,8 @@ class PortableSessionInputKind(str, Enum):
 @dataclass(frozen=True)
 class PortableSessionInputRequest:
     kind: PortableSessionInputKind
+    request_id: str = ""
+    generation: int = 0
     prompt: str = ""
     options: tuple[tuple[str, str], ...] = ()
     default_key: str = ""
@@ -240,6 +244,7 @@ class PortableSessionCatalogController(Protocol):
 @dataclass
 class _RunningSession:
     process: PortableWorkerProcess
+    generation: int
     next_supervisor_sequence: int = 2
     next_worker_sequence: int = 1
 
@@ -271,6 +276,7 @@ class PortableSessionSupervisor:
         self._launches: dict[str, PortableSessionLaunch] = {}
         self._candidate_launches: dict[str, PortableSessionLaunch] = {}
         self._running: dict[str, _RunningSession] = {}
+        self._next_worker_generation = 1
         self._last_progress_refresh: dict[str, float] = {}
         self._live_stage_session_ids: set[str] = set()
         self._threads: list[Thread] = []
@@ -493,7 +499,11 @@ class PortableSessionSupervisor:
             )
             self._snapshots[launch.session_id] = snapshot
             self._launches[launch.session_id] = launch
-            running = _RunningSession(process)
+            running = _RunningSession(
+                process,
+                generation=self._next_worker_generation,
+            )
+            self._next_worker_generation += 1
             self._running[launch.session_id] = running
             if self._catalog is not None:
                 try:
@@ -560,13 +570,21 @@ class PortableSessionSupervisor:
         if intent.kind is PortableSessionIntentKind.RESUME:
             return self.resume_session(intent.session_id)
         if intent.kind is PortableSessionIntentKind.PROVIDE_INPUT:
-            return self.provide_input(intent.session_id, intent.value)
+            return self.provide_input(
+                intent.session_id,
+                intent.value,
+                request_id=intent.request_id,
+                request_generation=intent.request_generation,
+            )
         raise ValueError(f"Unsupported portable session intent: {intent.kind}")
 
     def provide_input(
         self,
         session_id: str,
         value: str,
+        *,
+        request_id: str,
+        request_generation: int,
     ) -> PortableSessionSnapshot:
         with self._condition:
             snapshot = self.snapshot(session_id)
@@ -586,11 +604,24 @@ class PortableSessionSupervisor:
                 or snapshot.input_request is None
             ):
                 raise ValueError(f"Portable session is not waiting for input: {session_id}")
+            request = snapshot.input_request
+            if (
+                request.request_id != request_id
+                or request.generation != request_generation
+            ):
+                raise ValueError(
+                    "Portable session input is no longer the current input "
+                    f"request: {session_id}"
+                )
             frame = supervisor_frame(
                 session_id,
                 running.next_supervisor_sequence,
                 SupervisorMessageKind.USER_INPUT,
-                {"value": value},
+                {
+                    "value": value,
+                    "request_id": request.request_id,
+                    "request_generation": request.generation,
+                },
             )
             try:
                 self._write_frame(session_id, frame)
@@ -737,11 +768,8 @@ class PortableSessionSupervisor:
             self._reap_worker(running)
             with self._condition:
                 current_running = self._running.get(session_id)
-                replacement_is_running = (
-                    current_running is not None and current_running is not running
-                )
-            if not replacement_is_running:
-                self._release_session_lease(session_id)
+                if current_running is None:
+                    self._release_session_lease(session_id)
 
     def _read_worker_stderr(
         self,
@@ -902,11 +930,37 @@ class PortableSessionSupervisor:
                     raise PortableProtocolError(
                         "Worker input request cancel_key must be text or null."
                     )
+                request_id = frame.payload.get("request_id")
+                if request_id is None:
+                    # Protocol-v1 workers did not identify requests. Scope the
+                    # compatibility token to this exact worker generation so
+                    # delayed input can never satisfy a replacement worker.
+                    request_id = (
+                        f"legacy-{running.generation}-{frame.sequence}"
+                    )
+                if not isinstance(request_id, str) or not request_id:
+                    raise PortableProtocolError(
+                        "Worker input request request_id must be non-empty text."
+                    )
+                request_generation = frame.payload.get(
+                    "request_generation",
+                    frame.sequence,
+                )
+                if (
+                    not isinstance(request_generation, int)
+                    or isinstance(request_generation, bool)
+                    or request_generation < 1
+                ):
+                    raise PortableProtocolError(
+                        "Worker input request generation must be a positive integer."
+                    )
                 updated = replace(
                     snapshot,
                     status=PortableSessionStatus.WAITING_FOR_INPUT,
                     input_request=PortableSessionInputRequest(
                         kind=request_kind,
+                        request_id=request_id,
+                        generation=request_generation,
                         prompt=_payload_text(frame, "prompt"),
                         options=tuple(
                             (option[0], option[1]) for option in options_value

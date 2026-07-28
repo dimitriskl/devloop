@@ -196,7 +196,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
             self.assertIsNone(catalog.get_worktree_lease(proposed_worktree))
 
-            supervisor.provide_input(launch.session_id, "start")
+            self._provide_current_input(supervisor, launch.session_id, "start")
             transferred_snapshot = self._wait_for_status(
                 supervisor,
                 launch.session_id,
@@ -233,7 +233,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             assert transferred_lease is not None
             self.assertEqual(transferred_lease.session_id, launch.session_id)
 
-            supervisor.provide_input(launch.session_id, "continue")
+            self._provide_current_input(supervisor, launch.session_id, "continue")
             completed = supervisor.wait_for_terminal(launch.session_id, timeout=10)
             supervisor.shutdown()
             self.assertEqual(
@@ -479,7 +479,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             )
             self.assertIsNone(catalog.get_worktree_lease(source))
             self.assertIsNotNone(catalog.get_worktree_lease(implementation))
-            same_app.provide_input(launch.session_id, "continue")
+            self._provide_current_input(same_app, launch.session_id, "continue")
             self._wait_for_status(
                 same_app,
                 launch.session_id,
@@ -516,7 +516,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             restarted_lease = restarted_catalog.get_worktree_lease(implementation)
             assert restarted_lease is not None
             self.assertEqual(restarted_lease.session_id, launch.session_id)
-            restarted.provide_input(launch.session_id, "continue")
+            self._provide_current_input(restarted, launch.session_id, "continue")
             self._wait_for_status(
                 restarted,
                 launch.session_id,
@@ -776,7 +776,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 launch.session_id,
                 PortableSessionStatus.WAITING_FOR_INPUT,
             )
-            supervisor.provide_input(launch.session_id, "yes")
+            self._provide_current_input(supervisor, launch.session_id, "yes")
             supervisor.wait_for_terminal(launch.session_id, timeout=5)
             supervisor.shutdown()
 
@@ -940,7 +940,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 initial.candidate_id,
                 PortableSessionStatus.WAITING_FOR_INPUT,
             )
-            supervisor.provide_input(initial.candidate_id, "yes")
+            self._provide_current_input(supervisor, initial.candidate_id, "yes")
             supervisor.wait_for_terminal(initial.candidate_id, timeout=5)
             supervisor.shutdown()
 
@@ -1040,7 +1040,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 self.fail("Worker did not request input.")
 
             self.assertIsNotNone(waiting.input_request)
-            supervisor.provide_input(launch.session_id, "start")
+            self._provide_current_input(supervisor, launch.session_id, "start")
             completed = supervisor.wait_for_terminal(
                 launch.session_id,
                 timeout=5,
@@ -1129,7 +1129,12 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 ValueError,
                 "terminal and cannot accept input",
             ):
-                supervisor.provide_input(snapshot.session_id, "stale input")
+                supervisor.provide_input(
+                    snapshot.session_id,
+                    "stale input",
+                    request_id="stale-request",
+                    request_generation=1,
+                )
 
     def test_provide_input_rejects_a_stale_non_running_request_clearly(self) -> None:
         supervisor = PortableSessionSupervisor()
@@ -1148,9 +1153,19 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             ValueError,
             "not running and cannot accept input",
         ):
-            supervisor.provide_input(session_id, "stale input")
+            supervisor.provide_input(
+                session_id,
+                "stale input",
+                request_id="stale-request",
+                request_generation=1,
+            )
         with self.assertRaisesRegex(ValueError, "Unknown portable session"):
-            supervisor.provide_input("unknown-session", "input")
+            supervisor.provide_input(
+                "unknown-session",
+                "input",
+                request_id="unknown-request",
+                request_generation=1,
+            )
 
     def test_provide_input_reconciles_a_broken_worker_pipe_atomically(self) -> None:
         class BlockingOutput:
@@ -1259,7 +1274,11 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                     ValueError,
                     "worker input channel closed before input could be sent",
                 ):
-                    supervisor.provide_input(launch.session_id, "too late")
+                    self._provide_current_input(
+                        supervisor,
+                        launch.session_id,
+                        "too late",
+                    )
 
                 failed = supervisor.snapshot(launch.session_id)
                 self.assertEqual(failed.status, PortableSessionStatus.FAILED)
@@ -1406,7 +1425,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             ValueError,
             "worker input channel closed before input could be sent",
         ):
-            supervisor.provide_input(launch.session_id, "too late")
+            self._provide_current_input(supervisor, launch.session_id, "too late")
 
         resumed = supervisor.resume_session(launch.session_id)
         self.assertEqual(resumed.status, PortableSessionStatus.RUNNING)
@@ -1496,6 +1515,311 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         supervisor.shutdown()
         self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
 
+    def test_retired_reader_cannot_release_replacement_workers_lease(self) -> None:
+        class BlockingOutput:
+            def __init__(self) -> None:
+                self._lines: queue.Queue[str | None] = queue.Queue()
+
+            def __iter__(self) -> BlockingOutput:
+                return self
+
+            def __next__(self) -> str:
+                line = self._lines.get(timeout=5)
+                if line is None:
+                    raise StopIteration
+                return line
+
+            def send(self, line: str) -> None:
+                self._lines.put(line)
+
+            def close(self) -> None:
+                self._lines.put(None)
+
+        class WorkerInput:
+            def __init__(
+                self,
+                process: FakeWorkerProcess,
+                *,
+                fail_on_second_flush: bool,
+            ) -> None:
+                self._process = process
+                self._fail_on_second_flush = fail_on_second_flush
+                self.flush_count = 0
+
+            def write(self, value: str) -> int:
+                return len(value)
+
+            def flush(self) -> None:
+                self.flush_count += 1
+                if self._fail_on_second_flush and self.flush_count == 2:
+                    self._process.return_code = 17
+                    raise BrokenPipeError("retired worker closed stdin")
+
+            def close(self) -> None:
+                return None
+
+        class FakeWorkerProcess:
+            def __init__(self, *, fail_on_second_flush: bool) -> None:
+                self.return_code: int | None = None
+                self.stdout = BlockingOutput()
+                self.stderr = BlockingOutput()
+                self.stdin = WorkerInput(
+                    self,
+                    fail_on_second_flush=fail_on_second_flush,
+                )
+
+            def poll(self) -> int | None:
+                return self.return_code
+
+            def terminate(self) -> None:
+                self.return_code = -15
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.return_code is None:
+                    raise subprocess.TimeoutExpired("fake-worker", timeout)
+                return self.return_code
+
+        class BlockingReleaseCatalog(PortableSessionCatalog):
+            def __init__(self, path: Path) -> None:
+                super().__init__(path)
+                self.release_entered = threading.Event()
+                self.allow_release = threading.Event()
+                self.block_next_release = True
+
+            def release_worktree_lease(
+                self,
+                session_id: str,
+                *,
+                owner_id: str,
+            ) -> bool:
+                if self.block_next_release:
+                    self.block_next_release = False
+                    self.release_entered.set()
+                    if not self.allow_release.wait(timeout=2):
+                        raise TimeoutError("Test did not allow retired lease release.")
+                return super().release_worktree_lease(
+                    session_id,
+                    owner_id=owner_id,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = BlockingReleaseCatalog(root / "catalog.sqlite3")
+            retired_process = FakeWorkerProcess(fail_on_second_flush=True)
+            replacement_process = FakeWorkerProcess(fail_on_second_flush=False)
+            processes = iter((retired_process, replacement_process))
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: next(processes),
+                catalog=catalog,
+                owner_id="same-shell",
+            )
+            launch = PortableSessionLaunch(
+                session_id="session-lease-generation",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            retired_process.stdout.send(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "session_id": launch.session_id,
+                        "sequence": 1,
+                        "kind": "INPUT_REQUEST",
+                        "payload": {
+                            "request_kind": "TEXT",
+                            "prompt": "Retired worker request",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "worker input channel closed before input could be sent",
+            ):
+                self._provide_current_input(
+                    supervisor,
+                    launch.session_id,
+                    "too late",
+                )
+
+            retired_process.stdout.close()
+            self.assertTrue(catalog.release_entered.wait(timeout=1))
+            resumed: list[PortableSessionSnapshot] = []
+            resume_thread = threading.Thread(
+                target=lambda: resumed.append(
+                    supervisor.resume_session(launch.session_id)
+                )
+            )
+            resume_thread.start()
+            time.sleep(0.05)
+            catalog.allow_release.set()
+            resume_thread.join(timeout=1)
+
+            self.assertFalse(resume_thread.is_alive())
+            self.assertEqual(resumed[0].status, PortableSessionStatus.RUNNING)
+            replacement_lease = catalog.get_worktree_lease(checkout)
+            self.assertIsNotNone(replacement_lease)
+            assert replacement_lease is not None
+            self.assertEqual(replacement_lease.session_id, launch.session_id)
+            self.assertIs(
+                supervisor._running[launch.session_id].process,
+                replacement_process,
+            )
+            replacement_process.return_code = 0
+            replacement_process.stdout.close()
+            replacement_process.stderr.close()
+            supervisor.shutdown()
+
+    def test_request_identity_rejects_queued_stale_input_for_every_kind(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            request_kind = sys.argv[2]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            common = {
+                "request_kind": request_kind,
+                "options": [["accept", "Accept"], ["deny", "Deny"]],
+                "default_key": "deny",
+                "cancel_key": "deny",
+            }
+            send(1, "INPUT_REQUEST", {
+                **common,
+                "prompt": "Request A",
+                "request_id": "request-a",
+                "request_generation": 1,
+            })
+            first = json.loads(sys.stdin.readline())
+            assert first["payload"]["request_id"] == "request-a"
+            assert first["payload"]["request_generation"] == 1
+            send(2, "INPUT_REQUEST", {
+                **common,
+                "prompt": "Request B",
+                "request_id": "request-b",
+                "request_generation": 2,
+            })
+            second = json.loads(sys.stdin.readline())
+            assert second["payload"]["request_id"] == "request-b"
+            assert second["payload"]["request_generation"] == 2
+            send(3, "COMPLETION", {"exit_code": 0})
+            """
+        )
+
+        for request_kind in ("CHOICE", "APPROVAL", "TEXT"):
+            with self.subTest(request_kind=request_kind):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    worker = root / "worker.py"
+                    worker.write_text(worker_source, encoding="utf-8")
+                    launch = PortableSessionLaunch(
+                        session_id=f"request-identity-{request_kind.casefold()}",
+                        checkout=root,
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    )
+
+                    def launch_worker(
+                        selected: PortableSessionLaunch,
+                    ) -> subprocess.Popen[str]:
+                        return subprocess.Popen(
+                            [
+                                sys.executable,
+                                "-u",
+                                str(worker),
+                                selected.session_id,
+                                request_kind,
+                            ],
+                            cwd=selected.checkout,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            encoding="utf-8",
+                        )
+
+                    supervisor = PortableSessionSupervisor(
+                        worker_launcher=launch_worker
+                    )
+                    supervisor.start_session(launch)
+                    request_a_snapshot = self._wait_for_status(
+                        supervisor,
+                        launch.session_id,
+                        PortableSessionStatus.WAITING_FOR_INPUT,
+                    )
+                    request_a = request_a_snapshot.input_request
+                    assert request_a is not None
+                    self.assertEqual(request_a.request_id, "request-a")
+                    self.assertEqual(request_a.generation, 1)
+                    supervisor.provide_input(
+                        launch.session_id,
+                        "accept",
+                        request_id=request_a.request_id,
+                        request_generation=request_a.generation,
+                    )
+                    request_b_snapshot = self._wait_for_input_prompt(
+                        supervisor,
+                        launch.session_id,
+                        "Request B",
+                    )
+                    request_b = request_b_snapshot.input_request
+                    assert request_b is not None
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "no longer the current input request",
+                    ):
+                        supervisor.provide_input(
+                            launch.session_id,
+                            "queued duplicate",
+                            request_id=request_a.request_id,
+                            request_generation=request_a.generation,
+                        )
+
+                    unchanged = supervisor.snapshot(launch.session_id)
+                    self.assertEqual(
+                        unchanged.status,
+                        PortableSessionStatus.WAITING_FOR_INPUT,
+                    )
+                    self.assertEqual(unchanged.input_request, request_b)
+                    supervisor.provide_input(
+                        launch.session_id,
+                        "deny",
+                        request_id=request_b.request_id,
+                        request_generation=request_b.generation,
+                    )
+                    completed = supervisor.wait_for_terminal(
+                        launch.session_id,
+                        timeout=5,
+                    )
+                    supervisor.shutdown()
+                    self.assertEqual(
+                        completed.status,
+                        PortableSessionStatus.COMPLETED,
+                        completed.diagnostics,
+                    )
+
     def test_two_workers_route_interleaved_input_and_isolate_one_failure(self) -> None:
         worker_source = textwrap.dedent(
             """
@@ -1573,10 +1897,14 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 PortableSessionStatus.WAITING_FOR_INPUT,
             )
 
-            supervisor.provide_input(failing.session_id, "alpha-only")
+            self._provide_current_input(supervisor, failing.session_id, "alpha-only")
             failed = supervisor.wait_for_terminal(failing.session_id, timeout=5)
             still_waiting = supervisor.snapshot(continuing.session_id)
-            supervisor.provide_input(continuing.session_id, "beta-only")
+            self._provide_current_input(
+                supervisor,
+                continuing.session_id,
+                "beta-only",
+            )
             completed = supervisor.wait_for_terminal(
                 continuing.session_id,
                 timeout=5,
@@ -1819,6 +2147,38 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 return snapshot
             time.sleep(0.01)
         self.fail(f"Portable session did not reach {expected.value}.")
+
+    def _wait_for_input_prompt(
+        self,
+        supervisor: PortableSessionSupervisor,
+        session_id: str,
+        prompt: str,
+    ) -> PortableSessionSnapshot:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snapshot = supervisor.snapshot(session_id)
+            if (
+                snapshot.input_request is not None
+                and snapshot.input_request.prompt == prompt
+            ):
+                return snapshot
+            time.sleep(0.01)
+        self.fail(f"Portable session did not request {prompt!r}.")
+
+    def _provide_current_input(
+        self,
+        supervisor: PortableSessionSupervisor,
+        session_id: str,
+        value: str,
+    ) -> PortableSessionSnapshot:
+        request = supervisor.snapshot(session_id).input_request
+        assert request is not None
+        return supervisor.provide_input(
+            session_id,
+            value,
+            request_id=request.request_id,
+            request_generation=request.generation,
+        )
 
 
 if __name__ == "__main__":

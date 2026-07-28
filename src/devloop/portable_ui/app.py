@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,7 +35,6 @@ from ..portable_sessions import (
     PortableSessionIntent,
     PortableSessionIntentKind,
     PortableSessionInputKind,
-    PortableSessionInputRequest,
     PortableSessionLaunch,
     PortableSessionSnapshot,
     PortableSessionStatus,
@@ -101,6 +100,46 @@ class PortableDetail(Static):
     def on_resize(self, _event: events.Resize) -> None:
         size = self.content_region.size
         self._report_content_size(size.width, size.height)
+
+
+class PortableRequestInput(Input):
+    @dataclass
+    class Submitted(Input.Submitted):
+        session_id: str | None = None
+        request_id: str | None = None
+        request_generation: int | None = None
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._session_id: str | None = None
+        self._request_id: str | None = None
+        self._request_generation: int | None = None
+
+    def bind_request(
+        self,
+        *,
+        session_id: str | None,
+        request_id: str | None,
+        request_generation: int | None,
+    ) -> None:
+        self._session_id = session_id
+        self._request_id = request_id
+        self._request_generation = request_generation
+
+    async def action_submit(self) -> None:
+        validation_result = (
+            self.validate(self.value) if "submitted" in self.validate_on else None
+        )
+        self.post_message(
+            self.Submitted(
+                self,
+                self.value,
+                validation_result,
+                self._session_id,
+                self._request_id,
+                self._request_generation,
+            )
+        )
 
 
 class PortableTextOverlay(ModalScreen[None]):
@@ -411,12 +450,7 @@ class PortableApplicationShell(App[None]):
             else attention_bell
         )
         self._saved_projects: dict[str, Path] = {}
-        self._session_input_options: dict[str, tuple[str, int, str]] = {}
-        self._session_input_request_generations: dict[
-            str,
-            tuple[PortableSessionInputRequest, int],
-        ] = {}
-        self._next_session_input_request_generation = 1
+        self._session_input_options: dict[str, tuple[str, str, int, str]] = {}
         self._new_session_input: str | None = None
         self._new_session_flow_active = False
         self._new_session_view: str | None = None
@@ -476,7 +510,7 @@ class PortableApplicationShell(App[None]):
                         markup=False,
                         max_lines=100,
                     )
-                    yield Input(id="portable-input")
+                    yield PortableRequestInput(id="portable-input")
             yield Static("STARTING", id="portable-status")
             yield Static(
                 DEFAULT_ACTION_BAR,
@@ -673,7 +707,13 @@ class PortableApplicationShell(App[None]):
         self._new_session_view = None
         self._new_session_repository = None
         self._new_session_worktree = None
-        self.query_one("#portable-input", Input).display = False
+        input_widget = self.query_one("#portable-input", PortableRequestInput)
+        input_widget.display = False
+        input_widget.bind_request(
+            session_id=None,
+            request_id=None,
+            request_generation=None,
+        )
         self.query_one("#portable-header", Static).update("Dev Loop > Sessions")
         self._render_session_tabs()
         menu = self._refresh_sessions_menu()
@@ -962,8 +1002,6 @@ class PortableApplicationShell(App[None]):
     def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
         previous = self._session_snapshots.get(snapshot.session_id)
         self._session_snapshots[snapshot.session_id] = snapshot
-        if snapshot.input_request is None:
-            self._session_input_request_generations.pop(snapshot.session_id, None)
         if (
             snapshot.input_request is not None
             and (previous is None or previous.input_request != snapshot.input_request)
@@ -1019,8 +1057,13 @@ class PortableApplicationShell(App[None]):
         )
         menu = self.query_one("#portable-navigation", OptionList)
         menu.clear_options()
-        input_widget = self.query_one("#portable-input", Input)
+        input_widget = self.query_one("#portable-input", PortableRequestInput)
         input_widget.display = False
+        input_widget.bind_request(
+            session_id=None,
+            request_id=None,
+            request_generation=None,
+        )
         self._session_input_options.clear()
         if snapshot.status in {
             PortableSessionStatus.READY,
@@ -1039,11 +1082,11 @@ class PortableApplicationShell(App[None]):
             }
         ):
             rendered_options = []
-            request_generation = self._session_input_request_generation(snapshot)
+            request = snapshot.input_request
             for index, (value, label) in enumerate(snapshot.input_request.options):
                 option_id = (
                     f"{SESSION_INPUT_OPTION_ID_PREFIX}{snapshot.session_id}:"
-                    f"{request_generation}:{index}"
+                    f"{request.generation}:{request.request_id}:{index}"
                 )
                 rendered_options.append(
                     Option(
@@ -1053,8 +1096,25 @@ class PortableApplicationShell(App[None]):
                 )
                 self._session_input_options[option_id] = (
                     snapshot.session_id,
-                    request_generation,
+                    request.request_id,
+                    request.generation,
                     value,
+                )
+            cancel_key = request.cancel_key
+            if (
+                cancel_key is not None
+                and cancel_key not in {value for value, _label in request.options}
+            ):
+                cancel_option_id = (
+                    f"{SESSION_INPUT_OPTION_ID_PREFIX}{snapshot.session_id}:"
+                    f"{request.generation}:{request.request_id}:cancel"
+                )
+                rendered_options.append(Option("Cancel input", id=cancel_option_id))
+                self._session_input_options[cancel_option_id] = (
+                    snapshot.session_id,
+                    request.request_id,
+                    request.generation,
+                    cancel_key,
                 )
             menu.add_options(rendered_options)
             menu.highlighted = next(
@@ -1069,6 +1129,23 @@ class PortableApplicationShell(App[None]):
             )
         else:
             menu.add_option(Option("Sessions", id=SESSIONS_TAB_ID))
+            request = snapshot.input_request
+            if (
+                request is not None
+                and request.kind is PortableSessionInputKind.TEXT
+                and request.cancel_key is not None
+            ):
+                cancel_option_id = (
+                    f"{SESSION_INPUT_OPTION_ID_PREFIX}{snapshot.session_id}:"
+                    f"{request.generation}:{request.request_id}:cancel"
+                )
+                menu.add_option(Option("Cancel input", id=cancel_option_id))
+                self._session_input_options[cancel_option_id] = (
+                    snapshot.session_id,
+                    request.request_id,
+                    request.generation,
+                    request.cancel_key,
+                )
             menu.add_option(
                 Option(
                     f"{checkout_name} [{snapshot.status.value}]",
@@ -1113,6 +1190,11 @@ class PortableApplicationShell(App[None]):
             )
             input_widget.value = ""
             input_widget.display = True
+            input_widget.bind_request(
+                session_id=snapshot.session_id,
+                request_id=snapshot.input_request.request_id,
+                request_generation=snapshot.input_request.generation,
+            )
             input_widget.focus()
         activity = self.query_one("#portable-activity", RichLog)
         activity.clear()
@@ -1125,33 +1207,16 @@ class PortableApplicationShell(App[None]):
             f"INPUT NOT SENT · {rejection}" if rejection else snapshot.status.value
         )
         action_bar = (
-            "Enter Resume | Esc Sessions | F4 Logs | F5 Context"
+            "Enter Resume | Esc Hide to Sessions | F4 Logs | F5 Context"
             if snapshot.status
             in {
                 PortableSessionStatus.READY,
                 PortableSessionStatus.PAUSED,
                 PortableSessionStatus.INTERRUPTED,
             }
-            else "Esc Sessions | F4 Logs | F5 Context"
+            else "Esc Hide to Sessions | F4 Logs | F5 Context"
         )
         self.query_one("#portable-actions", Static).update(action_bar)
-
-    def _session_input_request_generation(
-        self,
-        snapshot: PortableSessionSnapshot,
-    ) -> int:
-        request = snapshot.input_request
-        assert request is not None
-        current = self._session_input_request_generations.get(snapshot.session_id)
-        if current is not None and current[0] == request:
-            return current[1]
-        generation = self._next_session_input_request_generation
-        self._next_session_input_request_generation += 1
-        self._session_input_request_generations[snapshot.session_id] = (
-            request,
-            generation,
-        )
-        return generation
 
     def _render_sessions_overview(self) -> str:
         if not self._session_snapshots:
@@ -1463,21 +1528,23 @@ class PortableApplicationShell(App[None]):
         if self._session_supervisor is not None:
             session_input = self._session_input_options.get(option_id or "")
             if session_input is not None:
-                session_id, request_generation, value = session_input
+                session_id, request_id, request_generation, value = session_input
                 current = self._session_snapshots.get(session_id)
-                current_generation = self._session_input_request_generations.get(
-                    session_id
-                )
                 if (
                     self._active_session_id != session_id
                     or current is None
                     or current.input_request is None
-                    or current_generation is None
-                    or current_generation[1] != request_generation
+                    or current.input_request.request_id != request_id
+                    or current.input_request.generation != request_generation
                 ):
                     self._reject_stale_session_input()
                     return
-                self._provide_session_input(value, session_id=session_id)
+                self._provide_session_input(
+                    value,
+                    session_id=session_id,
+                    request_id=request_id,
+                    request_generation=request_generation,
+                )
             elif (
                 isinstance(option_id, str)
                 and option_id.startswith(SESSION_INPUT_OPTION_ID_PREFIX)
@@ -1551,7 +1618,12 @@ class PortableApplicationShell(App[None]):
             and self._active_session_id is not None
         ):
             event.input.display = False
-            self._provide_session_input(event.value)
+            self._provide_session_input(
+                event.value,
+                session_id=getattr(event, "session_id", None),
+                request_id=getattr(event, "request_id", None),
+                request_generation=getattr(event, "request_generation", None),
+            )
             return
         request_id = self._active_request_id
         if request_id is None:
@@ -1567,17 +1639,6 @@ class PortableApplicationShell(App[None]):
                 else:
                     self._show_new_session_menu()
                 return
-            current = (
-                self._session_snapshots.get(self._active_session_id)
-                if self._active_session_id is not None
-                else None
-            )
-            if current is not None and current.input_request is not None:
-                request = current.input_request
-                assert request is not None
-                if request.cancel_key is not None:
-                    self._provide_session_input(request.cancel_key)
-                    return
             if self._active_session_id is not None:
                 self._show_sessions_tab(
                     hide_session_id=self._active_session_id,
@@ -1623,16 +1684,30 @@ class PortableApplicationShell(App[None]):
         value: str,
         *,
         session_id: str | None = None,
+        request_id: str | None = None,
+        request_generation: int | None = None,
     ) -> None:
         assert self._session_supervisor is not None
         owning_session_id = session_id or self._active_session_id
         assert owning_session_id is not None
+        request = self._session_snapshots[owning_session_id].input_request
+        if request is None:
+            self._reject_stale_session_input()
+            return
+        owning_request_id = request.request_id if request_id is None else request_id
+        owning_request_generation = (
+            request.generation
+            if request_generation is None
+            else request_generation
+        )
         try:
             self._session_supervisor.handle_intent(
                 PortableSessionIntent(
                     kind=PortableSessionIntentKind.PROVIDE_INPUT,
                     session_id=owning_session_id,
                     value=value,
+                    request_id=owning_request_id,
+                    request_generation=owning_request_generation,
                 )
             )
             self._session_input_rejections.pop(owning_session_id, None)

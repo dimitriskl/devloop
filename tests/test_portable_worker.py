@@ -9,13 +9,88 @@ from typing import Any
 from unittest import mock
 
 from devloop import cli
-from devloop.portable_protocol import PortableProtocolFrame
+from devloop.portable_protocol import PortableProtocolError, PortableProtocolFrame
 from devloop.portable_runtime import portable_runtime_session
 from devloop.portable_worker import PortableWorkerRuntimeBridge
 from devloop.statusui import Stage
 
 
 class PortableWorkerRuntimeBridgeTests(unittest.TestCase):
+    def test_choice_request_identity_round_trips_through_user_input(self) -> None:
+        command_stream = io.StringIO(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "session-choice",
+                    "sequence": 2,
+                    "kind": "USER_INPUT",
+                    "payload": {
+                        "value": "accept",
+                        "request_id": "fixed-request",
+                        "request_generation": 1,
+                    },
+                }
+            )
+            + "\n"
+        )
+        event_stream = io.StringIO()
+        bridge = PortableWorkerRuntimeBridge(
+            "session-choice",
+            command_stream=command_stream,
+            event_stream=event_stream,
+        )
+
+        with mock.patch(
+            "devloop.portable_worker.uuid.uuid4",
+            return_value="fixed-request",
+        ):
+            selected = bridge.choose(
+                (("accept", "Accept"), ("deny", "Deny")),
+                default_key="deny",
+                cancel_key="deny",
+                render=lambda _content: None,
+            )
+
+        request = json.loads(event_stream.getvalue())
+        self.assertEqual(selected, "accept")
+        self.assertEqual(request["payload"]["request_id"], "fixed-request")
+        self.assertEqual(request["payload"]["request_generation"], 1)
+
+    def test_worker_rejects_user_input_for_another_request(self) -> None:
+        command_stream = io.StringIO(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "session-text",
+                    "sequence": 2,
+                    "kind": "USER_INPUT",
+                    "payload": {
+                        "value": "stale",
+                        "request_id": "request-a",
+                        "request_generation": 1,
+                    },
+                }
+            )
+            + "\n"
+        )
+        bridge = PortableWorkerRuntimeBridge(
+            "session-text",
+            command_stream=command_stream,
+            event_stream=io.StringIO(),
+        )
+
+        with (
+            mock.patch(
+                "devloop.portable_worker.uuid.uuid4",
+                return_value="request-b",
+            ),
+            self.assertRaisesRegex(
+                PortableProtocolError,
+                "does not match the current input request",
+            ),
+        ):
+            bridge.read_line("New value")
+
     def test_delivery_role_transition_emits_stage_issue_and_pass_status(self) -> None:
         event_stream = io.StringIO()
         bridge = PortableWorkerRuntimeBridge(

@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import traceback
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from itertools import count
@@ -52,6 +53,7 @@ class PortableWorkerRuntimeBridge:
         self._event_stream = event_stream
         self._event_sequences = count(1)
         self._expected_command_sequence = 2
+        self._request_generations = count(1)
         self._write_lock = RLock()
         self._content_size: tuple[int, int] | None = None
 
@@ -65,9 +67,13 @@ class PortableWorkerRuntimeBridge:
         shortcuts: Mapping[str, str] | None = None,
     ) -> str:
         render(default_key)
+        request_id = str(uuid.uuid4())
+        request_generation = next(self._request_generations)
         self._send(
             WorkerMessageKind.INPUT_REQUEST,
             {
+                "request_id": request_id,
+                "request_generation": request_generation,
                 "request_kind": "CHOICE",
                 "options": [list(option) for option in options],
                 "default_key": default_key,
@@ -75,20 +81,30 @@ class PortableWorkerRuntimeBridge:
                 "shortcuts": dict(shortcuts or {}),
             },
         )
-        selected = self._read_user_input()
+        selected = self._read_user_input(
+            request_id=request_id,
+            request_generation=request_generation,
+        )
         render(selected)
         return selected
 
     def read_line(self, prompt: str, *, history: Sequence[str] = ()) -> str:
+        request_id = str(uuid.uuid4())
+        request_generation = next(self._request_generations)
         self._send(
             WorkerMessageKind.INPUT_REQUEST,
             {
+                "request_id": request_id,
+                "request_generation": request_generation,
                 "request_kind": "TEXT",
                 "prompt": prompt,
                 "history": list(history),
             },
         )
-        return self._read_user_input()
+        return self._read_user_input(
+            request_id=request_id,
+            request_generation=request_generation,
+        )
 
     def request_stop(self) -> None:
         return None
@@ -150,7 +166,12 @@ class PortableWorkerRuntimeBridge:
             self._event_stream.write(frame.to_json_line() + "\n")
             self._event_stream.flush()
 
-    def _read_user_input(self) -> str:
+    def _read_user_input(
+        self,
+        *,
+        request_id: str,
+        request_generation: int,
+    ) -> str:
         line = self._command_stream.readline()
         if not line:
             raise PortableProtocolError("Supervisor closed worker input.")
@@ -163,6 +184,13 @@ class PortableWorkerRuntimeBridge:
         if frame.kind != SupervisorMessageKind.USER_INPUT.value:
             raise PortableProtocolError(
                 f"Expected USER_INPUT; received {frame.kind!r}."
+            )
+        if (
+            frame.payload.get("request_id") != request_id
+            or frame.payload.get("request_generation") != request_generation
+        ):
+            raise PortableProtocolError(
+                "Supervisor USER_INPUT does not match the current input request."
             )
         value = frame.payload.get("value")
         if not isinstance(value, str):
