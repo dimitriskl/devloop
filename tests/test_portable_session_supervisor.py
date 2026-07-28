@@ -571,6 +571,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             assert command["kind"] == "PAUSE", command
             send(2, "CHECKPOINT", {
                 "summary": "Planning thread and settings are durable",
+                **command["payload"],
             })
             """
         )
@@ -729,7 +730,10 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 "session_id": session_id,
                 "sequence": 2,
                 "kind": "CHECKPOINT",
-                "payload": {{"summary": "Unvalidated checkpoint"}},
+                "payload": {{
+                    "summary": "Unvalidated checkpoint",
+                    **command["payload"],
+                }},
             }}), flush=True)
             """
         )
@@ -1324,6 +1328,203 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             supervisor.shutdown()
 
         self.assertIsNotNone(processes[0].poll())
+
+    def test_force_stop_quarantines_late_outcomes_until_cleanup_is_confirmed(
+        self,
+    ) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+            import time
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "ACTIVITY", {"message": "Ready for Force Stop"})
+            json.loads(sys.stdin.readline())
+            time.sleep(0.1)
+            send(2, "STATUS", {"status": "RUNNING", "stage": "stale-stage"})
+            send(3, "COMPLETION", {"exit_code": 0})
+            """
+        )
+        resumed_worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+
+            def send(sequence, kind, payload):
+                print(json.dumps({
+                    "version": 1,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "kind": kind,
+                    "payload": payload,
+                }), flush=True)
+
+            json.loads(sys.stdin.readline())
+            send(1, "STATUS", {"status": "RUNNING", "stage": "fresh-generation"})
+            command = json.loads(sys.stdin.readline())
+            send(2, "TERMINATION", {
+                **command["payload"],
+                "descendants_confirmed": True,
+                "detail": "Fresh generation stopped.",
+            })
+            """
+        )
+        unknown = ProcessTerminationResult(
+            state=ProcessTreeState.UNKNOWN,
+            detail="Injected unconfirmed Force Stop cleanup.",
+        )
+        stopped = ProcessTerminationResult(
+            state=ProcessTreeState.STOPPED,
+            detail="Confirmed cleanup after quarantined late frames.",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "late-force-stop-shell"
+            processes: list[subprocess.Popen[str]] = []
+            worker_sources = iter((worker_source, resumed_worker_source))
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        next(worker_sources),
+                        launch.session_id,
+                    ],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+                processes.append(process)
+                return process
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="late-force-stop",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            deadline = time.monotonic() + 5
+            while (
+                time.monotonic() < deadline
+                and not supervisor.snapshot(launch.session_id).activity
+            ):
+                time.sleep(0.01)
+
+            with (
+                mock.patch.object(
+                    portable_sessions,
+                    "_TERMINATION_ACK_TIMEOUT_SECONDS",
+                    0.01,
+                ),
+                mock.patch.object(
+                    portable_sessions,
+                    "_CLEANUP_RETRY_SECONDS",
+                    10.0,
+                ),
+                mock.patch.object(
+                    portable_sessions,
+                    "terminate_process",
+                    return_value=unknown,
+                ),
+            ):
+                interrupted = supervisor.force_stop_session(launch.session_id)
+                processes[0].wait(timeout=5)
+                deadline = time.monotonic() + 5
+                while (
+                    time.monotonic() < deadline
+                    and supervisor._running[
+                        launch.session_id
+                    ].next_worker_sequence < 4
+                ):
+                    time.sleep(0.01)
+
+            after_late_frames = supervisor.snapshot(launch.session_id)
+            retained_capacity = catalog.owns_execution_capacity(
+                launch.session_id,
+                owner_id=owner_id,
+            )
+            retained_lease = catalog.get_worktree_lease(checkout)
+
+            with mock.patch.object(
+                portable_sessions,
+                "terminate_process",
+                return_value=stopped,
+            ):
+                supervisor._retry_pending_worker_cleanup(force=True)
+
+            after_reaping = supervisor.snapshot(launch.session_id)
+            released_capacity = catalog.owns_execution_capacity(
+                launch.session_id,
+                owner_id=owner_id,
+            )
+            released_lease = catalog.get_worktree_lease(checkout)
+            resumed = supervisor.resume_session(launch.session_id)
+            deadline = time.monotonic() + 5
+            while (
+                time.monotonic() < deadline
+                and supervisor.snapshot(launch.session_id).progress.stage
+                != "fresh-generation"
+            ):
+                time.sleep(0.01)
+            after_resume_progress = supervisor.snapshot(launch.session_id)
+            supervisor.force_stop_session(launch.session_id)
+            supervisor.shutdown()
+
+            self.assertEqual(interrupted.status, PortableSessionStatus.INTERRUPTED)
+            self.assertEqual(
+                after_late_frames.status,
+                PortableSessionStatus.INTERRUPTED,
+            )
+            self.assertEqual(after_late_frames.result, 130)
+            self.assertNotEqual(after_late_frames.progress.stage, "stale-stage")
+            self.assertTrue(retained_capacity)
+            self.assertIsNotNone(retained_lease)
+            self.assertEqual(
+                after_reaping.status,
+                PortableSessionStatus.INTERRUPTED,
+            )
+            self.assertFalse(released_capacity)
+            self.assertIsNone(released_lease)
+            self.assertEqual(resumed.status, PortableSessionStatus.RUNNING)
+            self.assertEqual(
+                after_resume_progress.status,
+                PortableSessionStatus.RUNNING,
+            )
+            self.assertEqual(
+                after_resume_progress.progress.stage,
+                "fresh-generation",
+            )
 
     def test_force_and_cancel_confirm_real_child_and_grandchild_trees_dead(
         self,

@@ -61,6 +61,7 @@ class PortableWorkerRuntimeBridge:
         self._request_generations = count(1)
         self._write_lock = RLock()
         self._lifecycle_request: SupervisorMessageKind | None = None
+        self._lifecycle_command: PortableProtocolFrame | None = None
         self._command_queue: Queue[PortableProtocolFrame | PortableProtocolError] = (
             Queue()
         )
@@ -181,10 +182,26 @@ class PortableWorkerRuntimeBridge:
         self._send(WorkerMessageKind.COMPLETION, {"exit_code": exit_code})
 
     def send_checkpoint(self, evidence: Mapping[str, Any]) -> None:
-        self._send(WorkerMessageKind.CHECKPOINT, evidence)
+        self._send(
+            WorkerMessageKind.CHECKPOINT,
+            {
+                **evidence,
+                **self._lifecycle_acknowledgement(
+                    SupervisorMessageKind.PAUSE
+                ),
+            },
+        )
 
     def send_checkpoint_failure(self, message: str) -> None:
-        self._send(WorkerMessageKind.CHECKPOINT_FAILURE, {"message": message})
+        self._send(
+            WorkerMessageKind.CHECKPOINT_FAILURE,
+            {
+                "message": message,
+                **self._lifecycle_acknowledgement(
+                    SupervisorMessageKind.PAUSE
+                ),
+            },
+        )
 
     def send_termination(
         self,
@@ -207,6 +224,21 @@ class PortableWorkerRuntimeBridge:
 
     def send_hello(self) -> None:
         self._send(WorkerMessageKind.HELLO, {})
+
+    def _lifecycle_acknowledgement(
+        self,
+        expected_action: SupervisorMessageKind,
+    ) -> dict[str, object]:
+        command = self._lifecycle_command
+        if command is None or command.kind != expected_action.value:
+            raise PortableProtocolError(
+                f"Worker has no pending {expected_action.value} command to acknowledge."
+            )
+        return {
+            "action": expected_action.value,
+            "worker_generation": command.payload.get("worker_generation"),
+            "request_id": command.payload.get("request_id"),
+        }
 
     def send_failure(self, error: BaseException) -> None:
         self._send(
@@ -244,6 +276,7 @@ class PortableWorkerRuntimeBridge:
             SupervisorMessageKind.SHUTDOWN,
         }:
             self._lifecycle_request = lifecycle_kind
+            self._lifecycle_command = frame
             raise PortableRuntimeStopped(
                 f"Portable worker received {lifecycle_kind.value}."
             )
@@ -312,6 +345,7 @@ class PortableWorkerRuntimeBridge:
                 SupervisorMessageKind.SHUTDOWN,
             }:
                 self._lifecycle_request = kind
+                self._lifecycle_command = frame
                 if on_lifecycle is not None:
                     on_lifecycle(frame)
                 self._command_queue.put(frame)

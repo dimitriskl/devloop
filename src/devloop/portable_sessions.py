@@ -322,6 +322,24 @@ class _LifecycleCommandIdentity:
     worker_generation: int
     request_id: str
 
+    @property
+    def acknowledgement_kinds(self) -> frozenset[WorkerMessageKind]:
+        if self.action is SupervisorMessageKind.PAUSE:
+            return frozenset(
+                {
+                    WorkerMessageKind.CHECKPOINT,
+                    WorkerMessageKind.CHECKPOINT_FAILURE,
+                }
+            )
+        return frozenset({WorkerMessageKind.TERMINATION})
+
+    def matches(self, frame: PortableProtocolFrame) -> bool:
+        return (
+            frame.payload.get("action") == self.action.value
+            and frame.payload.get("worker_generation") == self.worker_generation
+            and frame.payload.get("request_id") == self.request_id
+        )
+
 
 @dataclass(frozen=True)
 class _QueuedSession:
@@ -800,10 +818,21 @@ class PortableSessionSupervisor:
             self._snapshots[session_id] = pausing
             self._persist_snapshot(pausing)
             self._publish(pausing)
+            command_identity = _LifecycleCommandIdentity(
+                action=SupervisorMessageKind.PAUSE,
+                worker_generation=running.generation,
+                request_id=str(uuid.uuid4()),
+            )
+            running.pending_lifecycle = command_identity
             frame = supervisor_frame(
                 session_id,
                 running.next_supervisor_sequence,
                 SupervisorMessageKind.PAUSE,
+                {
+                    "action": command_identity.action.value,
+                    "worker_generation": command_identity.worker_generation,
+                    "request_id": command_identity.request_id,
+                },
             )
             try:
                 self._write_frame(session_id, frame)
@@ -1586,6 +1615,53 @@ class PortableSessionSupervisor:
                 or snapshot.status.terminal
             ):
                 return False
+            pending_lifecycle = running.pending_lifecycle
+            if pending_lifecycle is not None:
+                safe_diagnostics = {
+                    WorkerMessageKind.ACTIVITY,
+                    WorkerMessageKind.SAFE_OUTPUT,
+                }
+                if kind not in (
+                    safe_diagnostics | pending_lifecycle.acknowledgement_kinds
+                ):
+                    return True
+                if (
+                    kind in pending_lifecycle.acknowledgement_kinds
+                    and (
+                        pending_lifecycle.worker_generation != running.generation
+                        or not pending_lifecycle.matches(frame)
+                    )
+                ):
+                    diagnostic = (
+                        f"Worker {kind.value} does not match "
+                        "the pending lifecycle command."
+                    )
+                    pause_rejected = (
+                        pending_lifecycle.action is SupervisorMessageKind.PAUSE
+                    )
+                    updated = replace(
+                        snapshot,
+                        status=(
+                            PortableSessionStatus.INTERRUPTED
+                            if pause_rejected
+                            else snapshot.status
+                        ),
+                        result=(
+                            130 if pause_rejected else snapshot.result
+                        ),
+                        input_request=(
+                            None if pause_rejected else snapshot.input_request
+                        ),
+                        diagnostics=(*snapshot.diagnostics, diagnostic)[-100:],
+                        updated_at=time.time(),
+                    )
+                    if pause_rejected:
+                        running.stop_requested = True
+                    self._snapshots[session_id] = updated
+                    self._persist_snapshot(updated)
+                    self._publish(updated)
+                    self._condition.notify_all()
+                    return True
             if kind is WorkerMessageKind.HELLO:
                 updated = snapshot
             elif kind is WorkerMessageKind.CONTEXT:
@@ -1770,16 +1846,12 @@ class PortableSessionSupervisor:
                     )[-100:],
                 )
             elif kind is WorkerMessageKind.TERMINATION:
-                action = _payload_text(frame, "action")
-                worker_generation = frame.payload.get("worker_generation")
-                request_id = _payload_text(frame, "request_id")
                 pending = running.pending_lifecycle
                 if (
                     pending is None
-                    or action != pending.action.value
-                    or worker_generation != pending.worker_generation
-                    or request_id != pending.request_id
-                    or worker_generation != running.generation
+                    or kind not in pending.acknowledgement_kinds
+                    or not pending.matches(frame)
+                    or pending.worker_generation != running.generation
                 ):
                     raise PortableProtocolError(
                         "Worker TERMINATION does not match the pending lifecycle command."
