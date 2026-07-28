@@ -23,6 +23,203 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionConcurrencyTests(unittest.TestCase):
+    def test_new_session_launch_failure_persists_failed_and_releases_capacity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            owner_id = "new-launch-failure-shell"
+            launch = PortableSessionLaunch(
+                session_id="new-launch-failure",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: (_ for _ in ()).throw(
+                    OSError("worker executable is unavailable")
+                ),
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    OSError,
+                    "worker executable is unavailable",
+                ):
+                    supervisor.start_session(launch)
+
+                snapshot = supervisor.snapshot(launch.session_id)
+                durable = catalog.get_session(launch.session_id)
+
+                self.assertEqual(snapshot.status, PortableSessionStatus.FAILED)
+                self.assertEqual(durable.status, PortableSessionStatus.FAILED)
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertIsNone(catalog.get_worktree_lease(checkout))
+            finally:
+                supervisor.shutdown()
+
+    def test_resumed_session_launch_failure_releases_capacity_and_worktree_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            owner_id = "resume-launch-failure-shell"
+            launch = PortableSessionLaunch(
+                session_id="resume-launch-failure",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            catalog.create_session(launch)
+            catalog.update_session_status(
+                launch.session_id,
+                PortableSessionStatus.PAUSED,
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: (_ for _ in ()).throw(
+                    OSError("worker executable is unavailable")
+                ),
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    OSError,
+                    "worker executable is unavailable",
+                ):
+                    supervisor.resume_session(launch.session_id)
+
+                snapshot = supervisor.snapshot(launch.session_id)
+                durable = catalog.get_session(launch.session_id)
+
+                self.assertEqual(snapshot.status, PortableSessionStatus.FAILED)
+                self.assertEqual(durable.status, PortableSessionStatus.FAILED)
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertIsNone(catalog.get_worktree_lease(checkout))
+            finally:
+                supervisor.shutdown()
+
+    def test_queued_launch_failure_releases_capacity_to_next_session(
+        self,
+    ) -> None:
+        worker_source = "import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            catalog.set_concurrency_limit(1)
+            owner_id = "queued-launch-failure-shell"
+            launched: list[str] = []
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                launched.append(launch.session_id)
+                if launch.session_id == "queued-launch-failure":
+                    raise OSError("queued worker executable is unavailable")
+                return subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    **({} if os.name == "nt" else {"start_new_session": True}),
+                )
+
+            launches = []
+            for session_id in (
+                "capacity-holder",
+                "queued-launch-failure",
+                "next-after-launch-failure",
+            ):
+                checkout = root / session_id
+                checkout.mkdir()
+                launches.append(
+                    PortableSessionLaunch(
+                        session_id=session_id,
+                        checkout=checkout,
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    )
+                )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            try:
+                supervisor.start_session(launches[0])
+                self.assertEqual(
+                    supervisor.start_session(launches[1]).status,
+                    PortableSessionStatus.QUEUED,
+                )
+                self.assertEqual(
+                    supervisor.start_session(launches[2]).status,
+                    PortableSessionStatus.QUEUED,
+                )
+
+                supervisor.force_stop_session(launches[0].session_id)
+                self._wait_for_status(
+                    supervisor,
+                    launches[2].session_id,
+                    PortableSessionStatus.RUNNING,
+                )
+
+                failed = catalog.get_session(launches[1].session_id)
+                self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launches[1].session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertTrue(
+                    catalog.owns_execution_capacity(
+                        launches[2].session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertIsNone(
+                    catalog.get_worktree_lease(launches[1].checkout)
+                )
+                self.assertEqual(
+                    launched,
+                    [
+                        launches[0].session_id,
+                        launches[1].session_id,
+                        launches[2].session_id,
+                    ],
+                )
+
+                supervisor.force_stop_session(launches[2].session_id)
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launches[2].session_id,
+                        owner_id=owner_id,
+                    )
+                )
+            finally:
+                supervisor.shutdown()
+
     def test_checkpoint_failure_reaps_dead_worker_and_releases_capacity(self) -> None:
         worker_source = (
             "import json,sys\n"

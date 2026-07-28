@@ -288,7 +288,7 @@ class PortableSessionCatalogController(Protocol):
         *,
         owner_id: str,
         process_id: int | None = None,
-    ) -> None: ...
+    ) -> int: ...
 
     def owns_execution_capacity(
         self,
@@ -720,11 +720,8 @@ class PortableSessionSupervisor:
     ) -> PortableSessionSnapshot:
         try:
             process = self._worker_launcher(launch)
-        except BaseException:
-            self._handle_launch_failure(
-                launch.session_id,
-                rollback_new_session=rollback_new_session,
-            )
+        except BaseException as error:
+            self._fail_unlaunched_session(launch, error)
             raise
         running = _RunningSession(
             process,
@@ -1114,10 +1111,11 @@ class PortableSessionSupervisor:
                 else None
             )
             if callable(enqueue_capacity):
-                enqueue_capacity(
+                revision = enqueue_capacity(
                     session_id,
                     owner_id=self._owner_id,
                 )
+                self._remember_catalog_revision(session_id, revision)
                 self._queued[session_id] = _QueuedInput(
                     value=value,
                     request_id=request.request_id,
@@ -1375,29 +1373,11 @@ class PortableSessionSupervisor:
                             queued.command_payload,
                             rollback_new_session=queued.rollback_new_session,
                         )
-                    except BaseException as error:
-                        current = self._snapshots.get(session_id)
-                        if current is not None:
-                            if (
-                                session_id in self._running
-                                and current.status
-                                is PortableSessionStatus.INTERRUPTED
-                            ):
-                                continue
-                            failed = replace(
-                                current,
-                                status=PortableSessionStatus.FAILED,
-                                result=1,
-                                diagnostics=(
-                                    *current.diagnostics,
-                                    f"Worker launch failed: {error}",
-                                )[-100:],
-                                updated_at=time.time(),
-                            )
-                            self._snapshots[session_id] = failed
-                            self._persist_snapshot(failed)
-                            self._publish(failed)
-                            self._condition.notify_all()
+                    except BaseException:
+                        # _launch_session owns every launch-failure transition.
+                        # In particular, an exception before a process exists
+                        # atomically persists FAILED while releasing capacity.
+                        continue
 
     def _retry_pending_worker_cleanup(self, *, force: bool = False) -> None:
         with self._condition:
@@ -2343,9 +2323,9 @@ class PortableSessionSupervisor:
     def _publish(self, snapshot: PortableSessionSnapshot) -> None:
         self._events.put(PortableSessionEvent(snapshot))
 
-    def _persist_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
+    def _persist_snapshot(self, snapshot: PortableSessionSnapshot) -> bool:
         if self._catalog is None:
-            return
+            return True
         summary = snapshot.activity[-1] if snapshot.activity else ""
         try:
             if (
@@ -2382,13 +2362,14 @@ class PortableSessionSupervisor:
                         status=snapshot.status,
                         activity_summary=summary,
                     )
-                return
+                return True
             revision = self._catalog.update_session_status(
                 snapshot.session_id,
                 snapshot.status,
                 activity_summary=summary,
             )
             self._remember_catalog_revision(snapshot.session_id, revision)
+            return True
         except (KeyError, RuntimeError) as error:
             current = self._snapshots[snapshot.session_id]
             self._snapshots[snapshot.session_id] = replace(
@@ -2398,6 +2379,7 @@ class PortableSessionSupervisor:
                     f"Portable Session Catalog update failed: {error}",
                 )[-100:],
             )
+            return False
 
     def _release_execution_capacity(
         self,
@@ -2489,6 +2471,38 @@ class PortableSessionSupervisor:
             self._remember_catalog_revision(session_id, revision)
         except KeyError:
             return
+
+    def _fail_unlaunched_session(
+        self,
+        launch: PortableSessionLaunch,
+        error: BaseException,
+    ) -> None:
+        previous = self._snapshots.get(
+            launch.session_id,
+            PortableSessionSnapshot(
+                session_id=launch.session_id,
+                checkout=launch.checkout,
+                status=PortableSessionStatus.READY,
+            ),
+        )
+        failed = replace(
+            previous,
+            checkout=launch.checkout,
+            status=PortableSessionStatus.FAILED,
+            result=1,
+            input_request=None,
+            diagnostics=(
+                *previous.diagnostics,
+                f"Worker launch failed: {error}",
+            )[-100:],
+            updated_at=time.time(),
+        )
+        self._snapshots[launch.session_id] = failed
+        self._launches[launch.session_id] = launch
+        if self._persist_snapshot(failed):
+            self._release_session_lease(launch.session_id)
+        self._publish(failed)
+        self._condition.notify_all()
 
     def _handle_post_launch_failure(
         self,
