@@ -4,11 +4,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
 from pathlib import Path
 
+from devloop import cli
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
     PortableSessionLaunch,
@@ -20,27 +22,31 @@ from devloop.portable_sessions import (
 
 
 class PortableSessionConcurrencyTests(unittest.TestCase):
-    def test_cooperative_pause_releases_capacity_and_retains_checkout(self) -> None:
+    def test_checkpoint_failure_reaps_dead_worker_and_releases_capacity(self) -> None:
         worker_source = (
             "import json,sys\n"
             "session_id=sys.argv[1]\n"
             "json.loads(sys.stdin.readline())\n"
-            "print(json.dumps({'version':1,'session_id':session_id,"
+            "if session_id == 'checkpoint-failure':\n"
+            " print(json.dumps({'version':1,'session_id':session_id,"
             "'sequence':1,'kind':'ACTIVITY','payload':{"
-            "'message':'Capacity is active'}}),flush=True)\n"
-            "command=json.loads(sys.stdin.readline())\n"
-            "assert command['kind']=='PAUSE',command\n"
-            "print(json.dumps({'version':1,'session_id':session_id,"
-            "'sequence':2,'kind':'CHECKPOINT','payload':{"
-            "'summary':'Capacity-safe checkpoint'}}),flush=True)\n"
+            "'message':'Checkpoint failure worker started'}}),flush=True)\n"
+            " command=json.loads(sys.stdin.readline())\n"
+            " assert command['kind']=='PAUSE',command\n"
+            " print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':2,'kind':'CHECKPOINT_FAILURE','payload':{"
+            "'message':'Durable checkpoint could not be captured'}}),flush=True)\n"
+            "else:\n"
+            " print(json.dumps({'version':1,'session_id':session_id,"
+            "'sequence':1,'kind':'COMPLETION','payload':{'exit_code':0}}),"
+            "flush=True)\n"
         )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            checkout = root / "checkout"
-            checkout.mkdir()
             catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
-            owner_id = "pause-capacity-shell"
+            catalog.set_concurrency_limit(1)
+            owner_id = "checkpoint-failure-shell"
 
             def launch_worker(
                 launch: PortableSessionLaunch,
@@ -48,6 +54,148 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 return subprocess.Popen(
                     [sys.executable, "-u", "-c", worker_source, launch.session_id],
                     cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    **(
+                        {}
+                        if os.name == "nt"
+                        else {"start_new_session": True}
+                    ),
+                )
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launches = []
+            for session_id in ("checkpoint-failure", "after-checkpoint-failure"):
+                checkout = root / session_id
+                checkout.mkdir()
+                launches.append(
+                    PortableSessionLaunch(
+                        session_id=session_id,
+                        checkout=checkout,
+                        operation=PortableWorkflowOperation.PLANNING,
+                        arguments=(),
+                    )
+                )
+            try:
+                supervisor.start_session(launches[0])
+                self._wait_for_status(
+                    supervisor,
+                    launches[0].session_id,
+                    PortableSessionStatus.RUNNING,
+                )
+                queued = supervisor.start_session(launches[1])
+                self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+
+                supervisor.pause_session(launches[0].session_id)
+                interrupted = self._wait_for_status(
+                    supervisor,
+                    launches[0].session_id,
+                    PortableSessionStatus.INTERRUPTED,
+                )
+                resumed = self._wait_for_status(
+                    supervisor,
+                    launches[1].session_id,
+                    PortableSessionStatus.READY,
+                )
+
+                self.assertIn(
+                    "Durable checkpoint could not be captured",
+                    interrupted.diagnostics,
+                )
+                self.assertEqual(resumed.result, 0)
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launches[0].session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertIsNone(
+                    catalog.get_worktree_lease(launches[0].checkout)
+                )
+            finally:
+                supervisor.shutdown()
+
+    def test_cooperative_pause_releases_capacity_and_retains_checkout(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+
+            from devloop import portable_worker
+            from devloop.portable_runtime import active_portable_runtime
+            from devloop.portable_session_catalog import (
+                bind_active_catalog_session_checkout,
+            )
+
+            prd_path = Path(sys.argv[2]).resolve()
+            issues_index = Path(sys.argv[3]).resolve()
+
+            def wait_for_pause(_operation, _arguments):
+                bind_active_catalog_session_checkout(
+                    Path.cwd(),
+                    prd_path=prd_path,
+                    issues_index_path=issues_index,
+                )
+                bridge = active_portable_runtime()
+                assert bridge is not None
+                bridge.read_line("Durable PRD checkpoint ready")
+                return 0
+
+            portable_worker._run_operation = wait_for_pause
+            raise SystemExit(portable_worker.main(["--session-id", sys.argv[1]]))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            prd_directory = checkout / "prd" / "capacity"
+            issues_directory = prd_directory / "issues"
+            issues_directory.mkdir(parents=True)
+            prd = prd_directory / "capacity.md"
+            issues = issues_directory / "README.md"
+            issue = issues_directory / "0001-capacity.md"
+            prd.write_text("# Capacity\n", encoding="utf-8")
+            issues.write_text("- [Capacity](./0001-capacity.md)\n", encoding="utf-8")
+            issue.write_text("# Capacity\n\nCompleted: [ ]\n", encoding="utf-8")
+            catalog = PortableSessionCatalog(root / "portable-sessions.sqlite3")
+            owner_id = "pause-capacity-shell"
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                environment = os.environ.copy()
+                environment["DEVLOOP_UI_MODE"] = "application"
+                environment["DEVLOOP_PORTABLE_SESSION_CATALOG"] = str(catalog.path)
+                environment["DEVLOOP_PORTABLE_SESSION_OWNER_ID"] = owner_id
+                environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
+                source_path = str(Path(cli.__file__).resolve().parents[1])
+                existing_python_path = environment.get("PYTHONPATH")
+                environment["PYTHONPATH"] = (
+                    source_path
+                    if not existing_python_path
+                    else os.pathsep.join((source_path, existing_python_path))
+                )
+                return subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        worker_source,
+                        launch.session_id,
+                        str(prd),
+                        str(issues),
+                    ],
+                    cwd=launch.checkout,
+                    env=environment,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -67,13 +215,11 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 arguments=(),
             )
             supervisor.start_session(launch)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                if supervisor.snapshot(launch.session_id).activity:
-                    break
-                time.sleep(0.01)
-            else:
-                self.fail("Active worker did not publish activity.")
+            self._wait_for_status(
+                supervisor,
+                launch.session_id,
+                PortableSessionStatus.WAITING_FOR_INPUT,
+            )
             self.assertTrue(
                 catalog.owns_execution_capacity(
                     launch.session_id,
@@ -105,6 +251,8 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
         self.assertIsNone(lease_after_pause)
         self.assertEqual(record.status, PortableSessionStatus.PAUSED)
         self.assertEqual(record.checkout, checkout.resolve())
+        self.assertEqual(record.prd_path, prd.resolve())
+        self.assertEqual(record.issues_index_path, issues.resolve())
 
     def test_worker_status_cannot_release_capacity_with_inactive_lifecycle_states(
         self,

@@ -27,7 +27,6 @@ from .subprocess_utils import (
     process_tree_creation_kwargs,
     register_process_tree,
     terminate_process,
-    unregister_process_tree,
 )
 
 
@@ -194,6 +193,7 @@ _PROGRESS_REFRESH_INTERVAL_SECONDS = 1.0
 _CAPACITY_REFRESH_INTERVAL_SECONDS = 0.05
 _COOPERATIVE_PAUSE_TIMEOUT_SECONDS = 2.0
 _TERMINATION_ACK_TIMEOUT_SECONDS = 8.0
+_CLEANUP_RETRY_SECONDS = 0.5
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -292,6 +292,15 @@ class _RunningSession:
     termination_detail: str = ""
     cleanup_confirmed: bool = False
     stop_requested: bool = False
+    pending_lifecycle: _LifecycleCommandIdentity | None = None
+    cleanup_retry_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class _LifecycleCommandIdentity:
+    action: SupervisorMessageKind
+    worker_generation: int
+    request_id: str
 
 
 @dataclass(frozen=True)
@@ -496,7 +505,13 @@ class PortableSessionSupervisor:
                 snapshot = self._snapshots.get(session_id)
                 if (
                     snapshot is None
-                    or snapshot.status is not PortableSessionStatus.PAUSED
+                    or snapshot.status
+                    in {
+                        PortableSessionStatus.QUEUED,
+                        PortableSessionStatus.RUNNING,
+                        PortableSessionStatus.WAITING_FOR_INPUT,
+                        PortableSessionStatus.PAUSING,
+                    }
                     or not self._condition.wait_for(
                         lambda: session_id not in self._running,
                         timeout=_COOPERATIVE_PAUSE_TIMEOUT_SECONDS,
@@ -841,10 +856,21 @@ class PortableSessionSupervisor:
                 )
             if running is not None and running.process.poll() is None:
                 running.stop_requested = True
+                command_identity = _LifecycleCommandIdentity(
+                    action=command_kind,
+                    worker_generation=running.generation,
+                    request_id=str(uuid.uuid4()),
+                )
+                running.pending_lifecycle = command_identity
                 frame = supervisor_frame(
                     session_id,
                     running.next_supervisor_sequence,
                     command_kind,
+                    {
+                        "action": command_identity.action.value,
+                        "worker_generation": command_identity.worker_generation,
+                        "request_id": command_identity.request_id,
+                    },
                 )
                 running.next_supervisor_sequence += 1
                 try:
@@ -855,7 +881,10 @@ class PortableSessionSupervisor:
                 except (BrokenPipeError, OSError):
                     pass
                 self._condition.wait_for(
-                    lambda: running.termination_ack is not None,
+                    lambda: (
+                        running.termination_ack is not None
+                        or running.process.poll() is not None
+                    ),
                     timeout=_TERMINATION_ACK_TIMEOUT_SECONDS,
                 )
                 if running.termination_ack is True:
@@ -867,26 +896,22 @@ class PortableSessionSupervisor:
                         termination = terminate_process(
                             running.process  # type: ignore[arg-type]
                         )
-                        cleanup_confirmed = termination.tree_terminated
                     else:
-                        unregister_process_tree(
+                        termination = terminate_process(
                             running.process  # type: ignore[arg-type]
                         )
-                        termination = ProcessTerminationResult(
-                            tree_terminated=True,
-                            detail=running.termination_detail,
-                        )
-                        cleanup_confirmed = True
+                    cleanup_confirmed = termination.tree_terminated
                 else:
                     termination = terminate_process(
                         running.process  # type: ignore[arg-type]
                     )
-                    cleanup_confirmed = (
-                        termination.tree_terminated
-                        and running.termination_ack is True
-                    )
+                    cleanup_confirmed = termination.tree_terminated
                 running.cleanup_confirmed = cleanup_confirmed
                 if not cleanup_confirmed:
+                    running.cleanup_retry_at = (
+                        time.monotonic() + _CLEANUP_RETRY_SECONDS
+                    )
+                    snapshot = self.snapshot(session_id)
                     interrupted = replace(
                         snapshot,
                         status=PortableSessionStatus.INTERRUPTED,
@@ -905,26 +930,35 @@ class PortableSessionSupervisor:
                     self._condition.notify_all()
                     return interrupted
             elif running is not None and not running.cleanup_confirmed:
-                interrupted = replace(
-                    snapshot,
-                    status=PortableSessionStatus.INTERRUPTED,
-                    result=130,
-                    input_request=None,
-                    activity=(*snapshot.activity, activity)[-100:],
-                    diagnostics=(
-                        *snapshot.diagnostics,
-                        "Worker exited without confirmed descendant-tree cleanup; "
-                        "ownership remains retained.",
-                    )[-100:],
-                    updated_at=time.time(),
+                termination = terminate_process(
+                    running.process  # type: ignore[arg-type]
                 )
-                self._snapshots[session_id] = interrupted
-                self._persist_snapshot(interrupted)
-                self._publish(interrupted)
-                self._condition.notify_all()
-                return interrupted
+                running.cleanup_confirmed = termination.tree_terminated
+                if not running.cleanup_confirmed:
+                    running.cleanup_retry_at = (
+                        time.monotonic() + _CLEANUP_RETRY_SECONDS
+                    )
+                    interrupted = replace(
+                        snapshot,
+                        status=PortableSessionStatus.INTERRUPTED,
+                        result=130,
+                        input_request=None,
+                        activity=(*snapshot.activity, activity)[-100:],
+                        diagnostics=(
+                            *snapshot.diagnostics,
+                            "Worker exited without confirmed descendant-tree cleanup; "
+                            "ownership remains retained.",
+                        )[-100:],
+                        updated_at=time.time(),
+                    )
+                    self._snapshots[session_id] = interrupted
+                    self._persist_snapshot(interrupted)
+                    self._publish(interrupted)
+                    self._condition.notify_all()
+                    return interrupted
             if running is not None:
                 self._running.pop(session_id, None)
+            snapshot = self.snapshot(session_id)
             updated = replace(
                 snapshot,
                 status=status,
@@ -1141,6 +1175,7 @@ class PortableSessionSupervisor:
     def _run_capacity_scheduler(self) -> None:
         while not self._scheduler_stop.wait(_CAPACITY_REFRESH_INTERVAL_SECONDS):
             self._synchronize_catalog_sessions()
+            self._retry_pending_worker_cleanup()
             with self._condition:
                 queued_ids = tuple(self._queued)
             for session_id in queued_ids:
@@ -1228,6 +1263,38 @@ class PortableSessionSupervisor:
                             self._persist_snapshot(failed)
                             self._publish(failed)
                             self._condition.notify_all()
+
+    def _retry_pending_worker_cleanup(self) -> None:
+        with self._condition:
+            now = time.monotonic()
+            pending = tuple(
+                (session_id, running)
+                for session_id, running in self._running.items()
+                if not running.cleanup_confirmed
+                and running.cleanup_retry_at
+                and running.cleanup_retry_at <= now
+                and (
+                    self._snapshots[session_id].status.terminal
+                    or self._snapshots[session_id].status
+                    is PortableSessionStatus.INTERRUPTED
+                )
+            )
+            for session_id, running in pending:
+                cleanup = terminate_process(
+                    running.process  # type: ignore[arg-type]
+                )
+                if self._running.get(session_id) is not running:
+                    continue
+                if not cleanup.tree_terminated:
+                    running.cleanup_retry_at = now + _CLEANUP_RETRY_SECONDS
+                    continue
+                running.cleanup_confirmed = True
+                self._close_worker_streams(running)
+                self._running.pop(session_id, None)
+                snapshot = self._snapshots[session_id]
+                self._release_execution_capacity(snapshot)
+                self._release_session_lease(session_id)
+                self._condition.notify_all()
 
     def _synchronize_catalog_sessions(self) -> None:
         if self._catalog is None:
@@ -1344,6 +1411,9 @@ class PortableSessionSupervisor:
                         self._publish(paused)
                         current_running = None
                     else:
+                        running.cleanup_retry_at = (
+                            time.monotonic() + _CLEANUP_RETRY_SECONDS
+                        )
                         interrupted = replace(
                             snapshot,
                             status=PortableSessionStatus.INTERRUPTED,
@@ -1357,9 +1427,45 @@ class PortableSessionSupervisor:
                         self._snapshots[session_id] = interrupted
                         self._persist_snapshot(interrupted)
                         self._publish(interrupted)
-                if current_running is None and running.cleanup_confirmed:
+                elif (
+                    current_running is running
+                    and (
+                        snapshot.status.terminal
+                        or snapshot.status is PortableSessionStatus.INTERRUPTED
+                        or running.stop_requested
+                    )
+                ):
+                    if cleanup.tree_terminated:
+                        self._running.pop(session_id, None)
+                        current_running = None
+                    else:
+                        running.cleanup_retry_at = (
+                            time.monotonic() + _CLEANUP_RETRY_SECONDS
+                        )
+                        retained = replace(
+                            snapshot,
+                            diagnostics=(
+                                *snapshot.diagnostics,
+                                cleanup.detail,
+                            )[-100:],
+                            updated_at=time.time(),
+                        )
+                        self._snapshots[session_id] = retained
+                        self._persist_snapshot(retained)
+                        self._publish(retained)
+                releasable = self._snapshots[session_id]
+                if (
+                    current_running is None
+                    and running.cleanup_confirmed
+                    and releasable.status
+                    not in {
+                        PortableSessionStatus.RUNNING,
+                        PortableSessionStatus.PAUSING,
+                        PortableSessionStatus.QUEUED,
+                    }
+                ):
                     self._release_execution_capacity(
-                        self._snapshots[session_id]
+                        releasable
                     )
                     self._release_session_lease(session_id)
                 self._condition.notify_all()
@@ -1592,15 +1698,19 @@ class PortableSessionSupervisor:
                     )[-100:],
                 )
             elif kind is WorkerMessageKind.TERMINATION:
-                request = _payload_text(frame, "request")
-                expected_request = {
-                    SupervisorMessageKind.FORCE_STOP.value,
-                    SupervisorMessageKind.CANCEL.value,
-                    SupervisorMessageKind.SHUTDOWN.value,
-                }
-                if request not in expected_request:
+                action = _payload_text(frame, "action")
+                worker_generation = frame.payload.get("worker_generation")
+                request_id = _payload_text(frame, "request_id")
+                pending = running.pending_lifecycle
+                if (
+                    pending is None
+                    or action != pending.action.value
+                    or worker_generation != pending.worker_generation
+                    or request_id != pending.request_id
+                    or worker_generation != running.generation
+                ):
                     raise PortableProtocolError(
-                        "Worker TERMINATION identifies an invalid lifecycle request."
+                        "Worker TERMINATION does not match the pending lifecycle command."
                     )
                 descendants_confirmed = frame.payload.get("descendants_confirmed")
                 if not isinstance(descendants_confirmed, bool):
@@ -1667,7 +1777,7 @@ class PortableSessionSupervisor:
                 WorkerMessageKind.COMPLETION,
                 WorkerMessageKind.FAILURE,
             }:
-                self._retire_running_session(session_id, running)
+                running.stop_requested = True
             self._publish(updated)
             self._condition.notify_all()
             return True
@@ -1898,44 +2008,43 @@ class PortableSessionSupervisor:
             )
             self._snapshots[session_id] = updated
             self._persist_snapshot(updated)
-            self._retire_running_session(session_id, running)
+            cleanup = terminate_process(
+                running.process  # type: ignore[arg-type]
+            )
+            running.cleanup_confirmed = cleanup.tree_terminated
+            if cleanup.tree_terminated:
+                self._close_worker_streams(running)
+                self._running.pop(session_id, None)
+            else:
+                running.cleanup_retry_at = (
+                    time.monotonic() + _CLEANUP_RETRY_SECONDS
+                )
             self._publish(updated)
             self._condition.notify_all()
-            if running.process.poll() is None:
-                running.process.terminate()
-
-    def _retire_running_session(
-        self,
-        session_id: str,
-        running: _RunningSession,
-    ) -> None:
-        if self._running.get(session_id) is running:
-            self._running.pop(session_id)
 
     @staticmethod
     def _reap_worker(running: _RunningSession) -> ProcessTerminationResult:
-        cleanup: ProcessTerminationResult
         try:
             running.process.wait(timeout=1)
-            unregister_process_tree(running.process)  # type: ignore[arg-type]
-            cleanup = ProcessTerminationResult(
-                tree_terminated=True,
-                detail="Portable worker exited after durable acknowledgement.",
-            )
         except subprocess.TimeoutExpired:
-            cleanup = terminate_process(running.process)  # type: ignore[arg-type]
-        finally:
-            for stream in (
-                running.process.stdin,
-                running.process.stdout,
-                running.process.stderr,
-            ):
-                if stream is not None:
-                    try:
-                        stream.close()
-                    except OSError:
-                        pass
+            pass
+        cleanup = terminate_process(running.process)  # type: ignore[arg-type]
+        if cleanup.tree_terminated:
+            PortableSessionSupervisor._close_worker_streams(running)
         return cleanup
+
+    @staticmethod
+    def _close_worker_streams(running: _RunningSession) -> None:
+        for stream in (
+            running.process.stdin,
+            running.process.stdout,
+            running.process.stderr,
+        ):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
     def _publish(self, snapshot: PortableSessionSnapshot) -> None:
         self._events.put(PortableSessionEvent(snapshot))

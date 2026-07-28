@@ -433,6 +433,144 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             interrupted.diagnostics[-1],
         )
 
+    def test_invalid_checkpoint_retains_ownership_until_descendants_are_dead(
+        self,
+    ) -> None:
+        child_source = (
+            "import os,time;"
+            "from pathlib import Path;"
+            "Path('checkpoint-child.pid').write_text("
+            "str(os.getpid()),encoding='utf-8');"
+            "time.sleep(60)"
+        )
+        worker_source = textwrap.dedent(
+            f"""
+            import json
+            import subprocess
+            import sys
+            import time
+            from pathlib import Path
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            subprocess.Popen([sys.executable, "-u", "-c", {child_source!r}])
+            while not Path("checkpoint-child.pid").is_file():
+                time.sleep(0.01)
+            print(json.dumps({{
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "ACTIVITY",
+                "payload": {{"message": "Child tree is live"}},
+            }}), flush=True)
+            command = json.loads(sys.stdin.readline())
+            assert command["kind"] == "PAUSE", command
+            print(json.dumps({{
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 2,
+                "kind": "CHECKPOINT",
+                "payload": {{"summary": "Unvalidated checkpoint"}},
+            }}), flush=True)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "invalid-checkpoint-shell"
+            processes: list[subprocess.Popen[str]] = []
+
+            def launch_worker(
+                launch: PortableSessionLaunch,
+            ) -> subprocess.Popen[str]:
+                process = subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    **process_tree_creation_kwargs(),
+                )
+                register_process_tree(process)
+                processes.append(process)
+                return process
+
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="invalid-checkpoint-tree",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            child_pid = self._wait_for_pid(checkout / "checkpoint-child.pid")
+            deadline = time.monotonic() + 5
+            while (
+                time.monotonic() < deadline
+                and not supervisor.snapshot(launch.session_id).activity
+            ):
+                time.sleep(0.01)
+
+            with mock.patch(
+                "devloop.portable_sessions.terminate_process",
+                return_value=ProcessTerminationResult(
+                    tree_terminated=False,
+                    detail="Injected unconfirmed descendant cleanup.",
+                ),
+            ):
+                supervisor.pause_session(launch.session_id)
+                interrupted = self._wait_for_status(
+                    supervisor,
+                    launch.session_id,
+                    PortableSessionStatus.INTERRUPTED,
+                )
+                time.sleep(0.1)
+                self.assertTrue(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertIsNotNone(catalog.get_worktree_lease(checkout))
+
+            deadline = time.monotonic() + 5
+            while (
+                time.monotonic() < deadline
+                and catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            ):
+                time.sleep(0.01)
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                ),
+                "Confirmed dead worker tree was not reaped automatically.",
+            )
+            supervisor.shutdown()
+
+            self.assertEqual(interrupted.status, PortableSessionStatus.INTERRUPTED)
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            self.assertIsNone(catalog.get_worktree_lease(checkout))
+            self.assertTrue(self._wait_for_process_dead(child_pid))
+            self.assertIsNotNone(processes[0].poll())
+
     def test_force_stop_preserves_partial_work_and_diagnostics(self) -> None:
         worker_source = textwrap.dedent(
             """
@@ -506,6 +644,250 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         self.assertEqual(partial_work, "kept\n")
         self.assertIn("Last durable issue checkpoint", stopped.activity)
         self.assertIn("partial command diagnostic", stopped.diagnostics)
+
+    def test_termination_ack_round_trips_exact_pending_command_identity(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "ACTIVITY",
+                "payload": {"message": "Ready for exact lifecycle command"},
+            }), flush=True)
+            command = json.loads(sys.stdin.readline())
+            payload = command["payload"]
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 2,
+                "kind": "TERMINATION",
+                "payload": {
+                    "action": payload["action"],
+                    "worker_generation": payload["worker_generation"],
+                    "request_id": payload["request_id"],
+                    "descendants_confirmed": True,
+                    "detail": "Exact owned tree stopped.",
+                },
+            }), flush=True)
+            """
+        )
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            owner_id = "exact-termination-shell"
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            launch = PortableSessionLaunch(
+                session_id="exact-termination",
+                checkout=checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            deadline = time.monotonic() + 5
+            while (
+                time.monotonic() < deadline
+                and not supervisor.snapshot(launch.session_id).activity
+            ):
+                time.sleep(0.01)
+            with mock.patch(
+                "devloop.portable_sessions._TERMINATION_ACK_TIMEOUT_SECONDS",
+                0.2,
+            ):
+                stopped = supervisor.force_stop_session(launch.session_id)
+            supervisor.shutdown()
+
+            self.assertEqual(stopped.status, PortableSessionStatus.INTERRUPTED)
+            self.assertFalse(
+                catalog.owns_execution_capacity(
+                    launch.session_id,
+                    owner_id=owner_id,
+                )
+            )
+            self.assertIsNone(catalog.get_worktree_lease(checkout))
+
+    def test_termination_ack_rejects_wrong_action_generation_and_request(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id, mode = sys.argv[1:]
+            json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "ACTIVITY",
+                "payload": {"message": "Ready for lifecycle rejection test"},
+            }), flush=True)
+            command = json.loads(sys.stdin.readline())
+            payload = dict(command["payload"])
+            if mode == "action":
+                payload["action"] = "CANCEL"
+            elif mode == "generation":
+                payload["worker_generation"] += 1
+            else:
+                payload["request_id"] = "stale-request-id"
+            payload.update({
+                "descendants_confirmed": True,
+                "detail": "This acknowledgement must be rejected.",
+            })
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 2,
+                "kind": "TERMINATION",
+                "payload": payload,
+            }), flush=True)
+            """
+        )
+
+        for mode in ("action", "generation", "request"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                checkout = root / "checkout"
+                checkout.mkdir()
+                catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+                owner_id = f"reject-{mode}-shell"
+
+                def launch_worker(
+                    launch: PortableSessionLaunch,
+                ) -> subprocess.Popen[str]:
+                    return subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-u",
+                            "-c",
+                            worker_source,
+                            launch.session_id,
+                            mode,
+                        ],
+                        cwd=launch.checkout,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+
+                supervisor = PortableSessionSupervisor(
+                    worker_launcher=launch_worker,
+                    catalog=catalog,
+                    owner_id=owner_id,
+                )
+                launch = PortableSessionLaunch(
+                    session_id=f"reject-termination-{mode}",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+                supervisor.start_session(launch)
+                deadline = time.monotonic() + 5
+                while (
+                    time.monotonic() < deadline
+                    and not supervisor.snapshot(launch.session_id).activity
+                ):
+                    time.sleep(0.01)
+
+                stopped = supervisor.force_stop_session(launch.session_id)
+                supervisor.shutdown()
+
+                self.assertEqual(
+                    stopped.status,
+                    PortableSessionStatus.INTERRUPTED,
+                )
+                self.assertTrue(
+                    any(
+                        "does not match the pending lifecycle command" in diagnostic
+                        for diagnostic in stopped.diagnostics
+                    ),
+                    stopped.diagnostics,
+                )
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                self.assertIsNone(catalog.get_worktree_lease(checkout))
+
+    def test_unsolicited_termination_ack_is_a_protocol_failure(self) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "TERMINATION",
+                "payload": {
+                    "action": "FORCE_STOP",
+                    "worker_generation": 1,
+                    "request_id": "unsolicited",
+                    "descendants_confirmed": True,
+                    "detail": "No lifecycle command was pending.",
+                },
+            }), flush=True)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda launch: subprocess.Popen(
+                    [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                    cwd=launch.checkout,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            launch = PortableSessionLaunch(
+                session_id="unsolicited-termination",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            failed = supervisor.wait_for_terminal(launch.session_id, timeout=5)
+            supervisor.shutdown()
+
+        self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+        self.assertIn(
+            "does not match the pending lifecycle command",
+            failed.diagnostics[-1],
+        )
 
     def test_explicit_cancel_records_cancelled_and_stops_worker(self) -> None:
         worker_source = textwrap.dedent(
@@ -666,6 +1048,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
 
             cleanup = terminate_process(processes[0])
             self.assertTrue(cleanup.tree_terminated, cleanup.detail)
+            supervisor.shutdown()
 
         self.assertIsNotNone(processes[0].poll())
 

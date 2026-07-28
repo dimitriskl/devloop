@@ -75,7 +75,7 @@ class PortableWorkerRuntimeBridge:
     def start_control_reader(
         self,
         *,
-        on_lifecycle: Callable[[SupervisorMessageKind], None] | None = None,
+        on_lifecycle: Callable[[PortableProtocolFrame], None] | None = None,
     ) -> None:
         if self._control_reader_started:
             return
@@ -188,15 +188,18 @@ class PortableWorkerRuntimeBridge:
 
     def send_termination(
         self,
-        request: SupervisorMessageKind,
+        command: PortableProtocolFrame,
         *,
         descendants_confirmed: bool,
         detail: str,
     ) -> None:
+        action = SupervisorMessageKind(command.kind)
         self._send(
             WorkerMessageKind.TERMINATION,
             {
-                "request": request.value,
+                "action": action.value,
+                "worker_generation": command.payload.get("worker_generation"),
+                "request_id": command.payload.get("request_id"),
                 "descendants_confirmed": descendants_confirmed,
                 "detail": detail,
             },
@@ -279,7 +282,7 @@ class PortableWorkerRuntimeBridge:
 
     def _read_commands(
         self,
-        on_lifecycle: Callable[[SupervisorMessageKind], None] | None,
+        on_lifecycle: Callable[[PortableProtocolFrame], None] | None,
     ) -> None:
         while True:
             line = self._command_stream.readline()
@@ -310,7 +313,7 @@ class PortableWorkerRuntimeBridge:
             }:
                 self._lifecycle_request = kind
                 if on_lifecycle is not None:
-                    on_lifecycle(kind)
+                    on_lifecycle(frame)
                 self._command_queue.put(frame)
                 return
             self._command_queue.put(frame)
@@ -341,7 +344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         termination_handled = Event()
 
-        def handle_lifecycle(request: SupervisorMessageKind) -> None:
+        def handle_lifecycle(command: PortableProtocolFrame) -> None:
+            request = SupervisorMessageKind(command.kind)
             if request is SupervisorMessageKind.PAUSE:
                 return
             try:
@@ -355,13 +359,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else "; ".join(result.detail for result in results)
                 )
                 bridge.send_termination(
-                    request,
+                    command,
                     descendants_confirmed=descendants_confirmed,
                     detail=detail,
                 )
             except BaseException as error:
                 bridge.send_termination(
-                    request,
+                    command,
                     descendants_confirmed=False,
                     detail=(
                         "Backend tree termination failed: "
