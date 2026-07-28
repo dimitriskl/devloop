@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import atexit
 import os
 import signal
 import subprocess
 import threading
 import time
+import types
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Sequence
 
@@ -25,6 +28,12 @@ WINDOWS_SYNCHRONIZE = 0x00100000
 WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 WINDOWS_WAIT_OBJECT_0 = 0x00000000
 WINDOWS_WAIT_TIMEOUT = 0x00000102
+WINDOWS_WAIT_FAILED = 0xFFFFFFFF
+WINDOWS_ERROR_INVALID_PARAMETER = 87
+WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+PROCESS_TREE_REAPER_INTERVAL_SECONDS = 0.5
+PROCESS_TREE_REAPER_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True, order=True)
@@ -35,18 +44,67 @@ class ProcessIdentity:
     creation_time: int
 
 
+@dataclass(frozen=True)
+class PosixProcessGroupIdentity:
+    """A process-group incarnation anchored to its original leader."""
+
+    group_id: int
+    leader: ProcessIdentity
+    leader_retained: bool
+
+
+class ProcessTreeState(str, Enum):
+    """What an ownership probe can prove about one process tree."""
+
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+    UNKNOWN = "UNKNOWN"
+
+
 _ACTIVE_PROCESS_TREES: set[subprocess.Popen[str]] = set()
 _ACTIVE_PROCESS_TREE_IDENTITIES: dict[
     subprocess.Popen[str],
     set[ProcessIdentity],
 ] = {}
+_ACTIVE_POSIX_PROCESS_GROUPS: dict[
+    subprocess.Popen[str],
+    PosixProcessGroupIdentity,
+] = {}
+_ACTIVE_WINDOWS_JOB_HANDLES: dict[subprocess.Popen[str], object] = {}
 _ACTIVE_PROCESS_TREES_LOCK = threading.RLock()
+_PROCESS_TREE_REAPER_WAKEUP = threading.Event()
+_PROCESS_TREE_REAPER_THREAD: threading.Thread | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ProcessTerminationResult:
-    tree_terminated: bool
+    state: ProcessTreeState
     detail: str
+
+    def __init__(
+        self,
+        *,
+        state: ProcessTreeState | None = None,
+        detail: str,
+        tree_terminated: bool | None = None,
+    ) -> None:
+        if state is None:
+            if tree_terminated is None:
+                raise TypeError("Process termination requires a state.")
+            state = (
+                ProcessTreeState.STOPPED
+                if tree_terminated
+                else ProcessTreeState.UNKNOWN
+            )
+        elif tree_terminated is not None:
+            raise TypeError("Specify state or tree_terminated, not both.")
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "detail", detail)
+
+    @property
+    def tree_terminated(self) -> bool:
+        """Compatibility projection; only confirmed STOPPED means terminated."""
+        return self.state is ProcessTreeState.STOPPED
 
 
 class AttemptExecutionBudget:
@@ -206,30 +264,129 @@ def process_tree_creation_kwargs() -> dict[str, int | bool]:
     return {"start_new_session": True}
 
 
+def _retain_posix_group_leader(process: subprocess.Popen[str]) -> bool:
+    """Make wait/poll observe exit without reaping the process-group leader.
+
+    Keeping the exited leader as a zombie reserves its PID/PGID until the last
+    descendant has stopped, giving the group a stable kernel-backed identity.
+    """
+    required = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+    if any(not hasattr(os, name) for name in required):
+        return False
+    if not hasattr(process, "args"):
+        return False
+    wait_lock = threading.Lock()
+
+    def retained_poll(self: subprocess.Popen[str]) -> int | None:
+        with wait_lock:
+            if self.returncode is not None:
+                return self.returncode
+            self.returncode = _peek_posix_process_returncode(self.pid)
+            return self.returncode
+
+    def retained_wait(
+        self: subprocess.Popen[str],
+        timeout: float | None = None,
+    ) -> int:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            returncode = retained_poll(self)
+            if returncode is not None:
+                return returncode
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            time.sleep(0.01)
+
+    process.poll = types.MethodType(retained_poll, process)  # type: ignore[method-assign]
+    process.wait = types.MethodType(retained_wait, process)  # type: ignore[method-assign]
+    return True
+
+
+def _peek_posix_process_returncode(process_id: int) -> int | None:
+    try:
+        result = os.waitid(  # type: ignore[attr-defined]
+            os.P_PID,  # type: ignore[attr-defined]
+            process_id,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,  # type: ignore[attr-defined]
+        )
+    except (ChildProcessError, OSError):
+        return None
+    if result is None:
+        return None
+    status = int(result.si_status)
+    if result.si_code == getattr(os, "CLD_EXITED", 1):
+        return status
+    return -status
+
+
+def _reap_posix_group_leader(process: subprocess.Popen[str]) -> None:
+    if (
+        getattr(process, "returncode", None) is None
+        or not hasattr(os, "waitpid")
+        or not hasattr(os, "WNOHANG")
+    ):
+        return
+    try:
+        os.waitpid(process.pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+
 def register_process_tree(process: subprocess.Popen[str]) -> None:
+    process_identity: ProcessIdentity | None = None
     with _ACTIVE_PROCESS_TREES_LOCK:
+        if process in _ACTIVE_PROCESS_TREES:
+            return
         _ACTIVE_PROCESS_TREES.add(process)
         process_id = getattr(process, "pid", None)
         if isinstance(process_id, int):
-            identity = _process_identity(process_id)
-            if identity is not None:
-                _ACTIVE_PROCESS_TREE_IDENTITIES[process] = {identity}
+            process_identity = _process_identity(process_id)
+            if process_identity is not None:
+                _ACTIVE_PROCESS_TREE_IDENTITIES[process] = {process_identity}
     if os.name == "nt":
+        job_handle = _create_windows_kill_on_close_job(process)
+        if job_handle is not None:
+            with _ACTIVE_PROCESS_TREES_LOCK:
+                if process in _ACTIVE_PROCESS_TREES:
+                    _ACTIVE_WINDOWS_JOB_HANDLES[process] = job_handle
+                else:
+                    _close_windows_handle(job_handle)
         _refresh_windows_process_tree(process)
     else:
         try:
             process_group_id = os.getpgid(process.pid)
         except (AttributeError, OSError):
             return
-        if process_group_id == process.pid:
+        if (
+            process_group_id == process.pid
+            and process_identity is not None
+        ):
+            leader_retained = _retain_posix_group_leader(process)
             setattr(process, PROCESS_TREE_ATTRIBUTE, process_group_id)
+            with _ACTIVE_PROCESS_TREES_LOCK:
+                _ACTIVE_POSIX_PROCESS_GROUPS[process] = (
+                    PosixProcessGroupIdentity(
+                        group_id=process_group_id,
+                        leader=process_identity,
+                        leader_retained=leader_retained,
+                    )
+                )
             _refresh_posix_process_tree(process)
 
 
 def unregister_process_tree(process: subprocess.Popen[str]) -> None:
+    group: PosixProcessGroupIdentity | None
+    job_handle: object | None
     with _ACTIVE_PROCESS_TREES_LOCK:
         _ACTIVE_PROCESS_TREES.discard(process)
         _ACTIVE_PROCESS_TREE_IDENTITIES.pop(process, None)
+        group = _ACTIVE_POSIX_PROCESS_GROUPS.pop(process, None)
+        job_handle = _ACTIVE_WINDOWS_JOB_HANDLES.pop(process, None)
+    if group is not None and group.leader_retained:
+        _reap_posix_group_leader(process)
+    if job_handle is not None:
+        _close_windows_handle(job_handle)
+    _PROCESS_TREE_REAPER_WAKEUP.set()
 
 
 def release_process_tree_if_stopped(process: subprocess.Popen[str]) -> bool:
@@ -252,10 +409,12 @@ def terminate_active_process_trees() -> tuple[ProcessTerminationResult, ...]:
             unregister_process_tree(process)
             results.append(
                 ProcessTerminationResult(
-                    tree_terminated=True,
+                    state=ProcessTreeState.STOPPED,
                     detail="Owned process tree had already exited.",
                 )
             )
+    if any(result.state is not ProcessTreeState.STOPPED for result in results):
+        _ensure_process_tree_reaper()
     return tuple(results)
 
 
@@ -273,31 +432,70 @@ def owned_process_trees_are_stopped() -> bool:
 def terminate_process(
     process: subprocess.Popen[str],
 ) -> ProcessTerminationResult:
+    register_process_tree(process)
     _signal_process_tree(process, force=False)
     try:
         process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
         pass
-    if _process_tree_is_alive(process):
+    state = _process_tree_state(process)
+    if state is not ProcessTreeState.STOPPED:
         _signal_process_tree(process, force=True)
         try:
             process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             pass
-    tree_terminated = not _process_tree_is_alive(process)
-    if tree_terminated:
+        state = _process_tree_state(process)
+    if state is ProcessTreeState.STOPPED:
         unregister_process_tree(process)
         return ProcessTerminationResult(
-            tree_terminated=True,
+            state=ProcessTreeState.STOPPED,
             detail="Owned process tree termination was confirmed.",
         )
+    _ensure_process_tree_reaper()
     return ProcessTerminationResult(
-        tree_terminated=False,
+        state=state,
         detail=(
-            "Owned process tree termination could not be confirmed; "
+            "Owned process tree termination is "
+            f"{state.value}; "
             "ownership remains registered."
         ),
     )
+
+
+def _ensure_process_tree_reaper() -> None:
+    """Keep retrying unconfirmed cleanup after the initiating runtime exits."""
+    global _PROCESS_TREE_REAPER_THREAD
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        if (
+            _PROCESS_TREE_REAPER_THREAD is not None
+            and _PROCESS_TREE_REAPER_THREAD.is_alive()
+        ):
+            if threading.current_thread() is not _PROCESS_TREE_REAPER_THREAD:
+                _PROCESS_TREE_REAPER_WAKEUP.set()
+            return
+        _PROCESS_TREE_REAPER_WAKEUP.clear()
+        _PROCESS_TREE_REAPER_THREAD = threading.Thread(
+            target=_reap_active_process_trees,
+            name="devloop-process-tree-reaper",
+            daemon=False,
+        )
+        _PROCESS_TREE_REAPER_THREAD.start()
+
+
+def _reap_active_process_trees() -> None:
+    for _attempt in range(PROCESS_TREE_REAPER_MAX_ATTEMPTS):
+        with _ACTIVE_PROCESS_TREES_LOCK:
+            processes = tuple(_ACTIVE_PROCESS_TREES)
+        if not processes:
+            return
+        for process in processes:
+            terminate_process(process)
+        with _ACTIVE_PROCESS_TREES_LOCK:
+            if not _ACTIVE_PROCESS_TREES:
+                return
+        _PROCESS_TREE_REAPER_WAKEUP.wait(PROCESS_TREE_REAPER_INTERVAL_SECONDS)
+        _PROCESS_TREE_REAPER_WAKEUP.clear()
 
 
 def _signal_process_tree(
@@ -305,6 +503,7 @@ def _signal_process_tree(
     *,
     force: bool,
 ) -> bool:
+    tree_signalled = False
     if os.name == "nt":
         pid = getattr(process, "pid", None)
         if isinstance(pid, int):
@@ -312,43 +511,39 @@ def _signal_process_tree(
             current_identities = {
                 identity
                 for identity in retained_identities
-                if _windows_process_identity(identity.pid) == identity
-                and _windows_identity_is_alive(identity)
+                if _windows_identity_state(identity) is ProcessTreeState.RUNNING
             }
             if not current_identities:
-                return False
-            if _terminate_windows_process_tree(
+                return _signal_owned_process(process, force=force)
+            tree_signalled = _terminate_windows_process_tree(
                 pid,
                 retained_identities=current_identities,
-            ):
-                return True
-        return False
-
-    process_group_id = getattr(process, PROCESS_TREE_ATTRIBUTE, None)
-    if not isinstance(process_group_id, int):
-        try:
-            process_group_id = os.getpgid(process.pid)
-        except (AttributeError, OSError):
-            process_group_id = None
-    if isinstance(process_group_id, int) and process_group_id == process.pid:
-        identities = _refresh_posix_process_tree(process)
-        if identities and not any(
-            _posix_process_identity(identity.pid) == identity
-            for identity in identities
-        ):
-            return False
-        try:
-            os.killpg(
-                process_group_id,
-                signal.SIGKILL if force else signal.SIGTERM,
             )
-            return True
-        except ProcessLookupError:
-            return True
-        except OSError:
-            pass
-    _signal_process(process, force=force)
-    return False
+        root_signalled = _signal_owned_process(process, force=force)
+        return tree_signalled or root_signalled
+
+    group = _ACTIVE_POSIX_PROCESS_GROUPS.get(process)
+    if group is not None:
+        group_state = _posix_process_group_state(process)
+        if (
+            group_state is ProcessTreeState.RUNNING
+            or (
+                group_state is ProcessTreeState.UNKNOWN
+                and group.leader_retained
+            )
+        ):
+            try:
+                os.killpg(
+                    group.group_id,
+                    signal.SIGKILL if force else signal.SIGTERM,
+                )
+                tree_signalled = True
+            except ProcessLookupError:
+                tree_signalled = True
+            except OSError:
+                pass
+    root_signalled = _signal_owned_process(process, force=force)
+    return tree_signalled or root_signalled
 
 
 def _terminate_windows_process_tree(
@@ -408,8 +603,16 @@ def _terminate_windows_process_tree(
     )
     handles: list[object] = []
     for identity in ordered_identities:
+        identity_state = _windows_identity_state(identity)
+        if identity_state is ProcessTreeState.STOPPED:
+            continue
+        if identity_state is ProcessTreeState.UNKNOWN:
+            confirmed = False
+            continue
         handle = _open_windows_process_handle(identity)
         if handle is None:
+            if _windows_identity_state(identity) is not ProcessTreeState.STOPPED:
+                confirmed = False
             continue
         handles.append(handle)
     try:
@@ -430,6 +633,107 @@ def _terminate_windows_process_tree(
     return confirmed
 
 
+def _create_windows_kill_on_close_job(
+    process: subprocess.Popen[str],
+) -> object | None:
+    """Guard a registered Windows tree against parent-interpreter exit."""
+    process_handle = getattr(process, "_handle", None)
+    if not isinstance(process_handle, int):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("per_process_user_time_limit", ctypes.c_longlong),
+            ("per_job_user_time_limit", ctypes.c_longlong),
+            ("limit_flags", wintypes.DWORD),
+            ("minimum_working_set_size", ctypes.c_size_t),
+            ("maximum_working_set_size", ctypes.c_size_t),
+            ("active_process_limit", wintypes.DWORD),
+            ("affinity", ctypes.c_size_t),
+            ("priority_class", wintypes.DWORD),
+            ("scheduling_class", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("read_operation_count", ctypes.c_ulonglong),
+            ("write_operation_count", ctypes.c_ulonglong),
+            ("other_operation_count", ctypes.c_ulonglong),
+            ("read_transfer_count", ctypes.c_ulonglong),
+            ("write_transfer_count", ctypes.c_ulonglong),
+            ("other_transfer_count", ctypes.c_ulonglong),
+        ]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("basic_limit_information", BasicLimitInformation),
+            ("io_info", IoCounters),
+            ("process_memory_limit", ctypes.c_size_t),
+            ("job_memory_limit", ctypes.c_size_t),
+            ("peak_process_memory_used", ctypes.c_size_t),
+            ("peak_job_memory_used", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_job = kernel32.CreateJobObjectW
+    create_job.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    create_job.restype = wintypes.HANDLE
+    set_information = kernel32.SetInformationJobObject
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    set_information.restype = wintypes.BOOL
+    assign_process = kernel32.AssignProcessToJobObject
+    assign_process.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    assign_process.restype = wintypes.BOOL
+
+    job_handle = create_job(None, None)
+    if not job_handle:
+        return None
+    information = ExtendedLimitInformation()
+    information.basic_limit_information.limit_flags = (
+        WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    if not set_information(
+        job_handle,
+        WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ) or not assign_process(job_handle, process_handle):
+        _close_windows_handle(job_handle)
+        return None
+    return job_handle
+
+
+def _close_windows_handle(handle: object) -> None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close = kernel32.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    close(handle)
+
+
+def _close_active_windows_job_handles() -> None:
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        handles = tuple(_ACTIVE_WINDOWS_JOB_HANDLES.values())
+        _ACTIVE_WINDOWS_JOB_HANDLES.clear()
+    for handle in handles:
+        _close_windows_handle(handle)
+
+
 def _windows_process_depth(
     pid: int,
     parent_by_pid: dict[int, int],
@@ -444,28 +748,94 @@ def _windows_process_depth(
     return depth
 
 
-def _process_tree_is_alive(process: subprocess.Popen[str]) -> bool:
+def _process_tree_state(
+    process: subprocess.Popen[str],
+) -> ProcessTreeState:
     if os.name == "nt":
         retained_identities = _refresh_windows_process_tree(process)
-        return any(
-            _windows_process_identity(identity.pid) == identity
-            and _windows_identity_is_alive(identity)
+        if not retained_identities:
+            with _ACTIVE_PROCESS_TREES_LOCK:
+                registered = process in _ACTIVE_PROCESS_TREES
+            if not registered:
+                return ProcessTreeState.STOPPED
+            return _root_only_process_state(process)
+        states = tuple(
+            _windows_identity_state(identity)
             for identity in retained_identities
         )
-    process_group_id = getattr(process, PROCESS_TREE_ATTRIBUTE, None)
-    if not isinstance(process_group_id, int):
-        return False
+        if ProcessTreeState.RUNNING in states:
+            return ProcessTreeState.RUNNING
+        if ProcessTreeState.UNKNOWN in states:
+            return ProcessTreeState.UNKNOWN
+        return ProcessTreeState.STOPPED
+    return _posix_process_group_state(process)
+
+
+def _process_tree_is_alive(process: subprocess.Popen[str]) -> bool:
+    """Conservative compatibility projection: UNKNOWN is not dead."""
+    return _process_tree_state(process) is not ProcessTreeState.STOPPED
+
+
+def _posix_process_group_state(
+    process: subprocess.Popen[str],
+) -> ProcessTreeState:
+    group = _ACTIVE_POSIX_PROCESS_GROUPS.get(process)
+    if group is None:
+        with _ACTIVE_PROCESS_TREES_LOCK:
+            registered = process in _ACTIVE_PROCESS_TREES
+        if not registered:
+            return ProcessTreeState.STOPPED
+        return _root_only_process_state(process)
+    current_members = _linux_process_group_identities(group.group_id)
+    current_leader = next(
+        (
+            identity
+            for identity in current_members
+            if identity.pid == group.group_id
+        ),
+        None,
+    )
+    if current_leader is not None and current_leader != group.leader:
+        # The numeric PID/PGID was recycled for a different group incarnation.
+        return ProcessTreeState.STOPPED
     identities = _refresh_posix_process_tree(process)
-    if identities:
-        return any(
-            _posix_process_identity(identity.pid) == identity
-            for identity in identities
-        )
+    active_members = {
+        identity
+        for identity in current_members
+        if _linux_process_state(identity.pid) != "Z"
+    }
+    if active_members and identities & active_members:
+        return ProcessTreeState.RUNNING
+    if current_members and not active_members:
+        return ProcessTreeState.STOPPED
     try:
-        os.killpg(process_group_id, 0)
-    except (ProcessLookupError, OSError):
-        return False
-    return True
+        os.killpg(group.group_id, 0)
+    except ProcessLookupError:
+        return ProcessTreeState.STOPPED
+    except PermissionError:
+        return ProcessTreeState.UNKNOWN
+    except OSError:
+        return ProcessTreeState.UNKNOWN
+    # A group exists but /proc could not prove that it is still our incarnation.
+    return ProcessTreeState.UNKNOWN
+
+
+def _root_only_process_state(
+    process: subprocess.Popen[str],
+) -> ProcessTreeState:
+    """Project pid-less test doubles without claiming an untracked real tree stopped."""
+    returncode = getattr(process, "returncode", None)
+    if isinstance(returncode, int):
+        return ProcessTreeState.STOPPED
+    try:
+        returncode = process.poll()
+    except (AttributeError, OSError):
+        returncode = None
+    if isinstance(returncode, int):
+        return ProcessTreeState.STOPPED
+    if not isinstance(getattr(process, "pid", None), int):
+        return ProcessTreeState.RUNNING
+    return ProcessTreeState.UNKNOWN
 
 
 def _refresh_windows_process_tree(
@@ -692,24 +1062,50 @@ def _windows_process_is_alive(process_id: int) -> bool:
 
 
 def _windows_identity_is_alive(identity: ProcessIdentity) -> bool:
+    return _windows_identity_state(identity) is ProcessTreeState.RUNNING
+
+
+def _windows_identity_state(identity: ProcessIdentity) -> ProcessTreeState:
     try:
         import ctypes
         from ctypes import wintypes
     except ImportError:
-        return False
+        return ProcessTreeState.UNKNOWN
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
     wait = kernel32.WaitForSingleObject
     wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
     wait.restype = wintypes.DWORD
     close = kernel32.CloseHandle
     close.argtypes = (wintypes.HANDLE,)
     close.restype = wintypes.BOOL
-    handle = _open_windows_process_handle(identity)
-    if handle is None:
-        return False
+    handle = open_process(
+        WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION | WINDOWS_SYNCHRONIZE,
+        False,
+        identity.pid,
+    )
+    if not handle:
+        error = ctypes.get_last_error()
+        return (
+            ProcessTreeState.STOPPED
+            if error == WINDOWS_ERROR_INVALID_PARAMETER
+            else ProcessTreeState.UNKNOWN
+        )
     try:
-        return wait(handle, 0) == WINDOWS_WAIT_TIMEOUT
+        times = _windows_process_times(handle)
+        if times is None:
+            return ProcessTreeState.UNKNOWN
+        if times[0] != identity.creation_time:
+            return ProcessTreeState.STOPPED
+        wait_result = wait(handle, 0)
+        if wait_result == WINDOWS_WAIT_TIMEOUT:
+            return ProcessTreeState.RUNNING
+        if wait_result == WINDOWS_WAIT_OBJECT_0:
+            return ProcessTreeState.STOPPED
+        return ProcessTreeState.UNKNOWN
     finally:
         close(handle)
 
@@ -723,9 +1119,25 @@ def _refresh_posix_process_tree(
     current_members = _linux_process_group_identities(process_group_id)
     with _ACTIVE_PROCESS_TREES_LOCK:
         retained = set(_ACTIVE_PROCESS_TREE_IDENTITIES.get(process, ()))
+        group = _ACTIVE_POSIX_PROCESS_GROUPS.get(process)
+        if (
+            not retained
+            and group is not None
+            and group.leader_retained
+            and group.leader in current_members
+        ):
+            retained.add(group.leader)
         if not retained:
             return set()
-        if retained & current_members:
+        can_extend = bool(retained & current_members)
+        if (
+            not can_extend
+            and group is not None
+            and group.leader_retained
+            and group.leader in current_members
+        ):
+            can_extend = True
+        if can_extend:
             retained.update(current_members)
             if process in _ACTIVE_PROCESS_TREES:
                 _ACTIVE_PROCESS_TREE_IDENTITIES[process] = retained
@@ -765,6 +1177,19 @@ def _posix_process_identity(process_id: int) -> ProcessIdentity | None:
     return ProcessIdentity(pid=pid, creation_time=creation_time)
 
 
+def _linux_process_state(process_id: int) -> str | None:
+    path = Path("/proc") / str(process_id) / "stat"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    closing_parenthesis = raw.rfind(")")
+    if closing_parenthesis < 0:
+        return None
+    fields = raw[closing_parenthesis + 1 :].split()
+    return fields[0] if fields else None
+
+
 def _linux_process_stat(path: Path) -> tuple[int, int, int] | None:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -784,8 +1209,39 @@ def _linux_process_stat(path: Path) -> tuple[int, int, int] | None:
     return pid, process_group_id, creation_time
 
 
-def _signal_process(process: subprocess.Popen[str], *, force: bool) -> None:
+def _signal_owned_process(
+    process: subprocess.Popen[str],
+    *,
+    force: bool,
+) -> bool:
+    process_id = getattr(process, "pid", None)
+    if os.name != "nt" and isinstance(process_id, int):
+        with _ACTIVE_PROCESS_TREES_LOCK:
+            root_identity = next(
+                (
+                    identity
+                    for identity in _ACTIVE_PROCESS_TREE_IDENTITIES.get(
+                        process,
+                        (),
+                    )
+                    if identity.pid == process_id
+                ),
+                None,
+            )
+        if (
+            root_identity is None
+            or _posix_process_identity(process_id) != root_identity
+        ):
+            return False
+    return _signal_process(process, force=force)
+
+
+def _signal_process(process: subprocess.Popen[str], *, force: bool) -> bool:
     try:
         (process.kill if force else process.terminate)()
     except (AttributeError, OSError):
-        pass
+        return False
+    return True
+
+
+atexit.register(_close_active_windows_job_handles)

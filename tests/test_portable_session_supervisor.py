@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop import cli, interactive_runner
+from devloop import cli, interactive_runner, portable_sessions
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_sessions import (
     PortableSessionInputKind,
@@ -27,6 +27,7 @@ from devloop.portable_sessions import (
     PortableWorkflowOperation,
 )
 from devloop.subprocess_utils import (
+    ProcessTreeState,
     ProcessTerminationResult,
     process_tree_creation_kwargs,
     register_process_tree,
@@ -35,6 +36,127 @@ from devloop.subprocess_utils import (
 
 
 class PortableSessionSupervisorTests(unittest.TestCase):
+    def test_cleanup_reaper_retries_after_scheduler_stops(self) -> None:
+        class ExitedWorker:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            @staticmethod
+            def poll() -> int:
+                return 0
+
+            @staticmethod
+            def wait(timeout: float | None = None) -> int:
+                return 0
+
+            @staticmethod
+            def terminate() -> None:
+                return None
+
+        supervisor = PortableSessionSupervisor()
+        session_id = "cleanup-after-scheduler"
+        snapshot = PortableSessionSnapshot(
+            session_id=session_id,
+            checkout=Path.cwd(),
+            status=PortableSessionStatus.INTERRUPTED,
+        )
+        running = portable_sessions._RunningSession(
+            process=ExitedWorker(),
+            generation=1,
+        )
+        unknown = ProcessTerminationResult(
+            state=ProcessTreeState.UNKNOWN,
+            detail="Injected identity query failure.",
+        )
+        stopped = ProcessTerminationResult(
+            state=ProcessTreeState.STOPPED,
+            detail="Cleanup confirmed on retry.",
+        )
+        with mock.patch.object(
+            portable_sessions,
+            "_CLEANUP_RETRY_SECONDS",
+            0.01,
+        ):
+            running.cleanup.record(unknown)
+            supervisor._snapshots[session_id] = snapshot
+            supervisor._running[session_id] = running
+            supervisor._scheduler_stop.set()
+            with mock.patch.object(
+                portable_sessions,
+                "terminate_process",
+                side_effect=(unknown, stopped),
+            ) as terminate:
+                supervisor._ensure_cleanup_reaper()
+                cleanup_reaper = supervisor._cleanup_reaper_thread
+                self.assertIsNotNone(cleanup_reaper)
+                assert cleanup_reaper is not None
+                cleanup_reaper.join(timeout=1)
+
+        self.assertFalse(cleanup_reaper.is_alive())
+        self.assertEqual(terminate.call_count, 2)
+        self.assertNotIn(session_id, supervisor._running)
+
+    def test_cleanup_reaper_stops_after_permanent_unknown(self) -> None:
+        class ExitedWorker:
+            stdin = None
+            stdout = None
+            stderr = None
+
+            @staticmethod
+            def poll() -> int:
+                return 0
+
+            @staticmethod
+            def wait(timeout: float | None = None) -> int:
+                return 0
+
+            @staticmethod
+            def terminate() -> None:
+                return None
+
+        supervisor = PortableSessionSupervisor()
+        session_id = "permanent-unknown-cleanup"
+        supervisor._snapshots[session_id] = PortableSessionSnapshot(
+            session_id=session_id,
+            checkout=Path.cwd(),
+            status=PortableSessionStatus.INTERRUPTED,
+        )
+        running = portable_sessions._RunningSession(
+            process=ExitedWorker(),
+            generation=1,
+        )
+        unknown = ProcessTerminationResult(
+            state=ProcessTreeState.UNKNOWN,
+            detail="Injected permanent identity query failure.",
+        )
+        running.cleanup.record(unknown)
+        supervisor._running[session_id] = running
+        supervisor._scheduler_stop.set()
+
+        with (
+            mock.patch.object(portable_sessions, "_CLEANUP_RETRY_SECONDS", 0.01),
+            mock.patch.object(
+                portable_sessions,
+                "_CLEANUP_REAPER_MAX_ATTEMPTS",
+                2,
+            ),
+            mock.patch.object(
+                portable_sessions,
+                "terminate_process",
+                return_value=unknown,
+            ) as terminate,
+        ):
+            supervisor._ensure_cleanup_reaper()
+            cleanup_reaper = supervisor._cleanup_reaper_thread
+            self.assertIsNotNone(cleanup_reaper)
+            assert cleanup_reaper is not None
+            cleanup_reaper.join(timeout=1)
+
+        self.assertFalse(cleanup_reaper.is_alive())
+        self.assertEqual(terminate.call_count, 2)
+        self.assertIs(supervisor._running[session_id], running)
+
     def test_pause_uses_exact_durable_pre_prd_thread_and_settings(self) -> None:
         worker_source = textwrap.dedent(
             """

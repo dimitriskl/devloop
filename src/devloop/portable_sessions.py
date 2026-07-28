@@ -7,7 +7,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
@@ -23,6 +23,7 @@ from .portable_protocol import (
 )
 from .portable_runtime import PortableRunContext
 from .subprocess_utils import (
+    ProcessTreeState,
     ProcessTerminationResult,
     process_tree_creation_kwargs,
     register_process_tree,
@@ -194,6 +195,7 @@ _CAPACITY_REFRESH_INTERVAL_SECONDS = 0.05
 _COOPERATIVE_PAUSE_TIMEOUT_SECONDS = 2.0
 _TERMINATION_ACK_TIMEOUT_SECONDS = 8.0
 _CLEANUP_RETRY_SECONDS = 0.5
+_CLEANUP_REAPER_MAX_ATTEMPTS = 3
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -282,6 +284,24 @@ class PortableSessionCatalogController(Protocol):
 
 
 @dataclass
+class _CleanupOwnership:
+    state: ProcessTreeState = ProcessTreeState.RUNNING
+    retry_at: float = 0.0
+
+    @property
+    def confirmed(self) -> bool:
+        return self.state is ProcessTreeState.STOPPED
+
+    def record(self, result: ProcessTerminationResult) -> None:
+        self.state = result.state
+        self.retry_at = (
+            0.0
+            if self.confirmed
+            else time.monotonic() + _CLEANUP_RETRY_SECONDS
+        )
+
+
+@dataclass
 class _RunningSession:
     process: PortableWorkerProcess
     generation: int
@@ -290,10 +310,9 @@ class _RunningSession:
     checkpoint_summary: str | None = None
     termination_ack: bool | None = None
     termination_detail: str = ""
-    cleanup_confirmed: bool = False
+    cleanup: _CleanupOwnership = field(default_factory=_CleanupOwnership)
     stop_requested: bool = False
     pending_lifecycle: _LifecycleCommandIdentity | None = None
-    cleanup_retry_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -355,6 +374,7 @@ class PortableSessionSupervisor:
         self._condition = Condition(RLock())
         self._scheduler_stop = ThreadEvent()
         self._scheduler_thread: Thread | None = None
+        self._cleanup_reaper_thread: Thread | None = None
         self._resume_candidates_loader = resume_candidates_loader
         self._saved_projects = (
             tuple(catalog.list_saved_projects()) if catalog is not None else ()
@@ -900,17 +920,13 @@ class PortableSessionSupervisor:
                         termination = terminate_process(
                             running.process  # type: ignore[arg-type]
                         )
-                    cleanup_confirmed = termination.tree_terminated
+                    running.cleanup.record(termination)
                 else:
                     termination = terminate_process(
                         running.process  # type: ignore[arg-type]
                     )
-                    cleanup_confirmed = termination.tree_terminated
-                running.cleanup_confirmed = cleanup_confirmed
-                if not cleanup_confirmed:
-                    running.cleanup_retry_at = (
-                        time.monotonic() + _CLEANUP_RETRY_SECONDS
-                    )
+                    running.cleanup.record(termination)
+                if not running.cleanup.confirmed:
                     snapshot = self.snapshot(session_id)
                     interrupted = replace(
                         snapshot,
@@ -929,15 +945,12 @@ class PortableSessionSupervisor:
                     self._publish(interrupted)
                     self._condition.notify_all()
                     return interrupted
-            elif running is not None and not running.cleanup_confirmed:
+            elif running is not None and not running.cleanup.confirmed:
                 termination = terminate_process(
                     running.process  # type: ignore[arg-type]
                 )
-                running.cleanup_confirmed = termination.tree_terminated
-                if not running.cleanup_confirmed:
-                    running.cleanup_retry_at = (
-                        time.monotonic() + _CLEANUP_RETRY_SECONDS
-                    )
+                running.cleanup.record(termination)
+                if not running.cleanup.confirmed:
                     interrupted = replace(
                         snapshot,
                         status=PortableSessionStatus.INTERRUPTED,
@@ -1171,6 +1184,10 @@ class PortableSessionSupervisor:
         for thread in tuple(self._threads):
             thread.join(timeout=1)
         self._threads = [thread for thread in self._threads if thread.is_alive()]
+        self._ensure_cleanup_reaper()
+        cleanup_reaper = self._cleanup_reaper_thread
+        if cleanup_reaper is not None:
+            cleanup_reaper.join(timeout=_COOPERATIVE_PAUSE_TIMEOUT_SECONDS)
 
     def _run_capacity_scheduler(self) -> None:
         while not self._scheduler_stop.wait(_CAPACITY_REFRESH_INTERVAL_SECONDS):
@@ -1264,15 +1281,15 @@ class PortableSessionSupervisor:
                             self._publish(failed)
                             self._condition.notify_all()
 
-    def _retry_pending_worker_cleanup(self) -> None:
+    def _retry_pending_worker_cleanup(self, *, force: bool = False) -> None:
         with self._condition:
             now = time.monotonic()
             pending = tuple(
                 (session_id, running)
                 for session_id, running in self._running.items()
-                if not running.cleanup_confirmed
-                and running.cleanup_retry_at
-                and running.cleanup_retry_at <= now
+                if not running.cleanup.confirmed
+                and running.cleanup.retry_at
+                and (force or running.cleanup.retry_at <= now)
                 and (
                     self._snapshots[session_id].status.terminal
                     or self._snapshots[session_id].status
@@ -1286,15 +1303,58 @@ class PortableSessionSupervisor:
                 if self._running.get(session_id) is not running:
                     continue
                 if not cleanup.tree_terminated:
-                    running.cleanup_retry_at = now + _CLEANUP_RETRY_SECONDS
+                    running.cleanup.record(cleanup)
                     continue
-                running.cleanup_confirmed = True
+                running.cleanup.record(cleanup)
                 self._close_worker_streams(running)
                 self._running.pop(session_id, None)
                 snapshot = self._snapshots[session_id]
                 self._release_execution_capacity(snapshot)
                 self._release_session_lease(session_id)
                 self._condition.notify_all()
+
+    def _ensure_cleanup_reaper(self) -> None:
+        with self._condition:
+            pending = any(
+                not running.cleanup.confirmed
+                and (
+                    self._snapshots[session_id].status.terminal
+                    or self._snapshots[session_id].status
+                    is PortableSessionStatus.INTERRUPTED
+                )
+                for session_id, running in self._running.items()
+            )
+            if not pending:
+                return
+            if (
+                self._cleanup_reaper_thread is not None
+                and self._cleanup_reaper_thread.is_alive()
+            ):
+                self._condition.notify_all()
+                return
+            self._cleanup_reaper_thread = Thread(
+                target=self._run_cleanup_reaper,
+                name="portable-session-cleanup-reaper",
+                daemon=False,
+            )
+            self._cleanup_reaper_thread.start()
+
+    def _run_cleanup_reaper(self) -> None:
+        for _attempt in range(_CLEANUP_REAPER_MAX_ATTEMPTS):
+            self._retry_pending_worker_cleanup(force=True)
+            with self._condition:
+                pending = any(
+                    not running.cleanup.confirmed
+                    and (
+                        self._snapshots[session_id].status.terminal
+                        or self._snapshots[session_id].status
+                        is PortableSessionStatus.INTERRUPTED
+                    )
+                    for session_id, running in self._running.items()
+                )
+                if not pending:
+                    return
+                self._condition.wait(timeout=_CLEANUP_RETRY_SECONDS)
 
     def _synchronize_catalog_sessions(self) -> None:
         if self._catalog is None:
@@ -1387,13 +1447,13 @@ class PortableSessionSupervisor:
             self._fail_session(session_id, str(error), running)
         finally:
             cleanup = self._reap_worker(running)
-            running.cleanup_confirmed = cleanup.tree_terminated
+            running.cleanup.record(cleanup)
             with self._condition:
                 current_running = self._running.get(session_id)
                 snapshot = self._snapshots[session_id]
                 if current_running is running and running.checkpoint_summary is not None:
                     if cleanup.tree_terminated:
-                        running.cleanup_confirmed = True
+                        running.cleanup.record(cleanup)
                         self._running.pop(session_id, None)
                         paused = replace(
                             snapshot,
@@ -1411,9 +1471,7 @@ class PortableSessionSupervisor:
                         self._publish(paused)
                         current_running = None
                     else:
-                        running.cleanup_retry_at = (
-                            time.monotonic() + _CLEANUP_RETRY_SECONDS
-                        )
+                        running.cleanup.record(cleanup)
                         interrupted = replace(
                             snapshot,
                             status=PortableSessionStatus.INTERRUPTED,
@@ -1439,9 +1497,7 @@ class PortableSessionSupervisor:
                         self._running.pop(session_id, None)
                         current_running = None
                     else:
-                        running.cleanup_retry_at = (
-                            time.monotonic() + _CLEANUP_RETRY_SECONDS
-                        )
+                        running.cleanup.record(cleanup)
                         retained = replace(
                             snapshot,
                             diagnostics=(
@@ -1456,7 +1512,7 @@ class PortableSessionSupervisor:
                 releasable = self._snapshots[session_id]
                 if (
                     current_running is None
-                    and running.cleanup_confirmed
+                    and running.cleanup.confirmed
                     and releasable.status
                     not in {
                         PortableSessionStatus.RUNNING,
@@ -2011,14 +2067,12 @@ class PortableSessionSupervisor:
             cleanup = terminate_process(
                 running.process  # type: ignore[arg-type]
             )
-            running.cleanup_confirmed = cleanup.tree_terminated
+            running.cleanup.record(cleanup)
             if cleanup.tree_terminated:
                 self._close_worker_streams(running)
                 self._running.pop(session_id, None)
             else:
-                running.cleanup_retry_at = (
-                    time.monotonic() + _CLEANUP_RETRY_SECONDS
-                )
+                running.cleanup.record(cleanup)
             self._publish(updated)
             self._condition.notify_all()
 
