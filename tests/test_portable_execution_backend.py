@@ -11,7 +11,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
-from devloop import codex_runner, statusui
+from devloop import codex_runner, portable_worker, statusui, subprocess_utils
 from devloop.codex_events import parse_codex_event, render_safe_codex_activity
 from devloop.issue_pack import Issue
 from devloop.portable_execution_backend import (
@@ -102,6 +102,14 @@ class _FakeCodexProcess:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+class _RootExitedWithDescendantProcess(_FakeCodexProcess):
+    """A backend root whose separately tracked descendant remains alive."""
+
+    def __init__(self, stdout_lines: tuple[str, ...] = ()) -> None:
+        super().__init__(stdout_lines)
+        self.descendant_alive = True
 
 
 class _FakeCheckpointBudget:
@@ -465,6 +473,77 @@ class InactivityCheckpointTests(unittest.TestCase):
 
 
 class ActivityFeedConsumptionTests(unittest.TestCase):
+    def test_codex_root_exit_retains_tree_ownership_until_descendant_exit(self) -> None:
+        process = _RootExitedWithDescendantProcess()
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            codex_cli.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            subprocess_utils,
+            "_process_tree_is_alive",
+            side_effect=lambda candidate: (
+                process.descendant_alive if candidate is process else False
+            ),
+        ):
+            try:
+                result = codex_cli.run_streaming_codex_command(
+                    ["codex", "exec", "--json", "-"],
+                    input_text="Implement the issue.",
+                    cwd=Path(raw),
+                    stage=Stage.DEVELOPMENT,
+                    activity_callback=lambda _event: None,
+                )
+
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse(subprocess_utils.owned_process_trees_are_stopped())
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "owned backend process tree is still running",
+                ):
+                    portable_worker._capture_durable_checkpoint(
+                        portable_worker.PortableWorkflowOperation.PLANNING,
+                        (),
+                    )
+                with mock.patch.object(
+                    subprocess_utils,
+                    "terminate_process",
+                    return_value=subprocess_utils.ProcessTerminationResult(
+                        tree_terminated=False,
+                        detail="Descendant cleanup is not confirmed.",
+                    ),
+                ):
+                    termination = subprocess_utils.terminate_active_process_trees()
+                self.assertEqual(len(termination), 1)
+                self.assertFalse(termination[0].tree_terminated)
+
+                process.descendant_alive = False
+                self.assertTrue(subprocess_utils.owned_process_trees_are_stopped())
+            finally:
+                subprocess_utils.unregister_process_tree(process)
+
+    def test_codex_root_exit_without_descendants_releases_tree_ownership(self) -> None:
+        process = _FakeCodexProcess(())
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            codex_cli.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            subprocess_utils,
+            "_process_tree_is_alive",
+            return_value=False,
+        ):
+            result = codex_cli.run_streaming_codex_command(
+                ["codex", "exec", "--json", "-"],
+                input_text="Implement the issue.",
+                cwd=Path(raw),
+                stage=Stage.DEVELOPMENT,
+                activity_callback=lambda _event: None,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(subprocess_utils.terminate_active_process_trees(), ())
+
     def test_the_activity_feed_callback_receives_the_neutral_event(self) -> None:
         """The feed is handed events, not bare text, so it can read the kind."""
         events: list[StepActivityEvent | None] = []

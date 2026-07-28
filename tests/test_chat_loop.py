@@ -13,7 +13,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from devloop import chat_loop
+from devloop import chat_loop, subprocess_utils
 from devloop.chat_loop import ChatCallbacks, ChatConfig, ChatSession
 from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
@@ -416,6 +416,45 @@ class RunStreamingTests(unittest.TestCase):
 
         def kill(self):
             pass
+
+    def test_planning_root_exit_retains_tree_ownership_until_descendant_exit(
+        self,
+    ) -> None:
+        class RootExitedWithDescendantProcess(self.FakeProcess):
+            def __init__(self) -> None:
+                self.stdout = []
+                self.returncode = 0
+                self.descendant_alive = True
+
+        process = RootExitedWithDescendantProcess()
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            chat_loop,
+            "resolve_codex_executable",
+            return_value="codex",
+        ), mock.patch.object(
+            chat_loop.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            subprocess_utils,
+            "_process_tree_is_alive",
+            side_effect=lambda candidate: (
+                process.descendant_alive if candidate is process else False
+            ),
+        ), redirect_stdout(StringIO()):
+            try:
+                returncode, _output = chat_loop.run_streaming(
+                    ["codex", "exec", "--json", "PROMPT TEXT"],
+                    Path(raw),
+                )
+
+                self.assertEqual(returncode, 0)
+                self.assertFalse(subprocess_utils.owned_process_trees_are_stopped())
+
+                process.descendant_alive = False
+                self.assertTrue(subprocess_utils.owned_process_trees_are_stopped())
+            finally:
+                subprocess_utils.unregister_process_tree(process)
 
     def test_missing_executable_returns_127_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

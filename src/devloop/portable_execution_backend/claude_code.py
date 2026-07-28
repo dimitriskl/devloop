@@ -40,8 +40,8 @@ from ..subprocess_utils import (
     process_tree_creation_kwargs,
     reap_process_after_terminal_event,
     register_process_tree,
+    release_process_tree_if_stopped,
     terminate_process,
-    unregister_process_tree,
 )
 from ..terminal_text import compact_terminal_text
 from .activity import ActivityCallback, StepActivityEvent, StepActivityKind
@@ -839,7 +839,7 @@ def run_streaming_claude_command(
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
-        unregister_process_tree(process)
+        release_process_tree_if_stopped(process)
 
     if budget_expiration is not None:
         stderr_parts.append(f"{budget_expiration}\n")

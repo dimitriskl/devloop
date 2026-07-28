@@ -217,6 +217,14 @@ def unregister_process_tree(process: subprocess.Popen[str]) -> None:
         _ACTIVE_WINDOWS_PROCESS_TREE_PIDS.pop(process, None)
 
 
+def release_process_tree_if_stopped(process: subprocess.Popen[str]) -> bool:
+    """Release ownership only after the entire registered tree has stopped."""
+    if _process_tree_is_alive(process):
+        return False
+    unregister_process_tree(process)
+    return True
+
+
 def terminate_active_process_trees() -> tuple[ProcessTerminationResult, ...]:
     """Terminate subprocess trees still owned by the active application."""
     with _ACTIVE_PROCESS_TREES_LOCK:

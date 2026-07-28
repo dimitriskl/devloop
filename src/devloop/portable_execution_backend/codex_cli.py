@@ -38,9 +38,9 @@ from ..subprocess_utils import (
     process_tree_creation_kwargs,
     reap_process_after_terminal_event,
     register_process_tree,
+    release_process_tree_if_stopped,
     run_captured_text,
     terminate_process,
-    unregister_process_tree,
 )
 from .activity import ActivityCallback, StepActivityEvent, StepActivityKind
 from .backend import (
@@ -460,7 +460,7 @@ def run_streaming_codex_command(
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
-        unregister_process_tree(process)
+        release_process_tree_if_stopped(process)
 
     if budget_expiration is not None:
         stderr_parts.append(f"{budget_expiration}\n")

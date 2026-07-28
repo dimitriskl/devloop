@@ -17,7 +17,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
-from devloop import codex_runner
+from devloop import codex_runner, subprocess_utils
 from devloop.codex_runner import RoleResult
 from devloop.issue_pack import Issue
 from devloop.portable_execution_backend import (
@@ -137,6 +137,14 @@ class _FakeClaudeProcess:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+class _RootExitedWithDescendantClaudeProcess(_FakeClaudeProcess):
+    """A Claude launcher whose separately tracked descendant remains alive."""
+
+    def __init__(self) -> None:
+        super().__init__(())
+        self.descendant_alive = True
 
 
 class _PacedClaudeProcess:
@@ -883,6 +891,36 @@ class RecordedPermissionDenialTests(unittest.TestCase):
 
 
 class ClaudeStreamingTests(unittest.TestCase):
+    def test_claude_root_exit_retains_tree_ownership_until_descendant_exit(self) -> None:
+        process = _RootExitedWithDescendantClaudeProcess()
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            claude_code.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            subprocess_utils,
+            "_process_tree_is_alive",
+            side_effect=lambda candidate: (
+                process.descendant_alive if candidate is process else False
+            ),
+        ):
+            try:
+                result = claude_code.run_streaming_claude_command(
+                    ["claude", "-p"],
+                    input_text="Implement the issue.",
+                    cwd=Path(raw),
+                    stage=Stage.DEVELOPMENT,
+                    activity_callback=lambda _event: None,
+                )
+
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse(subprocess_utils.owned_process_trees_are_stopped())
+
+                process.descendant_alive = False
+                self.assertTrue(subprocess_utils.owned_process_trees_are_stopped())
+            finally:
+                subprocess_utils.unregister_process_tree(process)
+
     def _run(
         self,
         stdout_lines: tuple[str, ...],
