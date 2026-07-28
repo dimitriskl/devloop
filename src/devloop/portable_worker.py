@@ -225,6 +225,15 @@ class PortableWorkerRuntimeBridge:
     def send_hello(self) -> None:
         self._send(WorkerMessageKind.HELLO, {})
 
+    def send_heartbeat(self, *, owner_id: str, worker_generation: int) -> None:
+        self._send(
+            WorkerMessageKind.HEARTBEAT,
+            {
+                "owner_id": owner_id,
+                "worker_generation": worker_generation,
+            },
+        )
+
     def _lifecycle_acknowledgement(
         self,
         expected_action: SupervisorMessageKind,
@@ -360,6 +369,57 @@ class PortableWorkerRuntimeBridge:
             )
 
 
+class PortableWorkerHeartbeatEmitter:
+    """Emit serialized worker liveness until the worker reaches its exit path."""
+
+    def __init__(
+        self,
+        bridge: PortableWorkerRuntimeBridge,
+        *,
+        owner_id: str,
+        worker_generation: int,
+        interval_seconds: float = 1.0,
+    ) -> None:
+        if not owner_id:
+            raise ValueError("Heartbeat owner identity must be non-empty.")
+        if (
+            isinstance(worker_generation, bool)
+            or not isinstance(worker_generation, int)
+            or worker_generation < 1
+        ):
+            raise ValueError("Heartbeat worker generation must be positive.")
+        if interval_seconds <= 0:
+            raise ValueError("Heartbeat interval must be positive.")
+        self._bridge = bridge
+        self._owner_id = owner_id
+        self._worker_generation = worker_generation
+        self._interval_seconds = interval_seconds
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run,
+            daemon=True,
+            name=f"portable-worker-{owner_id}-heartbeat",
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=max(2.0, self._interval_seconds * 2))
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._bridge.send_heartbeat(
+                    owner_id=self._owner_id,
+                    worker_generation=self._worker_generation,
+                )
+            except (BrokenPipeError, OSError):
+                return
+            self._stop.wait(self._interval_seconds)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--session-id", required=True)
@@ -372,8 +432,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         event_stream=protocol_stdout,
     )
     sys.stdout = _ProtocolOutputStream(bridge, is_error=False)
+    heartbeat_emitter: PortableWorkerHeartbeatEmitter | None = None
     try:
         bridge.send_hello()
+        owner_id = start.payload.get("owner_id")
+        worker_generation = start.payload.get("worker_generation")
+        if not isinstance(owner_id, str) or not owner_id:
+            raise PortableProtocolError("START owner_id must be non-empty text.")
+        if (
+            isinstance(worker_generation, bool)
+            or not isinstance(worker_generation, int)
+            or worker_generation < 1
+        ):
+            raise PortableProtocolError(
+                "START worker_generation must be a positive integer."
+            )
+
+        heartbeat_emitter = PortableWorkerHeartbeatEmitter(
+            bridge,
+            owner_id=owner_id,
+            worker_generation=worker_generation,
+        )
+        heartbeat_emitter.start()
         from .subprocess_utils import terminate_active_process_trees
 
         termination_handled = Event()
@@ -444,6 +524,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         bridge.send_failure(error)
         return 1
     finally:
+        if heartbeat_emitter is not None:
+            heartbeat_emitter.stop()
         sys.stdout = protocol_stdout
     if bridge.lifecycle_request == SupervisorMessageKind.PAUSE.value:
         try:

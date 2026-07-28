@@ -32,6 +32,7 @@ class WorkerMessageKind(str, Enum):
     TERMINATION = "TERMINATION"
     COMPLETION = "COMPLETION"
     FAILURE = "FAILURE"
+    HEARTBEAT = "HEARTBEAT"
 
 
 class PortableProtocolError(ValueError):

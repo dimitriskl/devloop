@@ -46,7 +46,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PortableSessionCatalogError,
-                "newer than supported version 4",
+                "newer than supported version 5",
             ):
                 PortableSessionCatalog(database)
 

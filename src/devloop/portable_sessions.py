@@ -23,8 +23,10 @@ from .portable_protocol import (
 )
 from .portable_runtime import PortableRunContext
 from .subprocess_utils import (
+    ProcessIdentity,
     ProcessTreeState,
     ProcessTerminationResult,
+    capture_process_identity,
     launch_process_tree,
     register_process_tree,
     terminate_process,
@@ -138,14 +140,22 @@ class PortableWorktreeLease:
     process_id: int
     acquired_at: float
     heartbeat_at: float
+    process_start_fingerprint: int | None = None
+    worker_generation: int | None = None
 
 
 class PortableWorktreeLeaseConflict(RuntimeError):
-    def __init__(self, lease: PortableWorktreeLease) -> None:
+    def __init__(
+        self,
+        lease: PortableWorktreeLease,
+        *,
+        reason: str = "lease ownership is still active",
+    ) -> None:
         self.lease = lease
+        self.reason = reason
         super().__init__(
             "Portable worktree is already leased by session "
-            f"{lease.session_id} in application {lease.owner_id}."
+            f"{lease.session_id} in application {lease.owner_id}; {reason}."
         )
 
     @property
@@ -196,6 +206,8 @@ _COOPERATIVE_PAUSE_TIMEOUT_SECONDS = 2.0
 _TERMINATION_ACK_TIMEOUT_SECONDS = 8.0
 _CLEANUP_RETRY_SECONDS = 0.5
 _CLEANUP_REAPER_MAX_ATTEMPTS = 3
+_MAX_DIAGNOSTIC_LINES = 100
+_MAX_DIAGNOSTIC_CHARACTERS = 2_000
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -339,6 +351,7 @@ class _CleanupOwnership:
 class _RunningSession:
     process: PortableWorkerProcess
     generation: int
+    process_identity: ProcessIdentity | None = None
     next_supervisor_sequence: int = 2
     next_worker_sequence: int = 1
     checkpoint_summary: str | None = None
@@ -406,6 +419,9 @@ class PortableSessionSupervisor:
     ) -> None:
         self._catalog = catalog
         self._owner_id = owner_id or str(uuid.uuid4())
+        self._process_identity = (
+            capture_process_identity() if catalog is not None else None
+        )
         self._worker_launcher = worker_launcher or (
             lambda launch: _launch_portable_worker(
                 launch,
@@ -777,10 +793,40 @@ class PortableSessionSupervisor:
                     {
                         "operation": launch.operation.value,
                         "arguments": list(launch.arguments),
+                        "owner_id": self._owner_id,
+                        "worker_generation": running.generation,
+                        "last_checkpoint": (
+                            previous.activity[-1]
+                            if (
+                                previous.status
+                                is PortableSessionStatus.PAUSED
+                                and previous.activity
+                            )
+                            else None
+                        ),
+                        "partial_work_context": {
+                            "activity": list(previous.activity[-20:]),
+                            "diagnostics": list(previous.diagnostics[-20:]),
+                        },
                         **command_payload,
                     },
                 ),
             )
+            if self._process_identity is not None:
+                running.process_identity = self._process_identity
+                if self._catalog is not None:
+                    bind_worker = getattr(
+                        self._catalog,
+                        "bind_worktree_lease_worker",
+                        None,
+                    )
+                    if callable(bind_worker):
+                        bind_worker(
+                            launch.session_id,
+                            owner_id=self._owner_id,
+                            process_identity=running.process_identity,
+                            worker_generation=running.generation,
+                        )
         except BaseException as error:
             self._handle_post_launch_failure(
                 launch,
@@ -1592,7 +1638,7 @@ class PortableSessionSupervisor:
                 }
                 and not running.stop_requested
             ):
-                self._fail_session(
+                self._interrupt_session(
                     session_id,
                     "Worker exited without a terminal result.",
                     running,
@@ -1687,19 +1733,30 @@ class PortableSessionSupervisor:
     ) -> None:
         assert running.process.stderr is not None
         for line in running.process.stderr:
-            diagnostic = line.rstrip("\r\n")
+            diagnostic = line.rstrip("\r\n")[:_MAX_DIAGNOSTIC_CHARACTERS]
             if not diagnostic:
                 continue
             with self._condition:
                 snapshot = self._snapshots[session_id]
+                active_running = self._running.get(session_id)
                 if (
-                    self._running.get(session_id) is not running
+                    (
+                        active_running is not running
+                        and not (
+                            active_running is None
+                            and snapshot.status
+                            is PortableSessionStatus.INTERRUPTED
+                        )
+                    )
                     or snapshot.status.terminal
                 ):
                     return
                 updated = replace(
                     snapshot,
-                    diagnostics=(*snapshot.diagnostics, diagnostic)[-100:],
+                    diagnostics=(
+                        *snapshot.diagnostics,
+                        diagnostic,
+                    )[-_MAX_DIAGNOSTIC_LINES:],
                     updated_at=time.time(),
                 )
                 self._snapshots[session_id] = updated
@@ -1729,6 +1786,7 @@ class PortableSessionSupervisor:
                 safe_diagnostics = {
                     WorkerMessageKind.ACTIVITY,
                     WorkerMessageKind.SAFE_OUTPUT,
+                    WorkerMessageKind.HEARTBEAT,
                 }
                 if kind not in (
                     safe_diagnostics | pending_lifecycle.acknowledgement_kinds
@@ -1772,7 +1830,36 @@ class PortableSessionSupervisor:
                     self._condition.notify_all()
                     return True
             if kind is WorkerMessageKind.HELLO:
-                updated = snapshot
+                return True
+            elif kind is WorkerMessageKind.HEARTBEAT:
+                owner_id = frame.payload.get("owner_id")
+                worker_generation = frame.payload.get("worker_generation")
+                if (
+                    owner_id != self._owner_id
+                    or worker_generation != running.generation
+                ):
+                    raise PortableProtocolError(
+                        "Worker HEARTBEAT does not match the exact lease owner "
+                        "and worker generation."
+                    )
+                if self._catalog is not None:
+                    renew = getattr(
+                        self._catalog,
+                        "renew_worktree_lease",
+                        None,
+                    )
+                    if callable(renew):
+                        if running.process_identity is None:
+                            raise PortableProtocolError(
+                                "Worker HEARTBEAT has no stable process identity."
+                            )
+                        renew(
+                            session_id,
+                            owner_id=self._owner_id,
+                            process_identity=running.process_identity,
+                            worker_generation=running.generation,
+                        )
+                return True
             elif kind is WorkerMessageKind.CONTEXT:
                 context = PortableRunContext(
                     project_root=_payload_text(frame, "project_root"),
@@ -2293,6 +2380,48 @@ class PortableSessionSupervisor:
                 self._running.pop(session_id, None)
             else:
                 running.cleanup.record(cleanup)
+            self._publish(updated)
+            self._condition.notify_all()
+
+    def _interrupt_session(
+        self,
+        session_id: str,
+        message: str,
+        running: _RunningSession,
+    ) -> None:
+        with self._condition:
+            snapshot = self._snapshots[session_id]
+            if (
+                self._running.get(session_id) is not running
+                or snapshot.status.terminal
+            ):
+                return
+            return_code = running.process.poll()
+            if return_code is None:
+                try:
+                    return_code = running.process.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    return_code = None
+            updated = replace(
+                snapshot,
+                status=PortableSessionStatus.INTERRUPTED,
+                result=return_code if return_code is not None else 1,
+                input_request=None,
+                diagnostics=(
+                    *snapshot.diagnostics,
+                    message[:_MAX_DIAGNOSTIC_CHARACTERS],
+                )[-_MAX_DIAGNOSTIC_LINES:],
+                updated_at=time.time(),
+            )
+            self._snapshots[session_id] = updated
+            self._persist_snapshot(updated)
+            cleanup = terminate_process(
+                running.process  # type: ignore[arg-type]
+            )
+            running.cleanup.record(cleanup)
+            if cleanup.tree_terminated:
+                self._close_worker_streams(running)
+                self._running.pop(session_id, None)
             self._publish(updated)
             self._condition.notify_all()
 

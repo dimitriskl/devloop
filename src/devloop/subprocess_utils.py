@@ -69,6 +69,43 @@ class ProcessTreeState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+def capture_process_identity(process_id: int | None = None) -> ProcessIdentity:
+    """Capture one stable OS process incarnation for later liveness checks."""
+    selected_process_id = os.getpid() if process_id is None else process_id
+    if (
+        isinstance(selected_process_id, bool)
+        or not isinstance(selected_process_id, int)
+        or selected_process_id <= 0
+    ):
+        raise ValueError("Process identity requires a positive integer PID.")
+    identity = _process_identity(selected_process_id)
+    if identity is None:
+        raise RuntimeError(
+            f"Stable process identity is unavailable for PID {selected_process_id}."
+        )
+    return identity
+
+
+def process_identity_state(identity: ProcessIdentity) -> ProcessTreeState:
+    """Probe the exact process incarnation without trusting a recyclable PID."""
+    if os.name == "nt":
+        return _windows_identity_state(identity)
+    current = _posix_process_identity(identity.pid)
+    if current is not None:
+        return (
+            ProcessTreeState.RUNNING
+            if current == identity
+            else ProcessTreeState.STOPPED
+        )
+    try:
+        os.kill(identity.pid, 0)
+    except ProcessLookupError:
+        return ProcessTreeState.STOPPED
+    except OSError:
+        return ProcessTreeState.UNKNOWN
+    return ProcessTreeState.UNKNOWN
+
+
 class WindowsJobAssignmentState(str, Enum):
     """Whether a Windows process tree has authoritative Job Object ownership."""
 

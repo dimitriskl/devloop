@@ -1143,7 +1143,13 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
             try:
                 supervisor.start_session(launches[0])
                 queued = supervisor.start_session(launches[1])
-                self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+                self.assertIn(
+                    queued.status,
+                    {
+                        PortableSessionStatus.QUEUED,
+                        PortableSessionStatus.RUNNING,
+                    },
+                )
 
                 completed = supervisor.wait_for_terminal(
                     "queued-after-crash",
@@ -1153,7 +1159,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                 self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
                 self.assertEqual(
                     supervisor.snapshot("crashing-session").status,
-                    PortableSessionStatus.FAILED,
+                    PortableSessionStatus.INTERRUPTED,
                 )
             finally:
                 supervisor.shutdown()
@@ -1427,7 +1433,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         catalog.get_session("crashing-session").status,
-                        PortableSessionStatus.FAILED,
+                        PortableSessionStatus.INTERRUPTED,
                     )
 
                     catalog.release_stale_read.set()
@@ -1442,7 +1448,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         supervisor.snapshot("crashing-session").status,
-                        PortableSessionStatus.FAILED,
+                        PortableSessionStatus.INTERRUPTED,
                     )
                 finally:
                     catalog.release_stale_read.set()

@@ -23,8 +23,14 @@ from .portable_sessions import (
 )
 from .portable_workflow import ExecutionBudget, FastPreference, StepExecutionSettings
 from .redaction import redact_persisted_evidence
+from .subprocess_utils import (
+    ProcessIdentity,
+    ProcessTreeState,
+    capture_process_identity,
+    process_identity_state,
+)
 
-CATALOG_SCHEMA_VERSION = 4
+CATALOG_SCHEMA_VERSION = 5
 CATALOG_FILENAME = "portable-sessions.sqlite3"
 DEFAULT_PORTABLE_SESSION_CONCURRENCY_LIMIT = 2
 MINIMUM_PORTABLE_SESSION_CONCURRENCY_LIMIT = 1
@@ -532,8 +538,22 @@ def portable_session_catalog_path(
 class PortableSessionCatalog:
     """Own machine-local Portable Saved Project and session discovery state."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+        process_probe: Callable[[ProcessIdentity], ProcessTreeState] = (
+            process_identity_state
+        ),
+        lease_timeout_seconds: float = 15.0,
+    ) -> None:
+        if not math.isfinite(lease_timeout_seconds) or lease_timeout_seconds <= 0:
+            raise ValueError("Portable lease timeout must be a positive duration.")
         self.path = (path or portable_session_catalog_path()).resolve()
+        self._clock = clock
+        self._process_probe = process_probe
+        self._lease_timeout_seconds = lease_timeout_seconds
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -561,7 +581,7 @@ class PortableSessionCatalog:
             launch_settings.to_dict(),
             separators=(",", ":"),
         )
-        timestamp = time.time()
+        timestamp = self._clock()
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -616,6 +636,8 @@ class PortableSessionCatalog:
         *,
         owner_id: str,
         process_id: int | None = None,
+        process_identity: ProcessIdentity | None = None,
+        worker_generation: int | None = None,
         planning_settings: PortablePlanningSettings | None = None,
     ) -> PortableCatalogSession:
         """Atomically register a selected checkout, session, and live owner."""
@@ -624,8 +646,12 @@ class PortableSessionCatalog:
         checkout = launch.checkout.resolve()
         if not checkout.is_dir():
             raise ValueError(f"Portable session checkout does not exist: {checkout}")
-        active_process_id = os.getpid() if process_id is None else process_id
+        identity = _resolve_process_identity(process_id, process_identity)
+        active_process_id = identity.pid if identity is not None else process_id
+        if active_process_id is None:
+            active_process_id = os.getpid()
         _validate_process_id(active_process_id)
+        _validate_worker_generation(worker_generation)
         project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, checkout.as_uri()))
         launch_settings_json = json.dumps(
             PortableLaunchSettings.from_arguments(
@@ -640,7 +666,7 @@ class PortableSessionCatalog:
             if planning_settings is not None
             else None
         )
-        timestamp = time.time()
+        timestamp = self._clock()
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -649,7 +675,11 @@ class PortableSessionCatalog:
                     (str(checkout),),
                 ).fetchone()
                 if existing is not None:
-                    raise PortableWorktreeLeaseConflict(_lease_from_row(existing))
+                    self._reclaim_expired_lease(
+                        connection,
+                        _lease_from_row(existing),
+                        now=timestamp,
+                    )
                 connection.execute(
                     """
                     INSERT INTO saved_projects (
@@ -687,8 +717,9 @@ class PortableSessionCatalog:
                     """
                     INSERT INTO worktree_leases (
                         checkout, session_id, owner_id, process_id,
-                        acquired_at, heartbeat_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        acquired_at, heartbeat_at, process_start_fingerprint,
+                        worker_generation
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(checkout),
@@ -697,6 +728,8 @@ class PortableSessionCatalog:
                         active_process_id,
                         timestamp,
                         timestamp,
+                        identity.creation_time if identity is not None else None,
+                        worker_generation,
                     ),
                 )
         except PortableWorktreeLeaseConflict:
@@ -717,12 +750,18 @@ class PortableSessionCatalog:
         *,
         owner_id: str,
         process_id: int | None = None,
+        process_identity: ProcessIdentity | None = None,
+        worker_generation: int | None = None,
     ) -> PortableWorktreeLease:
         _validate_session_id(session_id)
         _validate_owner_id(owner_id)
-        active_process_id = os.getpid() if process_id is None else process_id
+        identity = _resolve_process_identity(process_id, process_identity)
+        active_process_id = identity.pid if identity is not None else process_id
+        if active_process_id is None:
+            active_process_id = os.getpid()
         _validate_process_id(active_process_id)
-        timestamp = time.time()
+        _validate_worker_generation(worker_generation)
+        timestamp = self._clock()
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -743,15 +782,32 @@ class PortableSessionCatalog:
                 ).fetchone()
                 if existing is not None:
                     lease = _lease_from_row(existing)
-                    if lease.session_id == session_id and lease.owner_id == owner_id:
+                    if (
+                        lease.session_id == session_id
+                        and lease.owner_id == owner_id
+                        and (
+                            identity is None
+                            or (
+                                lease.process_id == identity.pid
+                                and lease.process_start_fingerprint
+                                == identity.creation_time
+                                and lease.worker_generation == worker_generation
+                            )
+                        )
+                    ):
                         return lease
-                    raise PortableWorktreeLeaseConflict(lease)
+                    self._reclaim_expired_lease(
+                        connection,
+                        lease,
+                        now=timestamp,
+                    )
                 connection.execute(
                     """
                     INSERT INTO worktree_leases (
                         checkout, session_id, owner_id, process_id,
-                        acquired_at, heartbeat_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        acquired_at, heartbeat_at, process_start_fingerprint,
+                        worker_generation
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session["checkout"],
@@ -760,6 +816,8 @@ class PortableSessionCatalog:
                         active_process_id,
                         timestamp,
                         timestamp,
+                        identity.creation_time if identity is not None else None,
+                        worker_generation,
                     ),
                 )
         except (KeyError, PortableWorktreeLeaseConflict):
@@ -771,6 +829,192 @@ class PortableSessionCatalog:
         lease = self.get_worktree_lease(Path(session["checkout"]))
         assert lease is not None
         return lease
+
+    def renew_worktree_lease(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_identity: ProcessIdentity,
+        worker_generation: int,
+        heartbeat_at: float | None = None,
+    ) -> PortableWorktreeLease:
+        """Renew only an exact live worker lease; session state is untouched."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        _validate_process_identity(process_identity)
+        _validate_worker_generation(worker_generation, required=True)
+        timestamp = self._clock() if heartbeat_at is None else heartbeat_at
+        _validate_timestamp(timestamp)
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE worktree_leases
+                    SET heartbeat_at = ?
+                    WHERE session_id = ?
+                      AND owner_id = ?
+                      AND process_id = ?
+                      AND process_start_fingerprint = ?
+                      AND worker_generation = ?
+                    """,
+                    (
+                        timestamp,
+                        session_id,
+                        owner_id,
+                        process_identity.pid,
+                        process_identity.creation_time,
+                        worker_generation,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PortableSessionCatalogError(
+                        "Portable worker heartbeat does not own the exact "
+                        "session lease generation."
+                    )
+                row = connection.execute(
+                    "SELECT * FROM worktree_leases WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                assert row is not None
+        except PortableSessionCatalogError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+        return _lease_from_row(row)
+
+    def bind_worktree_lease_worker(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        process_identity: ProcessIdentity,
+        worker_generation: int,
+    ) -> PortableWorktreeLease:
+        """Bind the exact worker generation to an unchanged owner process."""
+        _validate_session_id(session_id)
+        _validate_owner_id(owner_id)
+        _validate_process_identity(process_identity)
+        _validate_worker_generation(worker_generation, required=True)
+        timestamp = self._clock()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE worktree_leases
+                    SET worker_generation = ?, heartbeat_at = ?
+                    WHERE session_id = ? AND owner_id = ?
+                      AND process_id = ?
+                      AND process_start_fingerprint = ?
+                    """,
+                    (
+                        worker_generation,
+                        timestamp,
+                        session_id,
+                        owner_id,
+                        process_identity.pid,
+                        process_identity.creation_time,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PortableSessionCatalogError(
+                        "Portable worker cannot bind an unowned session lease."
+                    )
+                row = connection.execute(
+                    "SELECT * FROM worktree_leases WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                assert row is not None
+        except PortableSessionCatalogError:
+            raise
+        except sqlite3.DatabaseError as error:
+            raise PortableSessionCatalogError(
+                f"Portable Session Catalog write failed: {error}"
+            ) from error
+        return _lease_from_row(row)
+
+    def _reclaim_expired_lease(
+        self,
+        connection: sqlite3.Connection,
+        lease: PortableWorktreeLease,
+        *,
+        now: float,
+    ) -> None:
+        """Reclaim one lease only from a confirmed-dead exact process identity."""
+        if now - lease.heartbeat_at <= self._lease_timeout_seconds:
+            raise PortableWorktreeLeaseConflict(
+                lease,
+                reason="the renewable heartbeat has not expired",
+            )
+        fingerprint = lease.process_start_fingerprint
+        if fingerprint is None:
+            raise PortableWorktreeLeaseConflict(
+                lease,
+                reason="stable owner process identity is unavailable",
+            )
+        identity = ProcessIdentity(
+            pid=lease.process_id,
+            creation_time=fingerprint,
+        )
+        owner_state = self._process_probe(identity)
+        if owner_state is ProcessTreeState.RUNNING:
+            raise PortableWorktreeLeaseConflict(
+                lease,
+                reason="the exact owner process is still running",
+            )
+        if owner_state is ProcessTreeState.UNKNOWN:
+            raise PortableWorktreeLeaseConflict(
+                lease,
+                reason="owner process liveness is ambiguous",
+            )
+        connection.execute(
+            "DELETE FROM execution_claims WHERE session_id = ?",
+            (lease.session_id,),
+        )
+        connection.execute(
+            "DELETE FROM execution_requests WHERE session_id = ?",
+            (lease.session_id,),
+        )
+        connection.execute(
+            """
+            UPDATE sessions
+            SET status = ?, activity_summary = ?, updated_at = ?,
+                revision = revision + 1
+            WHERE session_id = ?
+            """,
+            (
+                PortableSessionStatus.INTERRUPTED.value,
+                "Worker owner confirmed dead",
+                now,
+                lease.session_id,
+            ),
+        )
+        self._session_revision(connection, lease.session_id)
+        cursor = connection.execute(
+            """
+            DELETE FROM worktree_leases
+            WHERE checkout = ?
+              AND session_id = ?
+              AND owner_id = ?
+              AND process_id = ?
+              AND process_start_fingerprint = ?
+              AND heartbeat_at = ?
+            """,
+            (
+                str(lease.checkout),
+                lease.session_id,
+                lease.owner_id,
+                lease.process_id,
+                fingerprint,
+                lease.heartbeat_at,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise PortableWorktreeLeaseConflict(lease)
 
     def get_worktree_lease(self, checkout: Path) -> PortableWorktreeLease | None:
         canonical_checkout = checkout.resolve()
@@ -1926,7 +2170,15 @@ class PortableSessionCatalog:
                                     AND acquired_at >= 0),
                             heartbeat_at REAL NOT NULL
                                 CHECK (typeof(heartbeat_at) IN ('integer', 'real')
-                                    AND heartbeat_at >= 0)
+                                    AND heartbeat_at >= 0),
+                            process_start_fingerprint INTEGER
+                                CHECK (process_start_fingerprint IS NULL
+                                    OR (typeof(process_start_fingerprint) = 'integer'
+                                        AND process_start_fingerprint > 0)),
+                            worker_generation INTEGER
+                                CHECK (worker_generation IS NULL
+                                    OR (typeof(worker_generation) = 'integer'
+                                        AND worker_generation > 0))
                         );
                         CREATE TABLE IF NOT EXISTS catalog_settings (
                             setting_key TEXT PRIMARY KEY
@@ -1964,7 +2216,7 @@ class PortableSessionCatalog:
                                 CHECK (typeof(acquired_at) IN ('integer', 'real')
                                     AND acquired_at >= 0)
                         );
-                        PRAGMA user_version = 4;
+                        PRAGMA user_version = 5;
                         """
                     )
                 if version == 1:
@@ -2081,6 +2333,37 @@ class PortableSessionCatalog:
                         """
                     )
                     connection.execute("PRAGMA user_version = 4")
+                    version = 4
+                if version == 4:
+                    columns = {
+                        row["name"]
+                        for row in connection.execute(
+                            "PRAGMA table_info(worktree_leases)"
+                        )
+                    }
+                    if not connection.in_transaction:
+                        connection.execute("BEGIN IMMEDIATE")
+                    if "process_start_fingerprint" not in columns:
+                        connection.execute(
+                            """
+                            ALTER TABLE worktree_leases
+                            ADD COLUMN process_start_fingerprint INTEGER
+                                CHECK (process_start_fingerprint IS NULL
+                                    OR (typeof(process_start_fingerprint) = 'integer'
+                                        AND process_start_fingerprint > 0))
+                            """
+                        )
+                    if "worker_generation" not in columns:
+                        connection.execute(
+                            """
+                            ALTER TABLE worktree_leases
+                            ADD COLUMN worker_generation INTEGER
+                                CHECK (worker_generation IS NULL
+                                    OR (typeof(worker_generation) = 'integer'
+                                        AND worker_generation > 0))
+                            """
+                        )
+                    connection.execute("PRAGMA user_version = 5")
                 self._validate_schema(connection)
                 self._validate_records(connection)
         except PortableSessionCatalogError:
@@ -2168,6 +2451,8 @@ class PortableSessionCatalog:
                 ("process_id", "INTEGER", 1, 0),
                 ("acquired_at", "REAL", 1, 0),
                 ("heartbeat_at", "REAL", 1, 0),
+                ("process_start_fingerprint", "INTEGER", 0, 0),
+                ("worker_generation", "INTEGER", 0, 0),
             ),
             "catalog_settings": (
                 ("setting_key", "TEXT", 0, 1),
@@ -2286,6 +2571,16 @@ class PortableSessionCatalog:
                 "check(typeof(process_id)='integer'andprocess_id>0)",
                 "check(typeof(acquired_at)in('integer','real')andacquired_at>=0)",
                 "check(typeof(heartbeat_at)in('integer','real')andheartbeat_at>=0)",
+                (
+                    "check(process_start_fingerprintisnullor("
+                    "typeof(process_start_fingerprint)='integer'and"
+                    "process_start_fingerprint>0))"
+                ),
+                (
+                    "check(worker_generationisnullor("
+                    "typeof(worker_generation)='integer'and"
+                    "worker_generation>0))"
+                ),
             ),
             "catalog_settings": (
                 "check(length(setting_key)between1and128)",
@@ -2537,6 +2832,11 @@ def _lease_from_row(row: sqlite3.Row) -> PortableWorktreeLease:
         _validate_process_id(row["process_id"])
         _validate_timestamp(row["acquired_at"])
         _validate_timestamp(row["heartbeat_at"])
+        process_start_fingerprint = row["process_start_fingerprint"]
+        if process_start_fingerprint is not None:
+            _validate_process_start_fingerprint(process_start_fingerprint)
+        worker_generation = row["worker_generation"]
+        _validate_worker_generation(worker_generation)
         return PortableWorktreeLease(
             checkout=Path(row["checkout"]),
             session_id=row["session_id"],
@@ -2544,6 +2844,8 @@ def _lease_from_row(row: sqlite3.Row) -> PortableWorktreeLease:
             process_id=row["process_id"],
             acquired_at=row["acquired_at"],
             heartbeat_at=row["heartbeat_at"],
+            process_start_fingerprint=process_start_fingerprint,
+            worker_generation=worker_generation,
         )
     except (TypeError, ValueError) as error:
         raise PortableSessionCatalogError(
@@ -2596,6 +2898,54 @@ def _validate_process_id(process_id: int) -> None:
         or process_id <= 0
     ):
         raise ValueError("Portable lease process identity must be a positive integer.")
+
+
+def _validate_process_start_fingerprint(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            "Portable lease process-start fingerprint must be a positive integer."
+        )
+
+
+def _validate_process_identity(identity: ProcessIdentity) -> None:
+    if not isinstance(identity, ProcessIdentity):
+        raise ValueError("Portable lease requires a stable process identity.")
+    _validate_process_id(identity.pid)
+    _validate_process_start_fingerprint(identity.creation_time)
+
+
+def _resolve_process_identity(
+    process_id: int | None,
+    process_identity: ProcessIdentity | None,
+) -> ProcessIdentity | None:
+    if process_identity is not None:
+        _validate_process_identity(process_identity)
+        if process_id is not None and process_id != process_identity.pid:
+            raise ValueError(
+                "Portable lease PID does not match its stable process identity."
+            )
+        return process_identity
+    if process_id is not None:
+        _validate_process_id(process_id)
+        return None
+    return capture_process_identity()
+
+
+def _validate_worker_generation(
+    worker_generation: int | None,
+    *,
+    required: bool = False,
+) -> None:
+    if worker_generation is None and not required:
+        return
+    if (
+        isinstance(worker_generation, bool)
+        or not isinstance(worker_generation, int)
+        or worker_generation <= 0
+    ):
+        raise ValueError(
+            "Portable worker generation must be a positive integer."
+        )
 
 
 def _validate_concurrency_limit(limit: int) -> int:
