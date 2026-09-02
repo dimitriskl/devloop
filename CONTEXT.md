@@ -12,6 +12,12 @@ Portable Application Shell, while execution remains based on Codex exec role
 sessions and PRD-local `*.loop.state.json` state.
 _Avoid_: CodexCLI, App Server Workflow Run
 
+**Portable Direct Run**:
+A Portable Dev Loop execution started from an accepted PRD Package through the
+Markdown issue runner without returning to planning intake. Its invocation
+contract is shared by the PowerShell, Bash, and Python entry points.
+_Avoid_: Planning intake, CodexCLI Workflow Run
+
 **Portable Dev Loop v3**:
 The third product generation of Portable Dev Loop, introduced by release
 `0.3.1`, that adds the machine-wide session catalog and multi-session Portable

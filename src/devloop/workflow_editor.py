@@ -151,6 +151,8 @@ class SelectionMenu:
 
 SelectOption = Callable[[SelectionMenu], str]
 
+OPTIONS_MENU_TITLE = "Dev Loop Options"
+ROLE_MENU_TITLE = "Models per role"
 _APPLICATION_SELECTION_COMMAND = "__application_selection_updated__"
 _APPLICATION_STEP_PREFIX = "__application_step__:"
 
@@ -1005,6 +1007,82 @@ def run_workflow_editor(
     backend_availability: BackendAvailabilityProbe | None = None,
     select_option: SelectOption | None = None,
 ) -> EditorResult:
+    return _editor_session(
+        configuration_path,
+        read_line=read_line,
+        read_command=read_command,
+        write=write,
+        terminal_width=terminal_width,
+        terminal_height=terminal_height,
+        current_workflow=current_workflow,
+        catalog=catalog,
+        open_capabilities=open_capabilities,
+        configuration_updates=configuration_updates,
+        model_catalog_loader=model_catalog_loader,
+        verify_model=verify_model,
+        backend_availability=backend_availability,
+        select_option=select_option,
+    ).run()
+
+
+def run_options_menu_editor(
+    configuration_path: Path,
+    *,
+    read_line: ReadLine,
+    read_command: ReadCommand | None = None,
+    write: WriteLine,
+    terminal_width: int,
+    terminal_height: int | None = None,
+    current_workflow: WorkflowDefinition | None = None,
+    catalog: PortableStepComponentCatalog | None = None,
+    open_capabilities: OpenCapabilities | None = None,
+    configuration_updates: ConfigurationUpdates | None = None,
+    model_catalog_loader: ModelCatalogLoader | None = None,
+    verify_model: ModelVerifier | None = None,
+    backend_availability: BackendAvailabilityProbe | None = None,
+    select_option: SelectOption | None = None,
+) -> EditorResult:
+    """Open Dev Loop Options, the numbered menu `/options` shows.
+
+    The same session that drives the full Workflow Editor drives this menu, so
+    catalog loading, model verification, and saving behave identically; only
+    the surface differs: every screen is a numbered list and 0 goes back.
+    """
+    return _editor_session(
+        configuration_path,
+        read_line=read_line,
+        read_command=read_command,
+        write=write,
+        terminal_width=terminal_width,
+        terminal_height=terminal_height,
+        current_workflow=current_workflow,
+        catalog=catalog,
+        open_capabilities=open_capabilities,
+        configuration_updates=configuration_updates,
+        model_catalog_loader=model_catalog_loader,
+        verify_model=verify_model,
+        backend_availability=backend_availability,
+        select_option=select_option,
+    ).run_role_models_menu()
+
+
+def _editor_session(
+    configuration_path: Path,
+    *,
+    read_line: ReadLine,
+    read_command: ReadCommand | None,
+    write: WriteLine,
+    terminal_width: int,
+    terminal_height: int | None,
+    current_workflow: WorkflowDefinition | None,
+    catalog: PortableStepComponentCatalog | None,
+    open_capabilities: OpenCapabilities | None,
+    configuration_updates: ConfigurationUpdates | None,
+    model_catalog_loader: ModelCatalogLoader | None,
+    verify_model: ModelVerifier | None,
+    backend_availability: BackendAvailabilityProbe | None,
+    select_option: SelectOption | None,
+) -> _WorkflowEditorSession:
     component_catalog = catalog or default_portable_component_catalog()
     height = terminal_height or max(10, shutil.get_terminal_size(fallback=(100, 24)).lines)
     return _WorkflowEditorSession(
@@ -1026,7 +1104,7 @@ def run_workflow_editor(
             model_catalog_cache_path(configuration_path, backend),
             backend,
         ),
-    ).run()
+    )
 
 
 class _WorkflowEditorSession:
@@ -1119,6 +1197,322 @@ class _WorkflowEditorSession:
             result = self._dispatch(command)
             if result is not None:
                 return result
+
+    def run_role_models_menu(self) -> EditorResult:
+        """Drive Dev Loop Options: numbered menus, 0 goes back or exits.
+
+        Save writes the draft and stays open; Exit reports APPLIED when any
+        Save happened so callers propagate the new default exactly as they did
+        for the full editor's Apply.
+        """
+        saved = False
+        last_saved = self._draft.workflow
+        while True:
+            recovering = (
+                self._default_recovery_state is not WorkflowDefaultRecoveryState.NORMAL
+            )
+            if recovering:
+                rows = ("Reset to the built-in workflow default", "Save")
+                description = self._role_menu_recovery_description()
+            else:
+                rows = ("Models per role", "Save")
+                description = ()
+            choice = self._choose_numbered(
+                OPTIONS_MENU_TITLE,
+                rows,
+                back_label="Exit",
+                description=description,
+            )
+            if choice is None:
+                if self._draft.workflow != last_saved:
+                    self._message("Unsaved changes discarded.")
+                return EditorResult.APPLIED if saved else EditorResult.CANCELLED
+            if recovering:
+                if choice == 1:
+                    self._dispatch_default_recovery("reset-workflow")
+                elif self._dispatch_default_recovery("apply") is EditorResult.APPLIED:
+                    saved = True
+                    last_saved = self._draft.workflow
+                    self._leave_default_recovery()
+            elif choice == 1:
+                self._role_menu_roles()
+            elif self._apply() is EditorResult.APPLIED:
+                saved = True
+                last_saved = self._draft.workflow
+
+    def _role_menu_recovery_description(self) -> tuple[str, ...]:
+        """Why the saved default was rejected, and what the two entries do now."""
+        error = self._default_recovery_error or "The stored default is invalid."
+        if self._default_recovery_state is WorkflowDefaultRecoveryState.APPLY_READY:
+            status = "Reset prepared; Save now replaces the invalid default atomically."
+        else:
+            status = "Choose Reset, then Save, to replace it with the built-in default."
+        return (f"The saved workflow default could not be loaded: {error}", status)
+
+    def _leave_default_recovery(self) -> None:
+        """After a repaired default is saved, load what a normal open would have."""
+        self._default_recovery_state = WorkflowDefaultRecoveryState.NORMAL
+        self._default_recovery_error = None
+        for backend in self._referenced_backends(self._draft.workflow):
+            self._load_initial_model_catalog(backend)
+
+    def _role_menu_roles(self) -> None:
+        """Models per role: every agent-backed step with its current settings."""
+        while True:
+            steps = self._role_menu_steps()
+            name_width = max((len(step.display_name) for step, _ in steps), default=0)
+            rows = tuple(
+                f"{step.display_name:<{name_width}}  "
+                f"{settings.model} / {settings.reasoning_effort}    "
+                f"{settings.backend.display_name}"
+                for step, settings in steps
+            )
+            choice = self._choose_numbered(ROLE_MENU_TITLE, rows, back_label="Back")
+            if choice is None:
+                return
+            self._role_menu_configure_step(steps[choice - 1][0].instance_id)
+
+    def _role_menu_configure_step(self, step_id: StepInstanceId) -> None:
+        """Backend, then model, then effort for one step; 0 steps back one screen.
+
+        Nothing reaches the draft until the effort is chosen, so Back at any
+        level leaves the step exactly as it was.
+        """
+        backends = tuple(ExecutionBackendId)
+        while True:
+            step = self._draft.workflow.step(step_id)
+            settings = step.execution_settings
+            assert settings is not None
+            reports = {report.backend: report for report in self._backend_availability()}
+            rows = tuple(
+                f"{backend.display_name:<12} "
+                f"{_backend_availability_annotation(reports.get(backend))}"
+                f"{' (current)' if backend is settings.backend else ''}"
+                for backend in backends
+            )
+            choice = self._choose_numbered(
+                f"Backend for {step.display_name}",
+                rows,
+                back_label="Back",
+                default_key=str(backends.index(settings.backend) + 1),
+            )
+            if choice is None:
+                return
+            catalog = self._role_menu_catalog(backends[choice - 1])
+            if catalog is None:
+                continue
+            if self._role_menu_choose_model(step, settings, catalog):
+                return
+
+    def _role_menu_catalog(self, backend: ExecutionBackendId) -> ModelCatalog | None:
+        """A fresh catalog for one backend, loading or retrying it on demand.
+
+        Picking a backend is the retry: a backend whose catalog failed earlier
+        is asked again here, so no separate Retry entry is needed.
+        """
+        catalog = self._model_catalogs.get(backend)
+        if catalog is None or not catalog.is_fresh:
+            if self._model_catalog_loader is not None:
+                self._refresh_model_catalog(backend)
+            else:
+                self._ensure_model_catalog(backend)
+            catalog = self._model_catalogs.get(backend)
+        if catalog is None:
+            self._message(
+                self._model_catalog_errors.get(backend)
+                or f"No {backend.display_name} Model Catalog is available."
+            )
+            return None
+        if not catalog.is_fresh:
+            self._message(
+                f"A fresh live {backend.display_name} Model Catalog is required to "
+                "change models; the stale cache is display-only."
+            )
+            return None
+        return catalog
+
+    def _role_menu_choose_model(
+        self,
+        step: WorkflowStep,
+        settings: StepExecutionSettings,
+        catalog: ModelCatalog,
+    ) -> bool:
+        """Model, then effort; True once the step is updated, False for Back."""
+        backend = catalog.backend
+        models = catalog.models
+        same_backend = backend is settings.backend
+        while True:
+            rows = tuple(
+                _model_option_label(model)
+                + (" (current)" if same_backend and model.model_id == settings.model else "")
+                for model in models
+            )
+            current = next(
+                (
+                    index
+                    for index, model in enumerate(models, start=1)
+                    if same_backend and model.model_id == settings.model
+                ),
+                1,
+            )
+            choice = self._choose_numbered(
+                f"Model for {step.display_name} — {backend.display_name}",
+                rows,
+                back_label="Back",
+                default_key=str(current),
+            )
+            if choice is None:
+                return False
+            model = models[choice - 1]
+            effort = self._role_menu_choose_effort(step, settings, backend, model)
+            if effort is None:
+                continue
+            if self._role_menu_commit(step, settings, catalog, model, effort):
+                return True
+
+    def _role_menu_choose_effort(
+        self,
+        step: WorkflowStep,
+        settings: StepExecutionSettings,
+        backend: ExecutionBackendId,
+        model: CatalogModel,
+    ) -> str | None:
+        efforts = model.reasoning_efforts
+        is_current_model = backend is settings.backend and model.model_id == settings.model
+        rows = tuple(
+            effort
+            + (
+                " (current)"
+                if is_current_model and effort == settings.reasoning_effort
+                else ""
+            )
+            for effort in efforts
+        )
+        current = next(
+            (
+                index
+                for index, effort in enumerate(efforts, start=1)
+                if is_current_model and effort == settings.reasoning_effort
+            ),
+            1,
+        )
+        choice = self._choose_numbered(
+            f"Effort for {step.display_name} — {model.display_name}",
+            rows,
+            back_label="Back",
+            default_key=str(current),
+        )
+        return None if choice is None else efforts[choice - 1]
+
+    def _role_menu_commit(
+        self,
+        step: WorkflowStep,
+        settings: StepExecutionSettings,
+        catalog: ModelCatalog,
+        model: CatalogModel,
+        effort: str,
+    ) -> bool:
+        """Verify once, then write backend, model, and effort to the draft together.
+
+        Exactly one verification call per selection, as in the full editor, and
+        the identifier persisted is the concrete one the backend reports so an
+        alias never reaches a saved default.
+        """
+        backend = catalog.backend
+        resolved = model.model_id
+        if catalog.verifies_selection:
+            verified = self._verified_model_id(backend, model.model_id)
+            if verified is None:
+                return False
+            resolved = verified
+        try:
+            resolved_model = catalog.selectable_model(resolved)
+        except ValueError as error:
+            self._message(f"Cannot set the model: {error}")
+            return False
+        if effort not in resolved_model.reasoning_efforts:
+            self._message(
+                f"{resolved_model.display_name} does not advertise reasoning effort "
+                f"{effort!r}; choose again."
+            )
+            return False
+        fast = settings.fast
+        if fast is FastPreference.ON and backend is not settings.backend:
+            fast = FastPreference.OFF
+            self._message("Fast was set to Off because the Execution Backend changed.")
+        elif fast is FastPreference.ON and not resolved_model.supports_fast:
+            fast = FastPreference.OFF
+            self._message(
+                f"{resolved_model.display_name} does not advertise Fast; Fast was set to Off."
+            )
+        try:
+            self._draft.set_execution_settings(
+                step.instance_id,
+                StepExecutionSettings(backend, resolved, effort, fast),
+            )
+        except ValueError as error:
+            self._message(f"Cannot set the model: {error}")
+            return False
+        if resolved != model.model_id:
+            self._message(
+                f"{model.model_id} resolved to {resolved}; the pinned identifier "
+                "was saved so reruns keep using the same model."
+            )
+        return True
+
+    def _role_menu_steps(
+        self,
+    ) -> tuple[tuple[WorkflowStep, StepExecutionSettings], ...]:
+        """The Workflow Steps Models per role can configure, in workflow order."""
+        return tuple(
+            (step, step.execution_settings)
+            for step in self._draft.workflow.steps
+            if step.execution_settings is not None
+            and self._catalog.resolve(step.component_id).is_agent_backed
+        )
+
+    def _choose_numbered(
+        self,
+        title: str,
+        rows: tuple[str, ...],
+        *,
+        back_label: str,
+        description: tuple[str, ...] = (),
+        default_key: str = "1",
+    ) -> int | None:
+        """One numbered screen: the chosen one-based position, or None for 0.
+
+        Both surfaces show the same numbers. The application menu carries them
+        in its labels and accepts a typed digit; plain mode prints the list and
+        reads the digit. Anything else re-prompts, so a stray key cannot pick.
+        """
+        options = (
+            *((str(index), f"{index}. {row}") for index, row in enumerate(rows, start=1)),
+            ("0", f"0. {back_label}"),
+        )
+        width = max(1, self._terminal_width)
+        rendered = "\n".join(
+            _fit_to_width(line, width)
+            for line in (title, *description, *(label for _key, label in options))
+        )
+        while True:
+            raw = self._choose_menu(
+                SelectionMenu(
+                    title=title,
+                    options=options,
+                    default_key=default_key,
+                    cancel_key="0",
+                    description=description,
+                ),
+                fallback_prompt="Option number: ",
+                fallback_content=rendered,
+            ).strip()
+            if raw == "0":
+                return None
+            position = _parse_one_based_integer(raw)
+            if position is not None and position <= len(rows):
+                return position
+            self._message("Choose an option by number, or 0 to go back.")
 
     def _read_application_command(self) -> str:
         from .portable_runtime import active_portable_runtime

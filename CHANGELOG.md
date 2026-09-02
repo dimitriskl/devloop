@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `/options` now opens Dev Loop Options, a numbered menu (`1. Models per role`,
+  `2. Save`, `0. Exit`) that sets each agent-backed step's Execution Backend,
+  model, and reasoning effort through numbered backend, model, and effort
+  screens. `0` goes back at every level and nothing changes until the effort is
+  chosen. Save writes the User Workflow Default and keeps the menu open; Exit
+  discards unsaved changes with a notice. A rejected saved default offers Reset
+  then Save. The full Workflow Editor (budgets, guidance, capabilities, and
+  structure) remains in the codebase but is no longer opened by `/options`.
 - The built-in Analysis, Development, Security Review, Final Review, and QA
   Workflow Steps now start with distinct role-specific Step Guidance. New
   component instances receive their component guidance default, while resetting

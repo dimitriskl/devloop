@@ -22,7 +22,7 @@ USER_WORKFLOW_DEFAULT_HASH_KEY = "user_workflow_default_hash"
 PORTABLE_PLANNER_CONFIGURATION_FILE = "devloop-plan.json"
 SUPERSEDED_WORKFLOW_DEFAULT_REMEDY = (
     "The saved Workflow Default must be recreated: open /options, choose "
-    "reset-workflow, then apply."
+    "1 (Reset to the built-in workflow default), then 2 (Save)."
 )
 
 

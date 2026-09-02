@@ -42,7 +42,7 @@ After the target checkout is selected, Dev Loop opens a replacing startup menu:
 
 - **Start a new change**
 - **Resume an unfinished PRD**
-- **Workflow options** (same editor as `/options`)
+- **Workflow options** (same menu as `/options`)
 - **Exit**
 
 On an interactive terminal, use Up/Down and Enter to choose an item; Esc exits
@@ -122,17 +122,34 @@ Clipboard capture depends on tools already present on most machines:
 | --- | --- |
 | Alt+V | attach a screenshot from the clipboard (use `/paste` if unavailable) |
 | `/paste` | attach a screenshot from the clipboard |
-| `/options` | open the Workflow Editor for defaults and resumable preferences |
+| `/options` | open Dev Loop Options to set each step's backend, model, and reasoning effort |
 | `/resume` | list unfinished PRDs and continue the selected handoff |
 | `/status` | show the stage banner, artifacts, and selection summary |
 | `/done` | detect the PRD and issue pack now (or enter paths manually) |
 | `/help` | show this help |
 | `/quit` | abort planning (never required to continue) |
 
-## `/options`: Workflow Editor And Capabilities
+## `/options`: Dev Loop Options
 
-Typing `/options` at any planning or development-handoff prompt opens the
-transactional terminal Workflow Editor. The color-aware full-screen layout keeps
+Typing `/options` at any planning or development-handoff prompt opens Dev Loop
+Options, a numbered menu with `1. Models per role`, `2. Save`, and `0. Exit`.
+Models per role lists every agent-backed Workflow Step with its current model,
+reasoning effort, and Execution Backend. Choosing a step opens three numbered
+screens in turn: the Execution Backend (Codex CLI or Claude Code, annotated with
+its availability on this machine), then that backend's models, then the
+reasoning efforts the chosen model advertises. `0` goes back one screen at every
+level, and the step is unchanged until the effort is chosen. Picking a backend
+loads its Model Catalog, or retries it after a failure. Save writes the User
+Workflow Default and keeps the menu open; Exit discards unsaved changes with a
+notice. In the full-screen application the same screens are arrow-key menus that
+also accept the typed number; on redirected terminals they print as numbered
+lists. If the saved default is rejected, the top menu instead offers `1. Reset
+to the built-in workflow default`, then `2. Save`.
+
+### Full Workflow Editor reference
+
+The full Workflow Editor described below remains in the codebase but is not
+opened by `/options` in this release. The color-aware full-screen layout keeps
 Workflow Steps in the left pane, the selected step's settings in the right
 pane, feedback in the window, and common shortcuts in the bottom action bar.
 Use Up/Down to select a Primary Path step, Enter or F9 for the complete action
@@ -245,7 +262,7 @@ new preferences. Workflow structure and bindings remain fixed for the existing
 run and apply only to new runs.
 
 If live catalog discovery or exact-setting validation fails before an attempt,
-the preflight prompt can open `/options`, run `retry-catalog`, and revalidate
+the preflight prompt can open `/options` or run `retry-catalog`, then revalidate
 without exiting to an unavailable command surface. A resumed run can therefore
 repair its execution preferences while retaining the same workflow graph and
 recovery cursor.
@@ -275,8 +292,8 @@ banner and a one-screen summary: the PRD path, issue index path, which issues
 will run, the implementation worktree path (or "disabled" if you chose not to
 use one), the branch name, and a line confirming the self-improvement wiki is
 always on (read before development, and updated after). Press Enter to start
-development immediately with those defaults. Type `/options` to change the
-User Workflow Default or inspect a reused worktree's Current Run snapshot. Type
+development immediately with those defaults. Type `/options` to change each
+step's backend, model, and reasoning effort in the User Workflow Default. Type
 `/run-options` to change the start issue, whether to run every pending issue,
 whether to use a dedicated worktree, the worktree parent path and folder name,
 or the branch name before starting. Type `/quit` to stop without starting

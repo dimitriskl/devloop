@@ -42,12 +42,25 @@ from devloop.portable_workflow import (
 )
 from devloop.state import LoopStateWriter
 from devloop.templates import BundleContext, load_preset
-from devloop.workflow_editor import WorkflowDraft
+from devloop.workflow_editor import WorkflowDraft, run_workflow_editor
 from devloop.workflow_defaults import WorkflowDefaultStore
 from tests.terminal_safety import (
     HOSTILE_TERMINAL_TEXT,
     assert_terminal_text_is_safe,
 )
+
+
+
+def _live_codex_catalog() -> ModelCatalog:
+    return ModelCatalog(
+        models=(
+            CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
+            CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
+            CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
+        ),
+        fetched_at="2026-07-16T12:00:00",
+        source=CatalogSource.LIVE,
+    )
 
 
 class PlanningExecutionSettingsTests(unittest.TestCase):
@@ -637,7 +650,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             with mock.patch.object(
                 interactive_runner,
                 "read_prompt",
-                side_effect=["/options", "reset-workflow", "apply"],
+                side_effect=["/options", "1", "2", "0"],
             ), redirect_stdout(StringIO()):
                 workflow = interactive_runner.preflight_analysis_workflow(
                     bundle_root=root,
@@ -676,7 +689,7 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             with mock.patch.object(
                 interactive_runner,
                 "read_prompt",
-                side_effect=["/options", "cancel", "/quit"],
+                side_effect=["/options", "0", "/quit"],
             ), redirect_stdout(StringIO()):
                 workflow = interactive_runner.preflight_analysis_workflow(
                     bundle_root=root,
@@ -1104,7 +1117,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
             ), mock.patch.object(
                 interactive_runner,
                 "read_prompt",
-                side_effect=["/options", "current", "cancel", "/quit"],
+                side_effect=["/options", "0", "/quit"],
             ), mock.patch.object(
                 interactive_runner,
                 "terminal_width",
@@ -1127,7 +1140,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertFalse(source_state_was_created)
-        self.assertIn("Current Run (read-only)", output.getvalue())
+        self.assertIn("Dev Loop Options", output.getvalue())
 
 
 class WorktreePromptTests(unittest.TestCase):
@@ -1368,10 +1381,12 @@ class PlanStateTests(unittest.TestCase):
                 "terminal_width",
                 return_value=100,
             ), redirect_stdout(output):
-                interactive_runner.run_options_menu(
-                    root,
-                    interactive_runner.catalog_module.Selection.defaults(),
+                run_workflow_editor(
                     state_path,
+                    read_line=interactive_runner.read_prompt,
+                    write=print,
+                    terminal_width=100,
+                    catalog=build_portable_component_catalog(root),
                 )
 
             stored = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1398,10 +1413,12 @@ class PlanStateTests(unittest.TestCase):
                 "terminal_width",
                 return_value=100,
             ), redirect_stdout(StringIO()):
-                interactive_runner.run_options_menu(
-                    root,
-                    interactive_runner.catalog_module.Selection.defaults(),
+                run_workflow_editor(
                     configuration_path,
+                    read_line=interactive_runner.read_prompt,
+                    write=print,
+                    terminal_width=100,
+                    catalog=build_portable_component_catalog(root),
                 )
 
             issue_path = root / "0004-custom.md"
@@ -1504,7 +1521,7 @@ class PlanStateTests(unittest.TestCase):
             ("security-review", "reviewer"),
         )
 
-    def test_options_opens_the_public_workflow_editor_and_applies_future_defaults(self) -> None:
+    def test_options_changes_a_step_model_and_applies_future_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             state_path = root / "devloop-plan.json"
@@ -1512,14 +1529,20 @@ class PlanStateTests(unittest.TestCase):
             with mock.patch.object(
                 interactive_runner,
                 "read_prompt",
-                side_effect=["3", "rename", "Planner Review", "apply"],
+                # roles, Security Review, Codex CLI, Luna, high, back, Save, Exit
+                side_effect=["1", "3", "1", "1", "1", "0", "2", "0"],
             ), mock.patch.object(
                 interactive_runner,
                 "terminal_width",
                 return_value=100,
                 create=True,
             ), redirect_stdout(StringIO()) as output:
-                interactive_runner.run_options_menu(root, selection, state_path)
+                interactive_runner.run_options_menu(
+                    root,
+                    selection,
+                    state_path,
+                    model_catalog_loader=_live_codex_catalog,
+                )
 
             stored = WorkflowDefaultStore(
                 state_path,
@@ -1529,50 +1552,40 @@ class PlanStateTests(unittest.TestCase):
                 state_path
             )
 
-        self.assertIn("Workflow Editor", output.getvalue())
+        settings = stored.step(SECURITY_REVIEW_STEP_ID).execution_settings
+        assert settings is not None
+        self.assertIn("Dev Loop Options", output.getvalue())
         self.assertNotIn("Planning skills", output.getvalue())
-        self.assertEqual(
-            stored.step(SECURITY_REVIEW_STEP_ID).display_name,
-            "Planner Review",
-        )
+        self.assertEqual((settings.model, settings.reasoning_effort), ("gpt-5.6-luna", "high"))
         self.assertEqual(restored_selection.to_dict(), selection.to_dict())
 
-    def test_options_model_picker_stays_in_the_full_screen_application(self) -> None:
+    def test_options_menu_stays_in_the_full_screen_application(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             state_path = root / "devloop-plan.json"
-            live_catalog = ModelCatalog(
-                models=(
-                    CatalogModel("gpt-5.6-luna", "Luna", "", ("high",)),
-                    CatalogModel("gpt-5.6-sol", "Sol", "", ("xhigh",)),
-                    CatalogModel("gpt-5.6-terra", "Terra", "", ("high",)),
-                ),
-                fetched_at="2026-07-16T12:00:00",
-                source=CatalogSource.LIVE,
-            )
 
             with mock.patch.object(
                 interactive_runner,
-                "read_workflow_command",
-                side_effect=["model", "cancel"],
-            ), mock.patch.object(
-                interactive_runner,
                 "read_prompt",
-                side_effect=AssertionError("model picker used line input"),
+                side_effect=AssertionError("options menu used line input"),
             ), mock.patch.object(
                 interactive_runner,
                 "choose_menu_option",
-                return_value="cancel",
+                return_value="0",
             ) as choose_menu, redirect_stdout(StringIO()):
                 interactive_runner.run_options_menu(
                     root,
                     interactive_runner.catalog_module.Selection.defaults(),
                     state_path,
-                    model_catalog_loader=lambda: live_catalog,
+                    model_catalog_loader=_live_codex_catalog,
                 )
 
         choose_menu.assert_called_once()
-        self.assertEqual(choose_menu.call_args.kwargs["cancel_key"], "cancel")
+        self.assertEqual(
+            [key for key, _label in choose_menu.call_args.args[0]],
+            ["1", "2", "0"],
+        )
+        self.assertEqual(choose_menu.call_args.kwargs["cancel_key"], "0")
 
     def test_workflow_text_entry_replaces_the_previous_application_view(self) -> None:
         terminal_stdout = mock.Mock()
@@ -1622,40 +1635,41 @@ class PlanStateTests(unittest.TestCase):
             with mock.patch.object(
                 interactive_runner,
                 "read_prompt",
-                side_effect=["3", "rename", "Next Run Review", "apply"],
+                # roles, Security Review, Codex CLI, Luna, high, back, Save, Exit
+                side_effect=["1", "3", "1", "1", "1", "0", "2", "0"],
             ), mock.patch.object(
                 interactive_runner,
                 "terminal_width",
                 return_value=100,
-            ), redirect_stdout(StringIO()) as output:
+            ), redirect_stdout(StringIO()):
                 interactive_runner.run_options_menu(
                     root,
                     interactive_runner.catalog_module.Selection.defaults(),
                     state_path,
                     current_workflow=current_workflow,
                     current_run_issues_index=issues_index,
+                    model_catalog_loader=_live_codex_catalog,
                 )
 
             stored = WorkflowDefaultStore(state_path, catalog).load()
             refreshed = LoopStateWriter(issues_index)
 
-        self.assertIn("Current Run hash", output.getvalue())
-        self.assertEqual(
-            stored.step(SECURITY_REVIEW_STEP_ID).display_name,
-            "Next Run Review",
-        )
-        self.assertEqual(
+        stored_settings = stored.step(SECURITY_REVIEW_STEP_ID).execution_settings
+        assert stored_settings is not None
+        self.assertEqual(stored_settings.model, "gpt-5.6-luna")
+        refreshed_settings = (
             refreshed.resolved_workflow(catalog)
             .step(SECURITY_REVIEW_STEP_ID)
-            .display_name,
-            "Next Run Review",
+            .execution_settings
         )
+        assert refreshed_settings is not None
+        self.assertEqual(refreshed_settings.model, "gpt-5.6-luna")
         self.assertEqual(
             refreshed.state["issues"]["0001"]["current_step_instance_id"],
             str(SECURITY_REVIEW_STEP_ID),
         )
 
-    def test_cancel_discards_staged_capability_and_workflow_changes(self) -> None:
+    def test_exit_without_save_discards_workflow_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state_path = Path(raw) / "devloop-plan.json"
             bundle_root = Path(__file__).resolve().parents[1]
@@ -1665,14 +1679,8 @@ class PlanStateTests(unittest.TestCase):
             with mock.patch.object(
                 interactive_runner,
                 "read_prompt",
-                side_effect=[
-                    "capabilities",
-                    "1",
-                    "angular-typescript-developer",
-                    "1",
-                    "4",
-                    "cancel",
-                ],
+                # roles, Security Review, Codex CLI, Luna, high, back, Exit
+                side_effect=["1", "3", "1", "1", "1", "0", "0"],
             ), mock.patch.object(
                 interactive_runner,
                 "terminal_width",
@@ -1682,6 +1690,7 @@ class PlanStateTests(unittest.TestCase):
                     bundle_root,
                     selection,
                     state_path,
+                    model_catalog_loader=_live_codex_catalog,
                 )
 
         self.assertEqual(selection.to_dict(), original)

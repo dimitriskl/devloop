@@ -113,7 +113,7 @@ When no `--goal` or `--prd` is supplied, startup opens a replacing terminal menu
 
 1. **Start a new change**.
 2. **Resume an unfinished PRD**.
-3. **Workflow options** — opens the same Workflow Editor as `/options`.
+3. **Workflow options** — opens the same Dev Loop Options menu as `/options`.
 4. **Exit** — leave planning without starting a session.
 
 Each submenu replaces the previous screen instead of appending to it. The resume
@@ -142,8 +142,9 @@ instances of the same Step Type. Each instance keeps its own identity,
 execution settings, capabilities, guidance, runtime state, and attempt history.
 
 Press Enter on the development summary to start with the shown defaults. Use
-`/run-options` to adjust this launch before starting, or `/options` to edit the
-User Workflow Default. Apply replaces every non-structural preference on
+`/run-options` to adjust this launch before starting, or `/options` to change
+each step's backend, model, and reasoning effort in the User Workflow Default.
+Save replaces every non-structural preference on
 matching steps in the selected unfinished run, including the Execution Backend,
 model, reasoning effort, Fast preference, execution budget, capabilities, and
 guidance. It preserves completed attempt history and cannot change an agent turn
@@ -176,8 +177,7 @@ against your own account before the run starts; if that is refused, the message
 names the step and the provider's reason, and the fix is to choose another model
 in `/options`. Fast Off is passed explicitly, so a
 global Codex `/fast` setting cannot change the saved step choice.
-Use `budget` to edit the selected step's separate timeout and checkpoint
-inactivity deadline. Budget changes never alter model, reasoning, or Fast.
+Execution budgets are not editable from `/options` in this release.
 When preflight fails interactively, choose `/options` to repair the workflow
 default or `retry-catalog` to retry live discovery before execution.
 
@@ -209,7 +209,7 @@ Inside `devloop-plan`, these commands are available:
 | --- | --- |
 | Alt+V | Attach a clipboard screenshot in a real interactive terminal. |
 | `/paste` | Attach a clipboard screenshot when Alt+V is unavailable. |
-| `/options` | Open the Workflow Editor for defaults and resumable preferences. |
+| `/options` | Open Dev Loop Options to set each step's backend, model, and reasoning effort. |
 | `/resume` | List unfinished PRDs and continue the selected development handoff. |
 | `/status` | Show the stage banner, artifacts, and current selection. |
 | `/done` | Detect PRD/issues now or enter artifact paths manually. |
@@ -374,10 +374,10 @@ attempt back as clean. Old User Workflow Defaults on schemas v1 and v2 are
 intentionally rejected; repair or recreate an old local default in `/options`.
 A hash-valid v2 Current Run is migrated automatically at the run-state boundary.
 When preflight finds a superseded or malformed User Workflow Default,
-`/options` opens a fail-closed recovery mode instead of loading the rejected
-content as a draft. Use `reset-workflow` and then `apply` to atomically replace
-it with the built-in v3 default. `cancel` leaves the stored configuration
-unchanged.
+`/options` opens a fail-closed recovery menu instead of loading the rejected
+content as a draft. Choose `1. Reset to the built-in workflow default` and then
+`2. Save` to atomically replace it with the built-in v3 default. `0. Exit`
+leaves the stored configuration unchanged.
 
 ### Breaking change: schema v3 records an Execution Backend
 
@@ -386,8 +386,8 @@ Step's Step Execution Settings. Two consequences apply the first time you run
 this version:
 
 - A saved Workflow Default created before this change is rejected and must be
-  recreated. Open `/options`, choose `reset-workflow`, then `apply`. Reapply any
-  per-step model, reasoning-effort, Fast, budget, capability, and guidance
+  recreated. Open `/options`, choose `1. Reset to the built-in workflow default`,
+  then `2. Save`. Reapply any per-step backend, model, and reasoning-effort
   choices you had made.
 - An unfinished Workflow Run with a valid v2 snapshot is migrated in place.
   Its Codex-only settings become `CODEX_CLI` Step Execution Settings, its
@@ -397,9 +397,9 @@ this version:
 
 Both cases are handled without a stack trace. Existing Codex-backed Workflow
 Steps behave exactly as before once the default is recreated or the run is
-migrated: the Execution Backend is displayed in the `/options` Selection
-Preview, and the `backend` action changes it for any agent-backed Workflow Step
-in the editable Workflow Default scope.
+migrated: the Execution Backend is displayed beside each step in the `/options`
+Models per role list, and choosing a step there changes it for any agent-backed
+Workflow Step in the User Workflow Default.
 
 Dependency scheduler state is stored in the same JSON file. It includes ready
 and waiting projections, normal attempts, per-issue additional-pass counters,
@@ -422,8 +422,8 @@ Bundled skills live under `skills/codex/`. Agent reference files live under
 `agents/codex/`. The runner can read these bundled copies directly, so global
 installation is optional.
 
-Use `/options` during planning to open the Workflow Editor, then enter
-`capabilities` to search and toggle Skills and Agent References for the selected
+The full Workflow Editor, which `/options` does not open in this release, has a
+`capabilities` command to search and toggle Skills and Agent References for the selected
 Step Instance, reset its component defaults, or install new capabilities from
 GitHub. Duplicate component types can therefore use different profiles.
 Required capabilities are locked with the component-contract reason. Use

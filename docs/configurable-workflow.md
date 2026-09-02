@@ -38,8 +38,9 @@ supplies defaults for every backend, and a new Workflow Step starts on
 
 Each unsupported-schema rejection is turned into an actionable operator message
 at the boundary that owns the document. `workflow_defaults.py` states that a
-saved Workflow Default must be recreated in `/options` with `reset-workflow`
-then `apply`, and the Workflow Editor opens its fail-closed recovery mode.
+saved Workflow Default must be recreated in `/options` with `1. Reset to the
+built-in workflow default` then `2. Save`, and Dev Loop Options opens its
+fail-closed recovery mode.
 `state.py` migrates a valid v2 run automatically; it rejects v1 or malformed
 state and names the PRD-local loop-state file. Neither path surfaces a traceback.
 

@@ -90,7 +90,7 @@ from .workflow_editor import (
     SelectionMenu,
     WorkflowDraft,
     backend_model_catalog_loader,
-    run_workflow_editor,
+    run_options_menu_editor,
     single_backend_model_catalog_loader,
 )
 from .workflow_defaults import (
@@ -601,7 +601,8 @@ def preflight_analysis_workflow(
                 f"{safe_error}"
             )
             print(
-                "Recovery: /options opens the Workflow Editor; retry-catalog "
+                "Recovery: /options opens Dev Loop Options, where Models per role "
+                "changes each step's backend, model, and reasoning effort; retry-catalog "
                 "retries live discovery for every backend this Workflow "
                 "references; /quit stops planning."
             )
@@ -1081,7 +1082,7 @@ def run_options_menu(
     )
     workflow_options_state = WorkflowOptionsMenuState()
     width, height = terminal_dimensions()
-    result = run_workflow_editor(
+    result = run_options_menu_editor(
         state_path,
         read_line=read_workflow_value,
         read_command=lambda prompt: read_workflow_command(

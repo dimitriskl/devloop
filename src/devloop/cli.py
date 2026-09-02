@@ -78,7 +78,7 @@ from .workflow_defaults import (
 )
 from .workflow_editor import (
     backend_model_catalog_loader,
-    run_workflow_editor,
+    run_options_menu_editor,
 )
 from . import statusui
 from .statusui import Stage
@@ -1603,7 +1603,8 @@ def resolve_run_workflow_with_repair(
                 )
             else:
                 writer(
-                    "Recovery: /options opens the Workflow Editor; retry-catalog "
+                    "Recovery: /options opens Dev Loop Options, where Models per role "
+                    "changes each step's backend, model, and reasoning effort; retry-catalog "
                     "retries live discovery for every backend this Workflow "
                     "references; /quit stops the run."
                 )
@@ -1638,7 +1639,7 @@ def resolve_run_workflow_with_repair(
                     current_workflow = state_writer.resolved_workflow(catalog)
                 except ValueError:
                     current_workflow = None
-            run_workflow_editor(
+            run_options_menu_editor(
                 user_workflow_path,
                 read_line=reader,
                 write=writer,

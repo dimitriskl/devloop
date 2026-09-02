@@ -444,7 +444,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         ValueError,
                         "superseded by 'devloop.portable-workflow/v3'.*recreated"
-                        ".*/options.*reset-workflow.*apply",
+                        ".*/options.*Reset.*Save",
                     ):
                         WorkflowDefaultStore(configuration_path, catalog).load_saved()
 
@@ -1253,7 +1253,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
 
             with mock.patch.object(
                 cli,
-                "run_workflow_editor",
+                "run_options_menu_editor",
                 side_effect=repair,
             ) as editor:
                 workflow = cli.resolve_run_workflow_with_repair(
@@ -1362,7 +1362,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
 
             with mock.patch.object(
                 cli,
-                "run_workflow_editor",
+                "run_options_menu_editor",
                 side_effect=repair,
             ) as editor:
                 resolved = cli.resolve_run_workflow_with_repair(
@@ -1426,7 +1426,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             issue_index = root / "README.md"
             issue_index.write_text("", encoding="utf-8")
             catalog = default_portable_component_catalog()
-            actions = iter(("/options", "reset-workflow", "apply"))
+            actions = iter(("/options", "1", "2", "0"))
 
             workflow = cli.resolve_run_workflow_with_repair(
                 LoopStateWriter(issue_index),
@@ -1458,7 +1458,7 @@ class StepExecutionSettingsTests(unittest.TestCase):
             configuration_path.write_text(original, encoding="utf-8")
             issue_index = root / "README.md"
             issue_index.write_text("", encoding="utf-8")
-            actions = iter(("/options", "cancel", "/quit"))
+            actions = iter(("/options", "0", "/quit"))
 
             workflow = cli.resolve_run_workflow_with_repair(
                 LoopStateWriter(issue_index),

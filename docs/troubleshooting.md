@@ -58,11 +58,12 @@ settings, capabilities, outcomes, and any preserved guidance. Guidance marked
 
 Portable Dev Loop intentionally accepts only `devloop.portable-workflow/v3`.
 User Workflow Defaults on both v1 and v2 are rejected explicitly. From planning
-or implementation preflight, open `/options`; the editor enters a fail-closed
+or implementation preflight, open `/options`; the menu enters a fail-closed
 recovery mode and does not load rejected content as an editable draft. Choose
-`reset-workflow` and then `apply` to atomically replace the invalid default with
-the built-in v3 workflow, then reapply your per-step choices. Choose `cancel` to
-leave the stored configuration byte-for-byte unchanged. You may instead repair
+`1. Reset to the built-in workflow default` and then `2. Save` to atomically
+replace the invalid default with the built-in v3 workflow, then reapply your
+per-step choices. Choose `0. Exit` to leave the stored configuration
+byte-for-byte unchanged. You may instead repair
 the local JSON outside a running Current Run. Malformed UUIDs, duplicate names,
 unknown Step Types, invalid routes, scopes, bindings, and unknown fields fail
 closed rather than being ignored.
@@ -86,8 +87,9 @@ that Workflow Step.
 ## Model discovery or execution preflight fails
 
 Confirm the Execution Backend the step names is installed and authenticated —
-the `backend` menu in `/options` annotates each backend's availability — then use
-`retry-catalog` in the Workflow Editor. A stale cache is display-only and cannot
+the backend screen in `/options` annotates each backend's availability — then
+choose that backend again in `/options`, which retries its catalog, or run
+`retry-catalog` at the preflight prompt. A stale cache is display-only and cannot
 authorize a run, for either backend. If preflight names a Step Display Name and
 model, reasoning effort, or Fast setting, edit that exact Workflow Default step
 in `/options` and retry. Dev Loop does not substitute another model, lower

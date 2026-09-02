@@ -306,39 +306,33 @@ Ubuntu/macOS:
 ```
 
 The session shows a stage banner (`analysis -> development -> review -> qa`).
-At startup the replacing menu offers **Start a new change**, **Resume an unfinished PRD**, **Workflow options** (same editor as `/options`), or **Exit**. Resume
+At startup the replacing menu offers **Start a new change**, **Resume an unfinished PRD**, **Workflow options** (same menu as `/options`), or **Exit**. Resume
 lists only PRD/issue packs with unfinished issues and shows completion counts,
 the active issue when known, and last activity. The same catalog is available
 through `/resume` during planning. Chat with Codex to sharpen a new change; when
 the PRD and issue pack are written, press Enter on the summary screen to start
-development. Type `/options` at any prompt to open the Workflow Editor for
-workflow defaults, including an independent `backend` choice for each
-agent-backed step, `model`, `reasoning`, and `fast` choices scoped to that
-backend, and a separate `budget` timeout/checkpoint for every step. The
-`backend` menu annotates each Execution Backend with whether it is installed
-here, and changing a step's backend moves its model and reasoning effort to that
-backend's component defaults. Because a step is only ever offered its own
-backend's models, the model list names that backend and carries a `backend` entry
-that moves the step to the other backend and re-opens on its models, so a Claude
-model is two selections away from a Codex CLI list. Selecting a Claude model
-verifies it against your
-own account once before it is saved, and a short alias is stored as the pinned
-identifier it resolves to. Starting a run authorizes it against every Execution
-Backend the workflow uses and no other, verifying each distinct Claude model once
-more, so authorizing a run and executing its Workflow Step attempts never need a
-provider the workflow does not name. The post-run self-improvement wiki compiler
-is the one exception: it still runs on Codex, so a fully Codex-free run needs
-`--no-self-improvement-wiki`. Its `capabilities` command still lets you
-search and toggle agents and skills for the selected Step Instance, reset that
-profile to its component defaults, or install new ones from GitHub. Required
-capabilities stay enabled and show the component-contract reason. Applying the
-draft makes capability changes available to matching steps when unfinished work
-is resumed, and model, effort, and Fast changes available only to steps that keep
-their snapshotted Execution Backend; it never changes an agent turn already
-in progress. Structural, budget, and guidance edits apply to new runs. Use `guidance`
-for bounded multiline instructions specific to the selected step; the editor
-shows that contracts, execution policy, permissions, safety, and output rules
-take precedence. Type `/help` for all commands. The
+development. Type `/options` at any prompt to open Dev Loop Options, a numbered
+menu: `1. Models per role`, `2. Save`, `0. Exit`. Models per role lists every
+agent-backed step (Analysis, Development, Security Review, Final Review, QA) with
+its current model, reasoning effort, and Execution Backend. Choose a step, then
+its backend (Codex CLI or Claude Code, annotated with whether each is installed
+here), then a model from that backend's catalog, then a reasoning effort the
+model advertises. `0` goes back one screen at every level, and nothing changes
+until the effort is chosen, so steps can mix backends and models freely. Save
+writes the User Workflow Default and keeps the menu open; Exit discards unsaved
+changes with a notice. Selecting a Claude model verifies it against your own
+account once before it is stored, and a short alias is stored as the pinned
+identifier it resolves to. Fast stays on only when the step keeps its backend
+and the new model advertises Fast. Starting a run authorizes it against every
+Execution Backend the workflow uses and no other, verifying each distinct Claude
+model once more, so authorizing a run and executing its Workflow Step attempts
+never need a provider the workflow does not name. The post-run self-improvement
+wiki compiler is the one exception: it still runs on Codex, so a fully
+Codex-free run needs `--no-self-improvement-wiki`. Saved backend, model, effort,
+and Fast changes reach matching steps in unfinished runs when they are resumed;
+they never change an agent turn already in progress. The full Workflow Editor
+(execution budgets, Step Guidance, capabilities, and workflow structure) is not
+opened by `/options` in this release. Type `/help` for all commands. The
 self-improvement wiki is always used: planning reads it, and every run updates
 it.
 
