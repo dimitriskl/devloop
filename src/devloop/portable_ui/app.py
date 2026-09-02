@@ -1215,10 +1215,10 @@ class PortableApplicationShell(App[None]):
         self._session_actions_active = False
         previous = self._session_snapshots.get(snapshot.session_id)
         self._session_snapshots[snapshot.session_id] = snapshot
-        if (
-            snapshot.input_request is not None
-            and (previous is None or previous.input_request != snapshot.input_request)
-        ):
+        input_request_arrived = snapshot.input_request is not None and (
+            previous is None or previous.input_request != snapshot.input_request
+        )
+        if input_request_arrived:
             self._session_input_rejections.pop(snapshot.session_id, None)
         background_attention = (
             snapshot.input_request is not None
@@ -1270,6 +1270,7 @@ class PortableApplicationShell(App[None]):
         )
         menu = self.query_one("#portable-navigation", OptionList)
         menu.clear_options()
+        menu.disabled = False
         input_widget = self.query_one("#portable-input", PortableRequestInput)
         input_widget.display = False
         input_widget.bind_request(
@@ -1340,6 +1341,8 @@ class PortableApplicationShell(App[None]):
                 ),
                 0,
             )
+            if input_request_arrived or self.focused is None:
+                menu.focus()
         else:
             menu.add_option(Option("Sessions", id=SESSIONS_TAB_ID))
             request = snapshot.input_request
@@ -1384,7 +1387,9 @@ class PortableApplicationShell(App[None]):
             context_lines.append(f"PRD: {snapshot.prd_path}")
         if snapshot.result is not None:
             context_lines.append(f"Result: {snapshot.result}")
-        if snapshot.activity:
+        if snapshot.input_request is not None and snapshot.input_request.prompt:
+            context_lines.extend(("", snapshot.input_request.prompt))
+        elif snapshot.activity:
             context_lines.append(f"Latest activity: {snapshot.activity[-1]}")
         if snapshot.diagnostics:
             context_lines.extend(("", "Diagnostics", *snapshot.diagnostics[-10:]))

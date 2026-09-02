@@ -578,6 +578,173 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(notice, [item.message for item in app._activity_feed.items])
 
+    async def test_choice_request_after_checkout_registration_accepts_keyboard(
+        self,
+    ) -> None:
+        class AcceptingResolver:
+            def resolve(self, request):
+                del request
+                return PortableSessionTarget(
+                    checkout=Path.cwd(),
+                    created=False,
+                    notices=(),
+                )
+
+        choice_request = PortableSessionInputRequest(
+            kind=PortableSessionInputKind.CHOICE,
+            request_id="planning-menu",
+            generation=1,
+            prompt="What would you like to do?",
+            options=(
+                ("1", "Start a new change"),
+                ("2", "Resume an unfinished PRD (7 found)"),
+                ("3", "Workflow options"),
+                ("q", "Exit"),
+            ),
+            default_key="1",
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return ()
+
+            def list_saved_projects(self):
+                return ()
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                if intent.launch is not None:
+                    return PortableSessionSnapshot(
+                        session_id=intent.launch.session_id,
+                        checkout=intent.launch.checkout,
+                        status=PortableSessionStatus.WAITING_FOR_INPUT,
+                        input_request=choice_request,
+                    )
+                return PortableSessionSnapshot(
+                    session_id=intent.session_id,
+                    checkout=Path.cwd(),
+                    status=PortableSessionStatus.RUNNING,
+                )
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="choice-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=("--repo", str(Path.cwd())),
+            ),
+            session_target_resolver=AcceptingResolver(),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.press("+")
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            app.query_one("#portable-input", Input).value = str(Path.cwd())
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIs(
+                app.focused,
+                app.query_one("#portable-navigation", OptionList),
+                "The choice menu must own keyboard focus while input is awaited",
+            )
+            await pilot.press("down", "enter")
+            await pilot.pause()
+
+        provided = [
+            intent
+            for intent in supervisor.intents
+            if intent.kind is PortableSessionIntentKind.PROVIDE_INPUT
+        ]
+        self.assertEqual(
+            [(intent.value, intent.request_id) for intent in provided],
+            [("2", "planning-menu")],
+        )
+
+    async def test_waiting_session_details_show_prompt_instead_of_raw_frame(
+        self,
+    ) -> None:
+        raw_worker_frame = (
+            "┌ Dev Loop > Startup ──┐\n"
+            "│ What would you like to do?\n"
+            "│ > 1. Start a new change\n"
+            "└────┘"
+        )
+        waiting = PortableSessionSnapshot(
+            session_id="frame-session",
+            checkout=Path("frame-checkout").resolve(),
+            status=PortableSessionStatus.WAITING_FOR_INPUT,
+            activity=(raw_worker_frame,),
+            input_request=PortableSessionInputRequest(
+                kind=PortableSessionInputKind.CHOICE,
+                request_id="frame-request",
+                generation=1,
+                prompt="What would you like to do?",
+                options=(("1", "Start a new change"), ("q", "Exit")),
+                default_key="1",
+            ),
+        )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (waiting,)
+
+            def list_saved_projects(self):
+                return ()
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                raise AssertionError("Rendering details must not send intents")
+
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            detail = str(app.query_one("#portable-detail", Static).render())
+
+        self.assertIn("What would you like to do?", detail)
+        self.assertNotIn("┌", detail)
+        self.assertNotIn("Latest activity:", detail)
+
     async def test_saved_project_launch_does_not_inherit_another_projects_prd(
         self,
     ) -> None:
