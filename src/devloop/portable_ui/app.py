@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 from textual import events, on
@@ -53,7 +54,7 @@ from ..portable_session_targets import (
 from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
 from ..subprocess_utils import terminate_active_process_trees
 from ..terminal_text import compact_terminal_text, sanitize_terminal_text
-from ..version import VERSION
+from ..portable_version import PORTABLE_VERSION
 
 
 MINIMUM_TERMINAL_COLUMNS = 80
@@ -69,6 +70,8 @@ CAPTURED_ACTIVITY_TITLE = "Captured Activity"
 COMPLETION_REVIEW_LOG_TITLE = "Completion Review and Captured Activity"
 RUN_CONTEXT_TITLE = "Run context"
 SESSIONS_TAB_ID = "__sessions__"
+SESSION_HISTORY_ID = "__session_history__"
+SESSION_HISTORY_BACK_ID = "__session_history_back__"
 NEW_SESSION_ID = "__new_session__"
 RESUME_SESSION_ID = "__resume_session__"
 SAVED_PROJECT_ID_PREFIX = "__saved_project__:"
@@ -88,12 +91,20 @@ EXIT_CANCEL_ID = "__exit_cancel__"
 SESSION_PAUSE_ID = "__session_pause__"
 SESSION_FORCE_STOP_ID = "__session_force_stop__"
 SESSION_CANCEL_ID = "__session_cancel__"
+SESSION_RELINK_ID = "__session_relink__"
+SESSION_FORGET_ID = "__session_forget__"
 SESSION_ACTIONS_BACK_ID = "__session_actions_back__"
 SESSION_ACTION_CONFIRM_ID = "__session_action_confirm__"
 SESSION_ACTION_CANCEL_ID = "__session_action_cancel__"
 STALE_SESSION_INPUT_MESSAGE = (
     "INPUT NOT SENT: That selection no longer belongs to the active input request."
 )
+
+
+class SessionEventRenderTarget(str, Enum):
+    SNAPSHOT = "SNAPSHOT"
+    HISTORY = "HISTORY"
+    RELINK = "RELINK"
 
 
 class PortableDetail(Static):
@@ -552,6 +563,8 @@ class PortableApplicationShell(App[None]):
         self._new_session_worktree: Path | None = None
         self._session_options_active = False
         self._session_actions_active = False
+        self._session_history_active = False
+        self._relink_session_id: str | None = None
         self._concurrency_limit_input_active = False
         self._active_request_id: int | None = None
         self._cancel_key: str | None = None
@@ -574,7 +587,7 @@ class PortableApplicationShell(App[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="portable-shell"):
             yield Static(
-                f"DEV LOOP v{VERSION}",
+                f"DEV LOOP v{PORTABLE_VERSION}",
                 id="portable-header",
                 markup=False,
             )
@@ -787,7 +800,17 @@ class PortableApplicationShell(App[None]):
             event = self._session_supervisor.try_next_event()
             if event is None:
                 return
-            self._show_session_snapshot(event.snapshot)
+            self._show_session_snapshot(
+                event.snapshot,
+                event_render_target=self._session_event_render_target(),
+            )
+
+    def _session_event_render_target(self) -> SessionEventRenderTarget:
+        if self._session_history_active:
+            return SessionEventRenderTarget.HISTORY
+        if self._relink_session_id is not None:
+            return SessionEventRenderTarget.RELINK
+        return SessionEventRenderTarget.SNAPSHOT
 
     def _show_sessions_tab(self, *, hide_session_id: str | None = None) -> None:
         if hide_session_id is not None:
@@ -807,6 +830,8 @@ class PortableApplicationShell(App[None]):
         self._new_session_worktree = None
         self._session_options_active = False
         self._session_actions_active = False
+        self._session_history_active = False
+        self._relink_session_id = None
         self._concurrency_limit_input_active = False
         input_widget = self.query_one("#portable-input", PortableRequestInput)
         input_widget.display = False
@@ -880,7 +905,14 @@ class PortableApplicationShell(App[None]):
         menu = self.query_one("#portable-navigation", OptionList)
         menu.disabled = False
         menu.clear_options()
-        if snapshot.status in {
+        if snapshot.recovery_available:
+            menu.add_option(Option("Resume", id=RESUME_SESSION_ID))
+        elif snapshot.status is PortableSessionStatus.UNAVAILABLE:
+            menu.add_option(Option("Relink", id=SESSION_RELINK_ID))
+            menu.add_option(Option("Forget (metadata only)", id=SESSION_FORGET_ID))
+        elif snapshot.in_history:
+            menu.add_option(Option("Forget (metadata only)", id=SESSION_FORGET_ID))
+        elif snapshot.status in {
             PortableSessionStatus.QUEUED,
             PortableSessionStatus.RUNNING,
             PortableSessionStatus.WAITING_FOR_INPUT,
@@ -901,10 +933,57 @@ class PortableApplicationShell(App[None]):
             "Pause reaches a durable checkpoint. Force Stop interrupts active "
             "work while preserving partial files and diagnostics. Cancel records "
             "the session as cancelled. Closing or hiding a tab does none of these."
+            + (
+                "\n\nResume recovery revalidates the exact expired lease owner "
+                "and process tree. Live or ambiguous ownership remains blocked."
+                if snapshot.recovery_available
+                else ""
+            )
         )
-        self.query_one("#portable-status", Static).update(snapshot.status.value)
+        self.query_one("#portable-status", Static).update(
+            f"{snapshot.status.value} · RECOVERY AVAILABLE"
+            if snapshot.recovery_available
+            else snapshot.status.value
+        )
         self.query_one("#portable-actions", Static).update(
             "Enter Select | Esc Back to Session"
+        )
+
+    def _show_session_history(self) -> None:
+        self._active_session_id = None
+        self._new_session_flow_active = False
+        self._session_options_active = False
+        self._session_actions_active = False
+        self._session_history_active = True
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > History"
+        )
+        self._render_session_tabs()
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.disabled = False
+        menu.clear_options()
+        menu.add_option(Option("Back to Sessions", id=SESSION_HISTORY_BACK_ID))
+        history = tuple(
+            snapshot
+            for snapshot in self._session_snapshots.values()
+            if snapshot.in_history
+        )
+        for snapshot in history:
+            checkout_name = snapshot.checkout.name or str(snapshot.checkout)
+            menu.add_option(
+                Option(
+                    f"{checkout_name} [{snapshot.status.value}]",
+                    id=snapshot.session_id,
+                )
+            )
+        menu.highlighted = 0
+        menu.focus()
+        self.query_one("#portable-detail", Static).update(
+            self._render_sessions_overview(history=history)
+        )
+        self.query_one("#portable-status", Static).update("HISTORY")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Inspect | Esc Back to Sessions"
         )
 
     def _show_concurrency_limit_input(self) -> None:
@@ -1153,6 +1232,9 @@ class PortableApplicationShell(App[None]):
             selected_id = menu.get_option_at_index(menu.highlighted).id
         menu.clear_options()
         menu.add_option(Option("+ New Session", id=NEW_SESSION_ID))
+        history_count = sum(
+            snapshot.in_history for snapshot in self._session_snapshots.values()
+        )
         for project_id, checkout in self._saved_projects.items():
             checkout_name = checkout.name or str(checkout)
             menu.add_option(
@@ -1162,6 +1244,8 @@ class PortableApplicationShell(App[None]):
                 )
             )
         for snapshot in self._session_snapshots.values():
+            if snapshot.in_history:
+                continue
             checkout_name = snapshot.checkout.name or str(snapshot.checkout)
             workflow_name = (
                 f" · {snapshot.prd_path.stem}"
@@ -1173,6 +1257,10 @@ class PortableApplicationShell(App[None]):
                     f"{checkout_name}{workflow_name} [{snapshot.status.value}]",
                     id=snapshot.session_id,
                 )
+            )
+        if history_count:
+            menu.add_option(
+                Option(f"History ({history_count})", id=SESSION_HISTORY_ID)
             )
         menu.highlighted = next(
             (
@@ -1211,8 +1299,12 @@ class PortableApplicationShell(App[None]):
         self._active_session_id = snapshot.session_id
         self._show_session_snapshot(snapshot)
 
-    def _show_session_snapshot(self, snapshot: PortableSessionSnapshot) -> None:
-        self._session_actions_active = False
+    def _show_session_snapshot(
+        self,
+        snapshot: PortableSessionSnapshot,
+        *,
+        event_render_target: SessionEventRenderTarget = SessionEventRenderTarget.SNAPSHOT,
+    ) -> None:
         previous = self._session_snapshots.get(snapshot.session_id)
         self._session_snapshots[snapshot.session_id] = snapshot
         input_request_arrived = snapshot.input_request is not None and (
@@ -1233,6 +1325,16 @@ class PortableApplicationShell(App[None]):
             self.bell()
         if snapshot.status.terminal:
             self.operation_result = snapshot.result
+        if event_render_target is SessionEventRenderTarget.HISTORY:
+            self._refresh_sessions_menu()
+            self._show_session_history()
+            return
+        if event_render_target is SessionEventRenderTarget.RELINK:
+            self._render_session_tabs()
+            return
+        self._session_actions_active = False
+        self._session_history_active = False
+        self._relink_session_id = None
         if self._active_session_id is None:
             if (
                 snapshot.session_id in self._open_session_ids
@@ -1279,7 +1381,21 @@ class PortableApplicationShell(App[None]):
             request_generation=None,
         )
         self._session_input_options.clear()
-        if snapshot.status in {
+        if snapshot.status is PortableSessionStatus.UNAVAILABLE:
+            menu.add_option(Option("Relink", id=SESSION_RELINK_ID))
+            menu.add_option(Option("Forget (metadata only)", id=SESSION_FORGET_ID))
+            if snapshot.in_history:
+                menu.add_option(Option("History", id=SESSION_HISTORY_ID))
+            menu.add_option(Option("Sessions", id=SESSIONS_TAB_ID))
+            menu.highlighted = 0
+            menu.focus()
+        elif snapshot.in_history:
+            menu.add_option(Option("Forget (metadata only)", id=SESSION_FORGET_ID))
+            menu.add_option(Option("History", id=SESSION_HISTORY_ID))
+            menu.add_option(Option("Sessions", id=SESSIONS_TAB_ID))
+            menu.highlighted = 0
+            menu.focus()
+        elif snapshot.recovery_available or snapshot.status in {
             PortableSessionStatus.READY,
             PortableSessionStatus.PAUSED,
             PortableSessionStatus.INTERRUPTED,
@@ -1393,6 +1509,15 @@ class PortableApplicationShell(App[None]):
             context_lines.append(f"Latest activity: {snapshot.activity[-1]}")
         if snapshot.diagnostics:
             context_lines.extend(("", "Diagnostics", *snapshot.diagnostics[-10:]))
+        if snapshot.recovery_available:
+            context_lines.extend(
+                (
+                    "",
+                    "Recovery available: Resume revalidates the exact expired "
+                    "lease owner and process tree. Live or ambiguous ownership "
+                    "remains blocked.",
+                )
+            )
         safe_detail = sanitize_terminal_text(
             "\n".join(context_lines),
             preserve_newlines=True,
@@ -1422,22 +1547,50 @@ class PortableApplicationShell(App[None]):
             )
         rejection = self._session_input_rejections.get(snapshot.session_id)
         self.query_one("#portable-status", Static).update(
-            f"INPUT NOT SENT · {rejection}" if rejection else snapshot.status.value
+            f"INPUT NOT SENT · {rejection}"
+            if rejection
+            else (
+                f"{snapshot.status.value} · RECOVERY AVAILABLE"
+                if snapshot.recovery_available
+                else snapshot.status.value
+            )
         )
         action_bar = (
-            "Enter Resume | F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
-            if snapshot.status
-            in {
-                PortableSessionStatus.READY,
-                PortableSessionStatus.PAUSED,
-                PortableSessionStatus.INTERRUPTED,
-            }
-            else "F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
+            "Enter Select | F9 Actions | Esc Back to History | F4 Logs | F5 Context"
+            if snapshot.in_history
+            else (
+                "Enter Select | F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
+                if snapshot.status is PortableSessionStatus.UNAVAILABLE
+                else (
+                    "Enter Resume | F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
+                    if snapshot.recovery_available
+                    or snapshot.status
+                    in {
+                        PortableSessionStatus.READY,
+                        PortableSessionStatus.PAUSED,
+                        PortableSessionStatus.INTERRUPTED,
+                    }
+                    else "F9 Actions | Esc Hide to Sessions | F4 Logs | F5 Context"
+                )
+            )
         )
         self.query_one("#portable-actions", Static).update(action_bar)
 
-    def _render_sessions_overview(self) -> str:
-        if not self._session_snapshots:
+    def _render_sessions_overview(
+        self,
+        *,
+        history: tuple[PortableSessionSnapshot, ...] | None = None,
+    ) -> str:
+        snapshots = (
+            history
+            if history is not None
+            else tuple(
+                snapshot
+                for snapshot in self._session_snapshots.values()
+                if not snapshot.in_history
+            )
+        )
+        if not snapshots:
             launch = self._session_launch
             checkout = str(launch.checkout) if launch is not None else ""
             return (
@@ -1448,11 +1601,11 @@ class PortableApplicationShell(App[None]):
             )
 
         sections = [
-            "Portable Sessions",
+            "Portable Session History" if history is not None else "Portable Sessions",
             "",
             "Workers start or resume only through an explicit session action.",
         ]
-        for snapshot in self._session_snapshots.values():
+        for snapshot in snapshots:
             context = snapshot.context
             project = context.project_root if context is not None else str(
                 snapshot.checkout
@@ -1526,13 +1679,146 @@ class PortableApplicationShell(App[None]):
     def _resume_active_session(self) -> None:
         assert self._session_supervisor is not None
         assert self._active_session_id is not None
-        snapshot = self._session_supervisor.handle_intent(
-            PortableSessionIntent(
-                kind=PortableSessionIntentKind.RESUME,
-                session_id=self._active_session_id,
+        try:
+            snapshot = self._session_supervisor.handle_intent(
+                PortableSessionIntent(
+                    kind=PortableSessionIntentKind.RESUME,
+                    session_id=self._active_session_id,
+                )
             )
-        )
+        except PortableWorktreeLeaseConflict as error:
+            snapshot = self._session_snapshots[self._active_session_id]
+            self._show_session_snapshot(snapshot)
+            self.query_one("#portable-detail", Static).update(
+                sanitize_terminal_text(
+                    "Recovery blocked. The persisted lease remains inspectable.\n\n"
+                    f"Owner: {error.owner_id}\n"
+                    f"Session: {error.session_id}\n"
+                    f"Reason: {error.reason}"
+                )
+            )
+            self.query_one("#portable-status", Static).update("RECOVERY BLOCKED")
+            return
+        except (OSError, RuntimeError, ValueError) as error:
+            snapshot = self._session_snapshots[self._active_session_id]
+            self._show_session_snapshot(snapshot)
+            self.query_one("#portable-detail", Static).update(
+                sanitize_terminal_text(f"Recovery was not started.\n\n{error}")
+            )
+            self.query_one("#portable-status", Static).update("RECOVERY NOT STARTED")
+            return
         self._show_session_snapshot(snapshot)
+
+    def _show_relink_input(self) -> None:
+        assert self._active_session_id is not None
+        self._relink_session_id = self._active_session_id
+        self.query_one("#portable-header", Static).update(
+            "Dev Loop > Sessions > Relink"
+        )
+        menu = self.query_one("#portable-navigation", OptionList)
+        menu.clear_options()
+        menu.add_option(Option("Cancel", id=SESSION_ACTIONS_BACK_ID))
+        menu.highlighted = 0
+        input_widget = self.query_one("#portable-input", PortableRequestInput)
+        input_widget.bind_request(
+            session_id=None,
+            request_id=None,
+            request_generation=None,
+        )
+        input_widget.placeholder = "Existing canonical Git checkout path"
+        input_widget.value = ""
+        input_widget.display = True
+        input_widget.focus()
+        self.query_one("#portable-detail", Static).update(
+            "Relink Unavailable Session\n\n"
+            "Choose the moved checkout root. Dev Loop validates Git plus the "
+            "referenced PRD, Issue Index, and workflow state before changing "
+            "machine-local catalog pointers."
+        )
+        self.query_one("#portable-status", Static).update("INPUT REQUIRED")
+        self.query_one("#portable-actions", Static).update(
+            "Enter Relink | Esc Cancel"
+        )
+
+    def _submit_relink(self, value: str) -> None:
+        assert self._session_supervisor is not None
+        session_id = self._relink_session_id
+        assert session_id is not None
+        relink = getattr(self._session_supervisor, "relink_session", None)
+        if not callable(relink):
+            raise RuntimeError("Relink is unavailable for this session supervisor.")
+        try:
+            snapshot = relink(session_id, Path(value).expanduser())
+        except (OSError, RuntimeError, ValueError) as error:
+            original = self._session_snapshots[session_id]
+            self._show_session_snapshot(original)
+            self.query_one("#portable-detail", Static).update(
+                sanitize_terminal_text(
+                    "Relink was not committed. The original UNAVAILABLE record "
+                    f"is unchanged and remains actionable.\n\n{error}"
+                )
+            )
+            self.query_one("#portable-status", Static).update("RELINK NOT COMMITTED")
+            return
+        self._session_snapshots = {
+            current.session_id: current
+            for current in self._session_supervisor.list_sessions()
+        }
+        snapshot = self._session_snapshots.get(session_id, snapshot)
+        self._show_session_snapshot(snapshot)
+
+    def _confirm_forget_session(self) -> None:
+        self.push_screen(
+            PortableSessionActionConfirmation(
+                "Forget Session Metadata",
+                "Remove only this machine-local catalog record? PRDs, issue "
+                "packs, status files, logs, branches, and worktrees are never deleted.",
+            ),
+            self._finish_forget_confirmation,
+        )
+
+    def _finish_forget_confirmation(self, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        assert self._session_supervisor is not None
+        assert self._active_session_id is not None
+        session_id = self._active_session_id
+        forget = getattr(self._session_supervisor, "forget_session", None)
+        if not callable(forget):
+            raise RuntimeError("Forget is unavailable for this session supervisor.")
+        try:
+            forget(session_id)
+        except (OSError, RuntimeError, ValueError) as error:
+            original = self._session_snapshots[session_id]
+            self._show_session_snapshot(original)
+            self.query_one("#portable-detail", Static).update(
+                sanitize_terminal_text(
+                    "Session metadata was not forgotten. The record is retained; "
+                    "resolve live or ambiguous execution ownership and retry.\n\n"
+                    f"{error}"
+                )
+            )
+            self.query_one("#portable-status", Static).update(
+                "METADATA NOT FORGOTTEN"
+            )
+            menu = self.query_one("#portable-navigation", OptionList)
+            menu.clear_options()
+            menu.add_option(Option("Forget (metadata only)", id=SESSION_FORGET_ID))
+            menu.add_option(
+                Option(
+                    "Back",
+                    id=(SESSION_HISTORY_ID if original.in_history else SESSIONS_TAB_ID),
+                )
+            )
+            menu.highlighted = 1
+            menu.focus()
+            return
+        self._session_snapshots.pop(session_id, None)
+        self._open_session_ids = [
+            open_id for open_id in self._open_session_ids if open_id != session_id
+        ]
+        self._show_sessions_tab()
+        self.query_one("#portable-status", Static).update("METADATA FORGOTTEN")
 
     def _apply_session_lifecycle(
         self,
@@ -1807,6 +2093,10 @@ class PortableApplicationShell(App[None]):
                 self._reject_stale_session_input()
             elif option_id == NEW_SESSION_ID:
                 self._show_new_session_menu()
+            elif option_id == SESSION_HISTORY_ID:
+                self._show_session_history()
+            elif option_id == SESSION_HISTORY_BACK_ID:
+                self._show_sessions_tab()
             elif option_id == NEW_SESSION_SAVED_ID:
                 self._show_saved_worktree_menu(for_repository=False)
             elif option_id == NEW_SESSION_EXISTING_ID:
@@ -1844,6 +2134,10 @@ class PortableApplicationShell(App[None]):
                     title="Cancel Session",
                     warning="Record this session as CANCELLED and stop its worker?",
                 )
+            elif option_id == SESSION_RELINK_ID:
+                self._show_relink_input()
+            elif option_id == SESSION_FORGET_ID:
+                self._confirm_forget_session()
             elif option_id == SESSION_ACTIONS_BACK_ID:
                 assert self._active_session_id is not None
                 self._show_session_snapshot(
@@ -1893,6 +2187,10 @@ class PortableApplicationShell(App[None]):
 
     @on(Input.Submitted, "#portable-input")
     def submit_input(self, event: Input.Submitted) -> None:
+        if self._session_supervisor is not None and self._relink_session_id is not None:
+            event.input.display = False
+            self._submit_relink(event.value)
+            return
         if (
             self._session_supervisor is not None
             and self._concurrency_limit_input_active
@@ -1967,11 +2265,18 @@ class PortableApplicationShell(App[None]):
 
     def action_back(self) -> None:
         if self._session_supervisor is not None:
+            if self._relink_session_id is not None:
+                session_id = self._relink_session_id
+                self._show_session_snapshot(self._session_snapshots[session_id])
+                return
             if self._session_actions_active:
                 assert self._active_session_id is not None
                 self._show_session_snapshot(
                     self._session_snapshots[self._active_session_id]
                 )
+                return
+            if self._session_history_active:
+                self._show_sessions_tab()
                 return
             if self._concurrency_limit_input_active:
                 self._show_session_options()
@@ -1986,6 +2291,10 @@ class PortableApplicationShell(App[None]):
                     self._show_new_session_menu()
                 return
             if self._active_session_id is not None:
+                snapshot = self._session_snapshots[self._active_session_id]
+                if snapshot.in_history:
+                    self._show_session_history()
+                    return
                 self._show_sessions_tab(
                     hide_session_id=self._active_session_id,
                 )

@@ -27,6 +27,10 @@ LINK_PATTERN = re.compile(r"\[(?P<title>[^\]]+)\]\((?P<href>[^)]+\.md)\)")
 NUMBER_PATTERN = re.compile(r"(?P<number>\d{1,5})")
 
 
+def canonical_issue_index_for_prd(prd_path: Path) -> Path:
+    return (prd_path.resolve().parent / "issues" / "README.md").resolve()
+
+
 def find_repo_root(start: Path) -> Path:
     result = run_captured_text(
         ["git", "rev-parse", "--show-toplevel"],

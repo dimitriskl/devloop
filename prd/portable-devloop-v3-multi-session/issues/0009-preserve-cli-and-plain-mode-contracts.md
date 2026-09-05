@@ -53,4 +53,28 @@ Covers parent PRD user stories 75–79.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Issue commits: `65635e6`, `ba26b41`, and `69e132a`.
+- Implementation preserves the existing planning and delivery entry points while
+  routing Application and Plain Mode through the shared catalog, canonical
+  worktree lease, and machine-wide execution-capacity contract. Relative launch
+  arguments retain a trusted base across worker checkout changes, and a created
+  worktree is normalized transactionally for later catalog reload and resume.
+- Fresh independent review: PASS. The committed-tree rerun reported 65/65 for
+  contract, entry-point, presentation, and worktree coverage and 77/77 for
+  catalog, migration-review, and concurrency coverage. The former created-worktree
+  resume blocker passed 1/1, and the former Windows SQLite cleanup race passed
+  20/20 across ten fresh-process repetitions. The planning/static-wrapper group
+  reported 64 passed plus one unrelated pre-existing Windows path-separator
+  assertion.
+- Fresh QA: PASS. QA reported 241 green executions (238 unique plus 3 repeats),
+  successful `compileall`, successful PowerShell parsing and Python `--help`
+  entry-point probes, and no surviving QA Python processes or SQLite artifacts.
+- Platform limitation: live Linux/WSL execution was unavailable with
+  `E_ACCESSDENIED`; wrapper parity was therefore static only, and the live
+  cross-platform gate remains deferred to Issue 0013. No real/authenticated
+  Codex or installer gate ran.
+- Tooling limitation: mypy was unavailable, the full suite is not claimed, and
+  repository-wide Ruff remains red from baseline findings. These limitations do
+  not change the focused Issue 0009 review and QA PASS results.

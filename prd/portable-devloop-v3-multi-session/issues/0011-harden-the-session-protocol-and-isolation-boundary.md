@@ -56,4 +56,19 @@ Covers parent PRD user stories 69–74 and 93–99.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+Completion evidence (2026-09-04):
+
+- Implemented in `2fc3f21`, with protocol-boundary repairs in `929837a`,
+  `a2cc784`, and `82a709a`; independent review passed.
+- QA covered 416 unique tests (414 passed, 2 POSIX-only skipped) and 486 total
+  executions (484 passed, 2 skipped). Binary Force Stop, Cancel, and application
+  Shutdown lifecycle paths each passed three times using the production launcher.
+- Stress and security evidence included 1,200 catalog opens and 300 oversized
+  update/redaction scans. All test processes, leases, capacity claims, temporary
+  databases, and other test resources were confirmed cleaned up.
+- Targeted compilation and Ruff checks passed. Mypy was unavailable.
+- Validation was live on Windows only. Linux/PTY coverage is deferred to Issue
+  0013; full-suite, integration, authenticated Codex, installer, and release gates
+  were not run.

@@ -16,6 +16,7 @@ from devloop.portable_runtime import (
     portable_runtime_session,
 )
 from devloop.portable_sessions import (
+    PortablePartialWorkContext,
     PortableSessionLaunch,
     PortableWorkflowOperation,
 )
@@ -40,6 +41,33 @@ class PortableEntrypointTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(plain_mode_seen, [False])
+
+    def test_nested_recovery_handoff_delivers_its_partial_work_context(self) -> None:
+        bridge = PortableRuntimeBridge()
+        context = PortablePartialWorkContext.from_sequences(
+            activity=("Recovered delivery activity",),
+            diagnostics=("Recovered delivery diagnostic",),
+        )
+        received: list[PortablePartialWorkContext | None] = []
+
+        def run_development(
+            *_args: object,
+            partial_work_context: PortablePartialWorkContext | None = None,
+        ) -> int:
+            received.append(partial_work_context)
+            return 0
+
+        with portable_runtime_session(bridge), mock.patch.dict(
+            "os.environ",
+            {"DEVLOOP_UI_MODE": "application"},
+        ), mock.patch.object(cli, "_run_devloop", side_effect=run_development):
+            result = cli.main(
+                ["--prd", "prd.md", "--issues", "issues.md"],
+                partial_work_context=context,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(received, [context])
 
     def test_both_entrypoints_accept_plain_mode(self) -> None:
         planning = interactive_runner.build_parser().parse_args(["--plain"])

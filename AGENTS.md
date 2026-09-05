@@ -14,16 +14,19 @@ Wrapper scripts are in `bin/`. Documentation is under `docs/`. Prompt templates,
 Shows runner flags and verifies Python startup.
 
 ```powershell
-.\bin\devloop.ps1 --prd <prd.md> --issues <issues\README.md> --dry-run --no-worktree
+.\bin\devloop.ps1 --prd <prd.md> --dry-run
 ```
-Renders prompts without invoking Codex or creating a worktree.
+Infers the canonical issue index and renders every unfinished issue's prompts
+without invoking Codex or creating a worktree.
 
-Issue selection skips completed files. `--all` runs only blocked or unfinished
-issues; `--start-issue` advances to the next unfinished issue when the requested
-one is already done.
+Issue selection skips completed files and processes all dependency-ready
+unfinished issues by default. Use `--single-issue` for one issue.
+`--start-issue` advances to the next unfinished issue when the requested one is
+already done and continues through the remaining issues unless combined with
+`--single-issue`.
 
 ```powershell
-.\bin\devloop.ps1 --prd <prd.md> --issues <issues\README.md> --no-self-improvement-wiki
+.\bin\devloop.ps1 --prd <prd.md> --no-self-improvement-wiki
 ```
 Runs without the post-run self-improvement wiki update.
 
@@ -102,7 +105,7 @@ packages listed there:
 Ruff's `include` list currently selects the CodexCLI packages and
 `tests/codexcli/`; keep new portable modules clean against the same rules.
 
-Also validate runner changes with `--dry-run --no-worktree` against a small local issue pack, and inspect `.loop.logs`, `README.loop.md`, and `README.loop.state.json` when behavior changes. For SQL MCP changes, run `.\install\build-sql-mcp.ps1`.
+Also validate runner changes with a PRD-only `--dry-run` against a small local issue pack, and inspect `.loop.logs`, `README.loop.md`, and `README.loop.state.json` when behavior changes. For SQL MCP changes, run `.\install\build-sql-mcp.ps1`.
 
 ## Self-Improvement Wiki
 

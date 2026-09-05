@@ -221,28 +221,28 @@ matter for implementation.
 
 ## 6. Run An Existing PRD
 
-Run the first pending issue:
+Run every dependency-ready unfinished issue with the standard defaults:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md
 ```
 
-Run every pending or blocked issue:
+Run only one pending issue:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --all
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --single-issue
 ```
 
 Start from a specific issue:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --start-issue 0004
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --start-issue 0004
 ```
 
 Preview prompts without invoking Codex or modifying issues:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --dry-run --no-worktree
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --dry-run
 ```
 
 The Linux/macOS command is the same shape with `./bin/devloop.sh` and Unix
@@ -253,15 +253,20 @@ paths.
 Core inputs:
 
 - `--prd <file>` is the parent PRD Markdown file.
-- `--issues <README.md>` is the issue index.
+- `--issues <README.md>` overrides the issue index inferred from the PRD
+  folder's `issues/README.md`.
 - `--preset <json>` selects role agents and skills. Relative paths resolve from
   the Dev Loop bundle. Default: `presets/generic-minimal.json`.
 
 Issue selection and dependencies:
 
-- `--all` runs all dependency-ready blocked or unfinished issues.
+- All dependency-ready unfinished issues run by default.
+- `--all` remains accepted as an explicit expression of the default.
+- `--single-issue` runs only the first selected unfinished issue.
 - `--start-issue <number-or-prefix>` starts at an issue number or filename
-  prefix. Preflight rejects a selection that omits an unfinished prerequisite.
+  prefix and continues through remaining issues unless combined with
+  `--single-issue`. Preflight rejects a selection that omits an unfinished
+  prerequisite.
 - `--max-passes <n>` controls coder/review/QA correction passes per issue.
   Default: `3`.
 
@@ -292,11 +297,13 @@ Codex execution:
 
 Worktrees:
 
-- `--create-worktree` creates or reuses a dedicated implementation worktree.
-- `--no-worktree` runs in the current checkout.
+- Direct runs use the source checkout by default without prompting.
+- `--create-worktree` explicitly creates or reuses a dedicated implementation
+  worktree.
+- `--no-worktree` remains accepted as an explicit expression of the default.
 - `--worktree-path <path>` sets the implementation worktree path.
 - `--branch-name <name>` sets the implementation branch name.
-- `--non-interactive` prevents prompts for missing worktree decisions.
+- `--non-interactive` prevents prompts for missing explicit worktree details.
 
 Self-improvement wiki:
 
@@ -309,14 +316,14 @@ Self-improvement wiki:
 
 ## 8. Worktree Behavior
 
-Interactive development defaults to a dedicated implementation worktree. Dev
-Loop asks for the worktree parent path, worktree folder name, and branch name
-when needed. If the same final worktree path is already registered on the
-requested branch, rerunning the command reuses it. Dev Loop also reuses an
-existing Git checkout even when its current branch differs from the newly typed
-branch prompt, and if a previous partial attempt already created the branch, it
-runs `git worktree add` with the existing branch instead of trying to create it
-again.
+Direct development defaults to the source checkout and does not ask a worktree
+question. With explicit `--create-worktree`, Dev Loop asks for the worktree
+parent path, worktree folder name, and branch name when needed. If the same
+final worktree path is already registered on the requested branch, rerunning
+the command reuses it. Dev Loop also reuses an existing Git checkout even when
+its current branch differs from the newly typed branch prompt, and if a
+previous partial attempt already created the branch, it runs `git worktree add`
+with the existing branch instead of trying to create it again.
 Branch names are normalized before Git runs, so a friendly name like
 `Reset Queue` becomes `Reset-Queue`.
 When you enter a worktree parent path, Dev Loop remembers it and suggests it as
@@ -326,8 +333,8 @@ Dev Loop does not push. After a successful run, it asks whether to merge the
 implementation branch or worktree into another branch. It skips automatic merge
 when the source or target checkout has uncommitted changes.
 
-Use `--no-worktree` for small or already-isolated runs where you want changes in
-the current checkout.
+`--no-worktree` may still be supplied when a script should state the default
+source-checkout choice explicitly.
 
 ## 9. State, Logs, And Completion
 

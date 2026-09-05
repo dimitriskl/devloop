@@ -14,6 +14,11 @@
 
 Portable Codex development-loop runner for local PRD and issue packs.
 
+The current portable release is **Portable Dev Loop v3 0.3.1**. The separately
+installed CodexCLI application remains version `0.2.1`. See the
+[Portable v3 user guide](docs/portable-v3-user-guide.md) and
+[portable 0.3.1 release notes](docs/release-notes-portable-v0.3.1.md).
+
 ## Install Dev Loop
 
 You do **not** clone or download this repository by hand. Download **one
@@ -65,9 +70,13 @@ irm https://raw.githubusercontent.com/dimitriskl/devloop/main/install/devloop.ps
 ### What the installer does
 
 1. Asks where to install Dev Loop.
-2. Clones or updates the bundle from GitHub into that folder.
-3. Builds and validates an isolated `.venv` from the committed portable runtime lock.
-4. Copies bundled Codex skills and agent references into your Codex home folder.
+2. Clones a staged candidate from GitHub without changing an existing runnable
+   installation.
+3. Builds and validates an isolated `.venv`, including pinned Textual and
+   standard-library SQLite.
+4. Activates the candidate and idempotently adopts supported `0.2.1` portable
+   projects into passive v3 catalog state without starting workers.
+5. Copies bundled Codex skills and agent references into your Codex home folder.
 
 Press Enter to accept the default install location:
 
@@ -108,7 +117,9 @@ The uninstaller removes the bundle-local runtime and unchanged copies of
 bundled Codex skills and agent references. For compatibility with older
 versions, it also removes their generated command shortcuts and applicable PATH
 entry. It preserves the source checkout, target-project PRDs, worktrees,
-branches, and any personally modified skill or agent file.
+branches, logs, issues, user configuration, machine catalog, and any personally
+modified skill or agent file. Unchanged installed capabilities are identified
+by content before removal.
 
 Windows:
 
@@ -127,7 +138,10 @@ Use `-KeepSkills` or `--keep-skills` when the capability copies should remain.
 ### Update
 
 Run the same installer command again. Enter the same install path when prompted,
-or press Enter if you kept the default.
+or press Enter if you kept the default. Candidate validation happens before the
+existing checkout changes. If build, runtime validation, activation, or v3
+adoption fails, the installer restores the prior runnable checkout and runtime;
+it does not record a successful adoption receipt.
 
 Non-interactive install or update:
 
@@ -256,25 +270,23 @@ when `prd/<change>/<change>.md` and `prd/<change>/issues/README.md` already exis
 Windows:
 
 ```powershell
-.\bin\devloop.ps1 `
-  --prd E:\path\to\prd\feature\feature.md `
-  --issues E:\path\to\prd\feature\issues\README.md `
-  --preset .\presets\generic-minimal.json
+.\bin\devloop.ps1 --prd E:\path\to\prd\feature\feature.md
 ```
 
 Ubuntu/Linux:
 
 ```bash
-./bin/devloop.sh \
-  --prd /path/to/prd/feature/feature.md \
-  --issues /path/to/prd/feature/issues/README.md \
-  --preset ./presets/generic-minimal.json
+./bin/devloop.sh --prd /path/to/prd/feature/feature.md
 ```
 
-The default run processes one pending issue. Add `--all` to continue through
-all dependency-ready issues. Declare prerequisites as local Markdown links
-under an issue's `## Blocked by` heading. Index order is priority among ready
-issues; it never creates an implicit dependency.
+The runner infers `issues/README.md` from the PRD folder, uses
+`presets/generic-minimal.json`, processes all dependency-ready unfinished
+issues, works directly in the source checkout, and reads and updates the
+self-improvement wiki. Use `--single-issue` to process only the first selected
+unfinished issue. `--all`, `--no-worktree`, and `--self-improvement-wiki`
+remain accepted as explicit expressions of the defaults. Declare prerequisites
+as local Markdown links under an issue's `## Blocked by` heading. Index order is
+priority among ready issues; it never creates an implicit dependency.
 
 If a ready issue blocks, its descendants become `WAITING_ON_DEPENDENCY` and
 receive no Codex calls while independent ready work continues. When normal
@@ -372,6 +384,9 @@ The final handoff command is equivalent to:
 ```powershell
 .\bin\devloop.ps1 --prd C:\path\to\project\prd\example\example.md --issues C:\path\to\project\prd\example\issues\README.md --all --create-worktree --worktree-path C:\path\to\project-example-dev --branch-name devloop/example --self-improvement-wiki
 ```
+
+That planning handoff spells out choices already made in its UI. A direct run
+with only `--prd` uses the concise defaults described above.
 
 To continue an existing PRD without reopening planning:
 

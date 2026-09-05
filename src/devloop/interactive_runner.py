@@ -28,11 +28,13 @@ from .portable_execution_backend import (
     BackendModelCatalogAccess,
     ExecutionBackendId,
 )
+from .portable_launch_target import planning_launch_checkout
 from .portable_session_catalog import (
     active_portable_catalog_session,
     bind_active_catalog_session_checkout,
 )
 from .portable_sessions import (
+    PortablePartialWorkContext,
     PortableSessionLaunch,
     PortableWorkflowOperation,
     active_portable_session_execution,
@@ -179,7 +181,11 @@ class ResumeCandidate:
     updated_at: float
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    partial_work_context: PortablePartialWorkContext | None = None,
+) -> int:
     raw_arguments = tuple(argv if argv is not None else sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -203,7 +209,20 @@ def main(argv: list[str] | None = None) -> int:
         stdout_is_tty=sys.stdout.isatty(),
         term=os.environ.get("TERM"),
     )
-    operation = lambda: _run_planning(parser, args)
+    argument_base = Path.cwd().resolve()
+    try:
+        launch_checkout = planning_launch_checkout(
+            current_checkout=argument_base,
+            repo_argument=args.repo,
+            prd_argument=args.prd,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    operation = lambda: _run_planning(
+        parser,
+        args,
+        partial_work_context=partial_work_context,
+    )
     try:
         if ui_mode is PortableUiMode.APPLICATION:
             if active_portable_runtime() is None:
@@ -222,9 +241,10 @@ def main(argv: list[str] | None = None) -> int:
                 return run_portable_sessions_application(
                     PortableSessionLaunch(
                         session_id=str(uuid.uuid4()),
-                        checkout=Path.cwd(),
+                        checkout=launch_checkout,
                         operation=PortableWorkflowOperation.PLANNING,
                         arguments=raw_arguments,
+                        argument_base=argument_base,
                     )
                 )
             return operation()
@@ -234,9 +254,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_portable_plain_session(
                 PortableSessionLaunch(
                     session_id=str(uuid.uuid4()),
-                    checkout=Path.cwd(),
+                    checkout=launch_checkout,
                     operation=PortableWorkflowOperation.PLANNING,
                     arguments=raw_arguments,
+                    argument_base=argument_base,
                 ),
                 operation,
             )
@@ -247,7 +268,12 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+def _run_planning(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    *,
+    partial_work_context: PortablePartialWorkContext | None = None,
+) -> int:
     if args.native_editor:
         os.environ["DEVLOOP_EDITOR"] = "native"
 
@@ -430,6 +456,7 @@ def _run_planning(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             planning_step.guidance.text if planning_step.guidance is not None else None
         ),
         wiki_index=wiki_index,
+        partial_work_context=partial_work_context,
     )
     planning_settings = planning_step.execution_settings
     assert planning_settings is not None
@@ -849,12 +876,19 @@ def _status_summary(repo_root: Path, selection: "catalog_module.Selection") -> s
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .portable_version import portable_version_text
+
     parser = argparse.ArgumentParser(
         prog="devloop-plan",
         description=(
             "Interactively plan a change with Codex, publish a PRD folder, "
             "then optionally start the Dev Loop implementation runner."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=portable_version_text("devloop-plan"),
     )
     parser.add_argument("--repo", help="Target project checkout. Defaults to an interactive prompt.")
     parser.add_argument("--prd", help="Existing PRD file or PRD folder to resume directly. Skips planning and starts from the development prompts.")
@@ -1422,6 +1456,8 @@ def build_devloop_args(
         args.extend(["--start-issue", params.start_issue])
     if params.run_all:
         args.append("--all")
+    else:
+        args.append("--single-issue")
     if params.use_worktree:
         args.extend(
             [
@@ -1710,9 +1746,15 @@ def build_planning_prompt(
     agent_paths: list[Path] | None = None,
     step_guidance: str | None = None,
     wiki_index: Path,
+    partial_work_context: PortablePartialWorkContext | None = None,
 ) -> str:
     skills_block = "\n".join(f"- {path}" for path in skill_paths)
     agents_block = "\n".join(f"- {path}" for path in (agent_paths or []))
+    recovery_block = (
+        f"\n{partial_work_context.to_prompt()}\n"
+        if partial_work_context is not None and partial_work_context.has_content
+        else ""
+    )
     return f"""You are running the Dev Loop interactive planning intake for this repository.
 
 Repository root: {repo_root}
@@ -1741,6 +1783,7 @@ Precedence: {STEP_GUIDANCE_PRECEDENCE}
 
 Read the Dev Loop self-improvement wiki index and apply relevant lessons to this planning session:
 - {wiki_index}
+{recovery_block}
 
 Required workflow:
 1. Inspect the existing analysis, glossary, ADRs, PRDs, and issue packs before asking a question.

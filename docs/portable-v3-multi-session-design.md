@@ -3,8 +3,8 @@
 ## Decision status
 
 Accepted design for Portable Dev Loop generation **v3**, targeted for software
-version **0.3.1**. The currently implemented version remains `0.2.1` until this
-design is implemented and passes its release gates.
+version **0.3.1**. The portable implementation now reports `0.3.1`; the separate
+CodexCLI application retains its own `0.2.1` identity.
 
 This design applies only to the portable `devloop-plan` and `devloop` wrappers.
 It does not merge Portable Dev Loop with the separate CodexCLI application or
@@ -150,3 +150,13 @@ already lost.
   tests.
 - Upgrade tests from a representative `0.2.1` planner configuration and
   unfinished project, proving that project files are byte-for-byte unchanged.
+
+## Packaging seam
+
+The portable installation is a deep module whose public interface is the
+stable command set under `InstallDir/bin` and `InstallDir/install`. Its
+implementation owns candidate validation, immutable `releases/<commit>`
+payloads, durable journal recovery, legacy-entrypoint preservation, and atomic
+`bootstrap/current.json` activation. Callers never construct release paths or
+select runtimes themselves. The exact layout and fail-closed invariants are in
+[Portable v3 side-by-side install layout](portable-v3-install-layout.md).

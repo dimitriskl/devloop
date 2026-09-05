@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Sequence
 
-from .version import VERSION
+from .portable_version import PORTABLE_VERSION
 
 VERSION_TOKEN = "{VERSION}"
 VERSION_PATTERN = re.compile(r"v\d+\.\d+\.\d+")
@@ -22,7 +22,11 @@ DEFAULT_LOGO_TEMPLATE = """+----------------------------------------------------
 """
 
 
-def render_logo(bundle_root: Path | None = None, *, version: str = VERSION) -> str:
+def render_logo(
+    bundle_root: Path | None = None,
+    *,
+    version: str = PORTABLE_VERSION,
+) -> str:
     template = load_logo_template(bundle_root)
     return align_logo(apply_logo_version(template, version))
 

@@ -1,0 +1,14 @@
+{
+  "product": "Portable Dev Loop",
+  "generation": "v3",
+  "version": "0.3.1",
+  "codexcli": "separate product",
+  "bootstrap_protocol_min": 2,
+  "bootstrap_protocol_max": 2,
+  "pointer_schema_min": 2,
+  "pointer_schema_max": 2,
+  "manifest_schema_min": 2,
+  "manifest_schema_max": 2,
+  "transaction_schema_min": 2,
+  "transaction_schema_max": 2
+}

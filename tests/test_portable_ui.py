@@ -31,6 +31,8 @@ from devloop.portable_sessions import (
     PortableSessionStatus,
     PortableSessionSupervisor,
     PortableWorkflowOperation,
+    PortableWorktreeLease,
+    PortableWorktreeLeaseConflict,
 )
 from devloop.issue_pack import Issue
 from devloop.cli import choose_run_review_action
@@ -208,6 +210,149 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             [PortableSessionIntentKind.PAUSE],
         )
         self.assertEqual(supervisor.current.status, PortableSessionStatus.PAUSED)
+
+    async def test_orphaned_running_session_offers_explicit_safe_resume(self) -> None:
+        orphaned = PortableSessionSnapshot(
+            session_id="recover-from-actions",
+            checkout=Path("recover-from-actions").resolve(),
+            status=PortableSessionStatus.RUNNING,
+            recovery_available=True,
+        )
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.intents: list[PortableSessionIntent] = []
+
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (orphaned,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intents.append(intent)
+                return replace(
+                    orphaned,
+                    status=PortableSessionStatus.QUEUED,
+                    recovery_available=False,
+                )
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+            session_options = tuple(
+                str(menu.get_option_at_index(index).prompt)
+                for index in range(menu.option_count)
+            )
+            session_detail = str(app.query_one("#portable-detail", Static).render())
+            session_status = str(app.query_one("#portable-status", Static).render())
+
+            await pilot.press("f9")
+            await pilot.pause()
+            action_options = tuple(
+                str(menu.get_option_at_index(index).prompt)
+                for index in range(menu.option_count)
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertEqual(session_options, ("Resume", "Sessions"))
+        self.assertIn("exact expired lease", session_detail)
+        self.assertIn("RECOVERY AVAILABLE", session_status)
+        self.assertEqual(action_options, ("Resume", "Back to Session"))
+        self.assertEqual(
+            [intent.kind for intent in supervisor.intents],
+            [PortableSessionIntentKind.RESUME],
+        )
+
+    async def test_orphaned_running_recovery_block_is_visible_and_inspectable(
+        self,
+    ) -> None:
+        orphaned = PortableSessionSnapshot(
+            session_id="blocked-recovery",
+            checkout=Path("blocked-recovery").resolve(),
+            status=PortableSessionStatus.RUNNING,
+            recovery_available=True,
+        )
+        conflict = PortableWorktreeLeaseConflict(
+            PortableWorktreeLease(
+                checkout=orphaned.checkout,
+                session_id=orphaned.session_id,
+                owner_id="still-live-application",
+                process_id=401,
+                acquired_at=100.0,
+                heartbeat_at=111.0,
+            ),
+            reason="the renewable heartbeat has not expired",
+        )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (orphaned,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def handle_intent(
+                self,
+                intent: PortableSessionIntent,
+            ) -> PortableSessionSnapshot:
+                self.intent = intent
+                raise conflict
+
+            def shutdown(self) -> None:
+                return None
+
+        supervisor = FakeSupervisor()
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=supervisor,
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#portable-navigation", OptionList)
+            menu.highlighted = 1
+            await pilot.press("enter", "enter")
+            await pilot.pause()
+            detail = str(app.query_one("#portable-detail", Static).render())
+            status = str(app.query_one("#portable-status", Static).render())
+            self.assertTrue(app.is_running)
+
+        self.assertFalse(app.is_running)
+        self.assertEqual(supervisor.intent.kind, PortableSessionIntentKind.RESUME)
+        self.assertIn("Recovery blocked", detail)
+        self.assertIn("still-live-application", detail)
+        self.assertIn("renewable heartbeat has not expired", detail)
+        self.assertNotIn("force", detail.lower())
+        self.assertEqual(status, "RECOVERY BLOCKED")
 
     async def test_force_stop_requires_confirmation(self) -> None:
         running = PortableSessionSnapshot(
@@ -1093,11 +1238,16 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#portable-detail", Static).render()
                 )
                 app._show_sessions_tab()
-                sessions_detail = str(
-                    app.query_one("#portable-detail", Static).render()
-                )
                 menu = app.query_one("#portable-navigation", OptionList)
                 prompts = [
+                    str(menu.get_option_at_index(index).prompt)
+                    for index in range(menu.option_count)
+                ]
+                app._show_session_history()
+                history_detail = str(
+                    app.query_one("#portable-detail", Static).render()
+                )
+                history_prompts = [
                     str(menu.get_option_at_index(index).prompt)
                     for index in range(menu.option_count)
                 ]
@@ -1118,9 +1268,11 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(catalog_session.checkout, worktree.resolve())
             self.assertEqual(cached_launch.checkout, worktree.resolve())
+            self.assertNotIn("[COMPLETED]", " ".join(prompts))
+            self.assertIn("History (1)", prompts)
             self.assertIn(
                 f"PRD: {worktree.resolve() / prd.relative_to(source)}",
-                sessions_detail,
+                history_detail,
             )
             self.assertTrue(
                 any(
@@ -1128,12 +1280,7 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     for prompt in prompts
                 )
             )
-            self.assertTrue(
-                any(
-                    prompt == f"{worktree.name} [COMPLETED]"
-                    for prompt in prompts
-                )
-            )
+            self.assertIn(f"{worktree.name} [COMPLETED]", history_prompts)
 
     async def test_sessions_menu_keeps_workflow_name_for_non_terminal_sessions(
         self,
@@ -1193,18 +1340,25 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 str(menu.get_option_at_index(index).prompt)
                 for index in range(menu.option_count)
             ]
-            detail = str(app.query_one("#portable-detail", Static).render())
+            app._show_session_history()
+            history_prompts = [
+                str(menu.get_option_at_index(index).prompt)
+                for index in range(menu.option_count)
+            ]
+            history_detail = str(app.query_one("#portable-detail", Static).render())
 
         self.assertIn("queued-worktree · queued-change [QUEUED]", prompts)
         self.assertIn("running-worktree · running-change [RUNNING]", prompts)
-        self.assertIn("completed-worktree [COMPLETED]", prompts)
+        self.assertIn("History (1)", prompts)
+        self.assertNotIn("completed-worktree [COMPLETED]", prompts)
+        self.assertIn("completed-worktree [COMPLETED]", history_prompts)
         self.assertNotIn(
             "completed-worktree · completed-change [COMPLETED]",
             prompts,
         )
         self.assertIn(
             f"PRD: {completed_checkout / 'prd' / 'completed-change.md'}",
-            detail,
+            history_detail,
         )
 
     async def test_restored_session_requires_explicit_resume_from_sessions_tab(
@@ -2254,12 +2408,14 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.01)
                     failed = supervisor.snapshot(crashing.session_id)
                     if (
-                        failed.status is PortableSessionStatus.FAILED
+                        failed.status is PortableSessionStatus.INTERRUPTED
                         and app._session_snapshots.get(crashing.session_id) == failed
                     ):
                         break
                 else:
-                    self.fail("Crashed worker did not become a visible failed session.")
+                    self.fail(
+                        "Crashed worker did not become a visible interrupted session."
+                    )
 
                 background_tabs = str(
                     app.query_one("#portable-tabs", Static).render()
@@ -2293,12 +2449,12 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await pilot.pause()
 
-            self.assertEqual(failed.status, PortableSessionStatus.FAILED)
+            self.assertEqual(failed.status, PortableSessionStatus.INTERRUPTED)
             self.assertIsNone(failed.input_request)
-            self.assertIn("alpha [FAILED]", failed_tab)
+            self.assertIn("alpha [INTERRUPTED]", failed_tab)
             self.assertNotIn("[INPUT!]", failed_tab)
             self.assertFalse(failed_input_displayed)
-            self.assertEqual(failed_options, ["Sessions", "alpha [FAILED]"])
+            self.assertEqual(failed_options, ["Resume", "Sessions"])
             self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
             self.assertEqual(completed.activity, ("continued with beta-only",))
 

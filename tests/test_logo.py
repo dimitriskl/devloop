@@ -15,14 +15,14 @@ class LogoTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         logo = render_logo(root)
         lines = logo.splitlines()
-        self.assertIn("v0.2.1", logo)
+        self.assertIn("v0.3.1", logo)
         self.assertEqual(len({len(line) for line in lines}), 1)
 
     def test_rendered_logo_uses_version_argument(self) -> None:
         root = Path(__file__).resolve().parents[1]
         logo = render_logo(root, version="1.2.3")
         self.assertIn("v1.2.3", logo)
-        self.assertNotIn("v0.2.1", logo)
+        self.assertNotIn("v0.3.1", logo)
 
 
 if __name__ == "__main__":

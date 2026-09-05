@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from itertools import count
-from queue import Empty
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event, RLock, get_ident
-from typing import Any, Iterator, TextIO
+from typing import Any, TextIO
+
+from .portable_protocol import validated_portable_approval_decisions
 
 
 class PortableRuntimeEventKind(str, Enum):
@@ -133,6 +134,32 @@ class PortableRuntimeBridge:
             self._responses.pop(request_id, None)
         self._publish_interaction_completed(request_id)
         return value
+
+    def request_approval(
+        self,
+        prompt: str,
+        *,
+        supported_decisions: Sequence[str],
+        default_decision: str,
+        cancel_decision: str,
+    ) -> str:
+        decisions = validated_portable_approval_decisions(
+            supported_decisions,
+            default_decision=default_decision,
+            cancel_decision=cancel_decision,
+        )
+        labels = {
+            decision: decision.replace("_", " ").title()
+            for decision in decisions
+        }
+        return self.choose(
+            tuple(labels.items()),
+            default_key=default_decision,
+            cancel_key=cancel_decision,
+            render=lambda selected: self.show_screen(
+                f"{prompt}\n\nSelected: {labels[selected]}"
+            ),
+        )
 
     def request_stop(self) -> None:
         """Release every blocking interaction when the application exits."""

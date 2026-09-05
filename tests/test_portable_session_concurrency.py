@@ -335,6 +335,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
             from devloop.portable_session_catalog import (
                 bind_active_catalog_session_checkout,
             )
+            from devloop.state import LoopStateWriter
 
             prd_path = Path(sys.argv[2]).resolve()
             issues_index = Path(sys.argv[3]).resolve()
@@ -346,6 +347,12 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
                     Path.cwd(),
                     prd_path=prd_path,
                     issues_index_path=issues_index,
+                )
+                LoopStateWriter(issues_index).record_run_start(
+                    Path.cwd(),
+                    prd_path,
+                    ["0001"],
+                    dry_run=False,
                 )
                 bridge = active_portable_runtime()
                 assert bridge is not None
@@ -1775,7 +1782,7 @@ class PortableSessionConcurrencyTests(unittest.TestCase):
             while time.monotonic() < deadline and not notices:
                 time.sleep(0.01)
 
-            self.assertEqual(notices, ["Portable session plain-session [QUEUED]"])
+            self.assertEqual(notices, ["Portable session [QUEUED]"])
             self.assertFalse(operation_started.is_set())
 
             catalog.release_execution_capacity(

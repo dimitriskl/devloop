@@ -15,7 +15,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from devloop import cli, interactive_runner, portable_sessions
-from devloop.portable_session_catalog import PortableSessionCatalog
+from devloop.portable_session_catalog import (
+    PortablePlanningSettings,
+    PortableSessionCatalog,
+)
 from devloop.portable_sessions import (
     PortableSessionInputKind,
     PortableSessionInputRequest,
@@ -27,8 +30,11 @@ from devloop.portable_sessions import (
     PortableWorkflowOperation,
 )
 from devloop.subprocess_utils import (
-    ProcessTreeState,
+    ProcessIdentity,
     ProcessTerminationResult,
+    ProcessTreeIdentity,
+    ProcessTreeKind,
+    ProcessTreeState,
     process_tree_creation_kwargs,
     register_process_tree,
     terminate_process,
@@ -1422,24 +1428,48 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 processes.append(process)
                 return process
 
-            supervisor = PortableSessionSupervisor(
-                worker_launcher=launch_worker,
-                catalog=catalog,
-                owner_id=owner_id,
-            )
             launch = PortableSessionLaunch(
                 session_id="late-force-stop",
                 checkout=checkout,
                 operation=PortableWorkflowOperation.PLANNING,
                 arguments=(),
             )
-            supervisor.start_session(launch)
+            catalog.create_session(
+                launch,
+                PortablePlanningSettings(
+                    backend="CODEX_CLI",
+                    model="gpt-5.6-sol",
+                    reasoning_effort="xhigh",
+                    fast="OFF",
+                    timeout_seconds=900.0,
+                    checkpoint_seconds=180.0,
+                ),
+            )
+            catalog.save_planning_thread(
+                launch.session_id,
+                "0198c0de-aaaa-bbbb-cccc-444455556666",
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=launch_worker,
+                catalog=catalog,
+                owner_id=owner_id,
+            )
+            supervisor.resume_session(launch.session_id)
             deadline = time.monotonic() + 5
             while (
                 time.monotonic() < deadline
                 and not supervisor.snapshot(launch.session_id).activity
             ):
                 time.sleep(0.01)
+
+            mocked_reap_completed = threading.Event()
+
+            def retain_cleanup_until_retry(
+                process: subprocess.Popen[str],
+            ) -> ProcessTerminationResult:
+                if process.poll() is not None:
+                    mocked_reap_completed.set()
+                return unknown
 
             with (
                 mock.patch.object(
@@ -1455,7 +1485,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 mock.patch.object(
                     portable_sessions,
                     "terminate_process",
-                    return_value=unknown,
+                    side_effect=retain_cleanup_until_retry,
                 ),
             ):
                 interrupted = supervisor.force_stop_session(launch.session_id)
@@ -1468,6 +1498,10 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                     ].next_worker_sequence < 4
                 ):
                     time.sleep(0.01)
+                self.assertTrue(
+                    mocked_reap_completed.wait(timeout=5),
+                    "stdout reader did not finish its mocked reap",
+                )
 
             after_late_frames = supervisor.snapshot(launch.session_id)
             retained_capacity = catalog.owns_execution_capacity(
@@ -2556,6 +2590,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 }), flush=True)
 
             json.loads(sys.stdin.readline())
+            json.loads(sys.stdin.readline())
             send(1, "INPUT_REQUEST", {
                 "request_kind": "TEXT",
                 "prompt": "First request",
@@ -2588,10 +2623,12 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             """
         )
 
+        workers: list[subprocess.Popen[str]] = []
+
         def launch_worker(
             launch: PortableSessionLaunch,
         ) -> subprocess.Popen[str]:
-            return subprocess.Popen(
+            process = subprocess.Popen(
                 [sys.executable, "-u", "-c", worker_source, launch.session_id],
                 cwd=launch.checkout,
                 stdin=subprocess.PIPE,
@@ -2600,12 +2637,15 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
             )
+            workers.append(process)
+            return process
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkout = root / "checkout"
             checkout.mkdir()
             catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.set_concurrency_limit(1)
             owner_id = "claim-aware-status-shell"
             supervisor = PortableSessionSupervisor(
                 worker_launcher=launch_worker,
@@ -2618,76 +2658,143 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 operation=PortableWorkflowOperation.PLANNING,
                 arguments=(),
             )
+            blocker_owner_id = "claim-aware-status-blocker"
+            blocker_checkout = root / "blocker"
+            blocker_checkout.mkdir()
+            blocker_launch = PortableSessionLaunch(
+                session_id="claim-aware-status-blocker",
+                checkout=blocker_checkout,
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            blocker_registered = False
+            blocker_claimed = False
 
-            started = supervisor.start_session(launch)
-            self.assertEqual(started.status, PortableSessionStatus.RUNNING)
-            self.assertTrue(
-                catalog.owns_execution_capacity(
+            try:
+                started = supervisor.start_session(launch)
+                self.assertEqual(started.status, PortableSessionStatus.RUNNING)
+                self.assertTrue(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                lease = catalog.get_worktree_lease(checkout)
+                self.assertIsNotNone(lease)
+                assert lease is not None
+                self.assertIsNotNone(lease.process_tree_identity)
+                worker_input = workers[0].stdin
+                assert worker_input is not None
+                worker_input.write("{}\n")
+                worker_input.flush()
+
+                waiting = self._wait_for_input_prompt(
+                    supervisor,
                     launch.session_id,
-                    owner_id=owner_id,
+                    "Second request",
                 )
-            )
+                self.assertEqual(
+                    waiting.status,
+                    PortableSessionStatus.WAITING_FOR_INPUT,
+                )
+                self.assertEqual(waiting.progress.stage, "")
+                self.assertTrue(
+                    any(
+                        "RUNNING without owned execution capacity" in diagnostic
+                        for diagnostic in waiting.diagnostics
+                    )
+                )
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
 
-            waiting = self._wait_for_input_prompt(
-                supervisor,
-                launch.session_id,
-                "Second request",
-            )
-            self.assertEqual(waiting.status, PortableSessionStatus.WAITING_FOR_INPUT)
-            self.assertEqual(waiting.progress.stage, "")
-            self.assertTrue(
-                any(
-                    "RUNNING without owned execution capacity" in diagnostic
-                    for diagnostic in waiting.diagnostics
+                catalog.create_session_with_lease(
+                    blocker_launch,
+                    owner_id=blocker_owner_id,
                 )
-            )
+                blocker_registered = True
+                blocker_claimed = catalog.request_execution_capacity(
+                    blocker_launch.session_id,
+                    owner_id=blocker_owner_id,
+                )
+                self.assertTrue(blocker_claimed)
+
+                queued = self._provide_current_input(
+                    supervisor,
+                    launch.session_id,
+                    "continue",
+                )
+                self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+
+                catalog.release_execution_capacity(
+                    blocker_launch.session_id,
+                    owner_id=blocker_owner_id,
+                    status=PortableSessionStatus.READY,
+                )
+                blocker_claimed = False
+                catalog.release_worktree_lease(
+                    blocker_launch.session_id,
+                    owner_id=blocker_owner_id,
+                )
+                blocker_registered = False
+
+                claimed_waiting = self._wait_for_input_prompt(
+                    supervisor,
+                    launch.session_id,
+                    "Third request",
+                )
+                self.assertEqual(
+                    claimed_waiting.status,
+                    PortableSessionStatus.WAITING_FOR_INPUT,
+                )
+                self.assertEqual(claimed_waiting.progress.stage, "claimed stage")
+                self.assertFalse(
+                    catalog.owns_execution_capacity(
+                        launch.session_id,
+                        owner_id=owner_id,
+                    )
+                )
+                queued_again = self._provide_current_input(
+                    supervisor,
+                    launch.session_id,
+                    "finish",
+                )
+                self.assertEqual(queued_again.status, PortableSessionStatus.QUEUED)
+                completed = self._wait_for_status(
+                    supervisor,
+                    launch.session_id,
+                    PortableSessionStatus.READY,
+                )
+            finally:
+                supervisor.shutdown()
+                if blocker_claimed:
+                    catalog.release_execution_capacity(
+                        blocker_launch.session_id,
+                        owner_id=blocker_owner_id,
+                        status=PortableSessionStatus.READY,
+                    )
+                if blocker_registered:
+                    catalog.release_worktree_lease(
+                        blocker_launch.session_id,
+                        owner_id=blocker_owner_id,
+                    )
+
             self.assertFalse(
                 catalog.owns_execution_capacity(
                     launch.session_id,
                     owner_id=owner_id,
                 )
             )
-
-            queued = self._provide_current_input(
-                supervisor,
-                launch.session_id,
-                "continue",
-            )
-            self.assertEqual(queued.status, PortableSessionStatus.QUEUED)
-            self.assertFalse(
-                catalog.owns_execution_capacity(
-                    launch.session_id,
-                    owner_id=owner_id,
-                )
-            )
-            claimed_waiting = self._wait_for_input_prompt(
-                supervisor,
-                launch.session_id,
-                "Third request",
-            )
-            self.assertEqual(
-                claimed_waiting.status,
-                PortableSessionStatus.WAITING_FOR_INPUT,
-            )
-            self.assertEqual(claimed_waiting.progress.stage, "claimed stage")
-            self.assertFalse(
-                catalog.owns_execution_capacity(
-                    launch.session_id,
-                    owner_id=owner_id,
-                )
-            )
-            queued_again = self._provide_current_input(
-                supervisor,
-                launch.session_id,
-                "finish",
-            )
-            self.assertEqual(queued_again.status, PortableSessionStatus.QUEUED)
-            completed = self._wait_for_status(
-                supervisor,
-                launch.session_id,
-                PortableSessionStatus.READY,
-            )
-            supervisor.shutdown()
+            self.assertIsNone(catalog.get_worktree_lease(checkout))
 
         self.assertEqual(completed.status, PortableSessionStatus.READY)
         self.assertEqual(completed.result, 0)
@@ -3551,8 +3658,21 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 return None
 
         class FakeWorkerProcess:
-            def __init__(self, *, fail_on_second_flush: bool) -> None:
+            def __init__(
+                self,
+                *,
+                fail_on_second_flush: bool,
+                process_number: int,
+            ) -> None:
                 self.return_code: int | None = None
+                self.process_tree_identity = ProcessTreeIdentity(
+                    root=ProcessIdentity(
+                        pid=6_100 + process_number,
+                        creation_time=7_100 + process_number,
+                    ),
+                    kind=ProcessTreeKind.ROOT_PROCESS,
+                    tree_id=6_100 + process_number,
+                )
                 self.stdout = BlockingOutput()
                 self.stderr = BlockingOutput()
                 self.stdin = WorkerInput(
@@ -3599,13 +3719,22 @@ class PortableSessionSupervisorTests(unittest.TestCase):
             checkout = root / "checkout"
             checkout.mkdir()
             catalog = BlockingReleaseCatalog(root / "catalog.sqlite3")
-            retired_process = FakeWorkerProcess(fail_on_second_flush=True)
-            replacement_process = FakeWorkerProcess(fail_on_second_flush=False)
+            retired_process = FakeWorkerProcess(
+                fail_on_second_flush=True,
+                process_number=1,
+            )
+            replacement_process = FakeWorkerProcess(
+                fail_on_second_flush=False,
+                process_number=2,
+            )
             processes = iter((retired_process, replacement_process))
             supervisor = PortableSessionSupervisor(
                 worker_launcher=lambda _launch: next(processes),
                 catalog=catalog,
                 owner_id="same-shell",
+                worker_tree_identity_capture=(
+                    lambda process: process.process_tree_identity
+                ),
             )
             launch = PortableSessionLaunch(
                 session_id="session-lease-generation",
@@ -3687,11 +3816,16 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                 }), flush=True)
 
             json.loads(sys.stdin.readline())
+            options = (
+                [["APPROVE_ONCE", "Approve once"], ["DENY", "Deny"]]
+                if request_kind == "APPROVAL"
+                else [["accept", "Accept"], ["deny", "Deny"]]
+            )
             common = {
                 "request_kind": request_kind,
-                "options": [["accept", "Accept"], ["deny", "Deny"]],
-                "default_key": "deny",
-                "cancel_key": "deny",
+                "options": options,
+                "default_key": "DENY" if request_kind == "APPROVAL" else "deny",
+                "cancel_key": "DENY" if request_kind == "APPROVAL" else "deny",
             }
             send(1, "INPUT_REQUEST", {
                 **common,
@@ -3751,6 +3885,14 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                         worker_launcher=launch_worker
                     )
                     supervisor.start_session(launch)
+                    first_value = (
+                        "APPROVE_ONCE"
+                        if request_kind == "APPROVAL"
+                        else "accept"
+                    )
+                    second_value = (
+                        "DENY" if request_kind == "APPROVAL" else "deny"
+                    )
                     request_a_snapshot = self._wait_for_status(
                         supervisor,
                         launch.session_id,
@@ -3762,7 +3904,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                     self.assertEqual(request_a.generation, 1)
                     supervisor.provide_input(
                         launch.session_id,
-                        "accept",
+                        first_value,
                         request_id=request_a.request_id,
                         request_generation=request_a.generation,
                     )
@@ -3793,7 +3935,7 @@ class PortableSessionSupervisorTests(unittest.TestCase):
                     self.assertEqual(unchanged.input_request, request_b)
                     supervisor.provide_input(
                         launch.session_id,
-                        "deny",
+                        second_value,
                         request_id=request_b.request_id,
                         request_generation=request_b.generation,
                     )
@@ -4081,6 +4223,316 @@ class PortableSessionSupervisorTests(unittest.TestCase):
         self.assertEqual(completed.result, 1)
         self.assertIn("isolated worker diagnostic", completed.diagnostics)
         self.assertIn("worker failed", completed.diagnostics)
+
+    def test_terminal_observation_waits_for_delayed_standard_error_projection(
+        self,
+    ) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print("delayed worker diagnostic", file=sys.stderr, flush=True)
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "FAILURE",
+                "payload": {"message": "worker failed"},
+            }), flush=True)
+            """
+        )
+
+        class DelayedDiagnosticStream:
+            def __init__(self, stream: object) -> None:
+                self._stream = stream
+                self.reader_started = threading.Event()
+                self.release_reader = threading.Event()
+
+            def __iter__(self):
+                self.reader_started.set()
+                self.release_reader.wait(timeout=5)
+                return iter(self._stream)
+
+            def close(self) -> None:
+                self._stream.close()
+
+        delayed_stderr: DelayedDiagnosticStream | None = None
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            nonlocal delayed_stderr
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            assert process.stderr is not None
+            delayed_stderr = DelayedDiagnosticStream(process.stderr)
+            process.stderr = delayed_stderr  # type: ignore[assignment]
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="session-delayed-diagnostic",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            supervisor.start_session(launch)
+            assert delayed_stderr is not None
+            self.assertTrue(delayed_stderr.reader_started.wait(timeout=5))
+            terminal_observed = threading.Event()
+            terminal_snapshot: list[PortableSessionSnapshot] = []
+
+            def observe_terminal() -> None:
+                terminal_snapshot.append(
+                    supervisor.wait_for_terminal(launch.session_id, timeout=5)
+                )
+                terminal_observed.set()
+
+            waiter = threading.Thread(target=observe_terminal)
+            waiter.start()
+            exposed_before_stderr = terminal_observed.wait(timeout=0.2)
+            snapshot_before_release = supervisor.snapshot(launch.session_id)
+            thread_state_before_release = tuple(
+                (thread.name, thread.is_alive())
+                for thread in supervisor._threads
+                if launch.session_id in thread.name
+            )
+            delayed_stderr.release_reader.set()
+            waiter.join(timeout=5)
+            supervisor.shutdown()
+
+        self.assertFalse(
+            exposed_before_stderr,
+            "Terminal state was exposed before stderr projection: "
+            f"snapshot={snapshot_before_release!r}, "
+            f"threads={thread_state_before_release!r}",
+        )
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(len(terminal_snapshot), 1)
+        self.assertIn(
+            "delayed worker diagnostic",
+            terminal_snapshot[0].diagnostics,
+        )
+
+    def test_terminal_drain_deadline_does_not_deadlock_or_drop_late_stderr(
+        self,
+    ) -> None:
+        worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print("late worker diagnostic", file=sys.stderr, flush=True)
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "FAILURE",
+                "payload": {"message": "worker failed"},
+            }), flush=True)
+            """
+        )
+
+        class HeldOpenDiagnosticStream:
+            def __init__(self, stream: object) -> None:
+                self._stream = stream
+                self.reader_started = threading.Event()
+                self.release_reader = threading.Event()
+
+            def __iter__(self):
+                self.reader_started.set()
+                self.release_reader.wait(timeout=5)
+                return iter(self._stream)
+
+            def close(self) -> None:
+                self._stream.close()
+
+        held_stderr: HeldOpenDiagnosticStream | None = None
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            nonlocal held_stderr
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-c", worker_source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            assert process.stderr is not None
+            held_stderr = HeldOpenDiagnosticStream(process.stderr)
+            process.stderr = held_stderr  # type: ignore[assignment]
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="session-held-open-diagnostic",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            with mock.patch.object(
+                portable_sessions,
+                "_STDERR_TERMINAL_DRAIN_TIMEOUT_SECONDS",
+                0.01,
+            ):
+                supervisor.start_session(launch)
+                assert held_stderr is not None
+                self.assertTrue(held_stderr.reader_started.wait(timeout=5))
+                completed = supervisor.wait_for_terminal(
+                    launch.session_id,
+                    timeout=1,
+                )
+                self.assertTrue(
+                    any(
+                        "bounded terminal drain deadline" in diagnostic
+                        for diagnostic in completed.diagnostics
+                    ),
+                    completed,
+                )
+                held_stderr.release_reader.set()
+                deadline = time.monotonic() + 1
+                while (
+                    time.monotonic() < deadline
+                    and "late worker diagnostic"
+                    not in supervisor.snapshot(launch.session_id).diagnostics
+                ):
+                    time.sleep(0.01)
+                final = supervisor.snapshot(launch.session_id)
+                supervisor.shutdown()
+
+        self.assertEqual(final.status, PortableSessionStatus.FAILED)
+        self.assertIn("late worker diagnostic", final.diagnostics)
+
+    def test_late_stderr_from_retired_generation_cannot_mutate_replacement(
+        self,
+    ) -> None:
+        failed_worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print("retired generation diagnostic", file=sys.stderr, flush=True)
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "FAILURE",
+                "payload": {"message": "first generation failed"},
+            }), flush=True)
+            """
+        )
+        completed_worker_source = textwrap.dedent(
+            """
+            import json
+            import sys
+
+            session_id = sys.argv[1]
+            json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "version": 1,
+                "session_id": session_id,
+                "sequence": 1,
+                "kind": "COMPLETION",
+                "payload": {"exit_code": 0},
+            }), flush=True)
+            """
+        )
+
+        class RetiredDiagnosticStream:
+            def __init__(self, stream: object) -> None:
+                self._stream = stream
+                self.reader_started = threading.Event()
+                self.release_reader = threading.Event()
+
+            def __iter__(self):
+                self.reader_started.set()
+                self.release_reader.wait(timeout=5)
+                return iter(self._stream)
+
+            def close(self) -> None:
+                self._stream.close()
+
+        launches = 0
+        retired_stderr: RetiredDiagnosticStream | None = None
+
+        def launch_worker(
+            launch: PortableSessionLaunch,
+        ) -> subprocess.Popen[str]:
+            nonlocal launches, retired_stderr
+            launches += 1
+            source = failed_worker_source if launches == 1 else completed_worker_source
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-c", source, launch.session_id],
+                cwd=launch.checkout,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            if launches == 1:
+                assert process.stderr is not None
+                retired_stderr = RetiredDiagnosticStream(process.stderr)
+                process.stderr = retired_stderr  # type: ignore[assignment]
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PortableSessionSupervisor(worker_launcher=launch_worker)
+            launch = PortableSessionLaunch(
+                session_id="session-retired-stderr",
+                checkout=Path(directory),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            )
+            with mock.patch.object(
+                portable_sessions,
+                "_STDERR_TERMINAL_DRAIN_TIMEOUT_SECONDS",
+                0.01,
+            ):
+                supervisor.start_session(launch)
+                assert retired_stderr is not None
+                self.assertTrue(retired_stderr.reader_started.wait(timeout=5))
+                supervisor.wait_for_terminal(launch.session_id, timeout=1)
+                deadline = time.monotonic() + 1
+                while (
+                    time.monotonic() < deadline
+                    and launch.session_id in supervisor._running
+                ):
+                    time.sleep(0.01)
+                self.assertNotIn(launch.session_id, supervisor._running)
+                supervisor.resume_session(launch.session_id)
+                retired_stderr.release_reader.set()
+                completed = supervisor.wait_for_terminal(
+                    launch.session_id,
+                    timeout=1,
+                )
+                supervisor.shutdown()
+
+        self.assertEqual(completed.status, PortableSessionStatus.COMPLETED)
+        self.assertNotIn(
+            "retired generation diagnostic",
+            completed.diagnostics,
+        )
 
     def _run_invalid_worker_frame(
         self,

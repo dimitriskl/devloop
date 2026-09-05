@@ -57,4 +57,17 @@ Covers parent PRD user stories 80–91.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Implementation: `1d4c6bf`, `07c6b04`, and `3d55bfa` deliver transactional,
+  idempotent adoption and fail-closed Git/worktree discovery.
+- Review: PASS with no blocking correctness, security, or data-safety findings.
+- QA: PASS; 99 unique tests and 123 green executions covered adoption three
+  times, catalog/schema/history, and the actual `0.2.1` reader. Mixed real
+  worktrees, v7-to-v8 rollback/retry, compile, focused Ruff, and diff checks
+  passed. No leases, requests, claims, QA processes, or SQLite artifacts
+  remained; the database was removable, and configuration, project artifacts,
+  and Git evidence were unchanged.
+- Limitations: validation was Windows-only. Live POSIX validation and Issue
+  0012 installer/startup/version wiring are out of scope; authenticated, full
+  suite, and mypy gates were not run.

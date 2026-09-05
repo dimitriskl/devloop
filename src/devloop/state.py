@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -95,6 +96,14 @@ class IssueResumeCursor:
     qa_result: RoleResult | None = None
 
 
+@dataclass(frozen=True)
+class DurableSchedulingCheckpoint:
+    """Verified project-local evidence used to recover delivery scheduling."""
+
+    active_attempt: dict[str, Any] | None
+    used_relink_receipt: bool = False
+
+
 class LoopStateWriter:
     def __init__(self, issues_index: Path) -> None:
         self.issues_index = issues_index
@@ -103,6 +112,108 @@ class LoopStateWriter:
         self.prd_state_path: Path | None = None
         self.prd_board_path: Path | None = None
         self.state = load_existing_state(self.state_path, issues_index)
+
+    def durable_scheduling_checkpoint(
+        self,
+        *,
+        repo_root: Path,
+        prd_path: Path,
+        relocated_from_repo_root: Path | None = None,
+        relocated_from_prd_path: Path | None = None,
+        relocated_from_issues_index_path: Path | None = None,
+        relocated_state_sha256: str | None = None,
+    ) -> DurableSchedulingCheckpoint:
+        """Reload and verify persisted run-start evidence before recovery."""
+        try:
+            persisted_state = load_required_state(self.state_path)
+        except FileNotFoundError as error:
+            raise ValueError(
+                f"Cannot recover delivery: durable loop state {self.state_path} is missing."
+            ) from error
+        used_relink_receipt = self._validate_durable_run_start(
+            persisted_state,
+            repo_root=repo_root,
+            prd_path=prd_path,
+            relocated_from_repo_root=relocated_from_repo_root,
+            relocated_from_prd_path=relocated_from_prd_path,
+            relocated_from_issues_index_path=relocated_from_issues_index_path,
+            relocated_state_sha256=relocated_state_sha256,
+        )
+        self.state = persisted_state
+        return DurableSchedulingCheckpoint(
+            active_attempt=self.active_scheduling_attempt(),
+            used_relink_receipt=used_relink_receipt,
+        )
+
+    def _validate_durable_run_start(
+        self,
+        state: dict[str, Any],
+        *,
+        repo_root: Path,
+        prd_path: Path,
+        relocated_from_repo_root: Path | None = None,
+        relocated_from_prd_path: Path | None = None,
+        relocated_from_issues_index_path: Path | None = None,
+        relocated_state_sha256: str | None = None,
+    ) -> bool:
+        selected_issues = state.get("selected_issues")
+        issues_index = state.get("issues_index")
+        stored_repo_root = state.get("repo_root")
+        stored_prd_path = state.get("prd_path")
+        dry_run = state.get("dry_run")
+        events = state.get("events")
+        common_run_start_is_persisted = (
+            isinstance(selected_issues, list)
+            and bool(selected_issues)
+            and all(isinstance(issue, str) and issue for issue in selected_issues)
+            and dry_run is False
+            and isinstance(events, list)
+            and any(
+                isinstance(event, dict)
+                and event.get("type") == "run-start"
+                and event.get("issues") == selected_issues
+                and event.get("dry_run") is dry_run
+                for event in events
+            )
+        )
+        current_paths_match = (
+            isinstance(issues_index, str)
+            and Path(issues_index).resolve() == self.issues_index.resolve()
+            and isinstance(stored_repo_root, str)
+            and Path(stored_repo_root).resolve() == repo_root.resolve()
+            and isinstance(stored_prd_path, str)
+            and Path(stored_prd_path).resolve() == prd_path.resolve()
+        )
+        relocation_values = (
+            relocated_from_repo_root,
+            relocated_from_prd_path,
+            relocated_from_issues_index_path,
+            relocated_state_sha256,
+        )
+        has_complete_relocation = all(value is not None for value in relocation_values)
+        relocation_paths_match = (
+            has_complete_relocation
+            and isinstance(issues_index, str)
+            and Path(issues_index).resolve()
+            == relocated_from_issues_index_path.resolve()  # type: ignore[union-attr]
+            and isinstance(stored_repo_root, str)
+            and Path(stored_repo_root).resolve()
+            == relocated_from_repo_root.resolve()  # type: ignore[union-attr]
+            and isinstance(stored_prd_path, str)
+            and Path(stored_prd_path).resolve()
+            == relocated_from_prd_path.resolve()  # type: ignore[union-attr]
+            and hashlib.sha256(self.state_path.read_bytes()).hexdigest()
+            == relocated_state_sha256
+        )
+        run_start_is_persisted = common_run_start_is_persisted and (
+            current_paths_match or relocation_paths_match
+        )
+        if not run_start_is_persisted:
+            raise ValueError(
+                "Cannot recover delivery: durable loop state has no verified "
+                "run-start checkpoint."
+            )
+        return not current_paths_match
 
     def has_resolved_workflow(self) -> bool:
         return (
@@ -742,13 +853,20 @@ class LoopStateWriter:
             if issue_id is None or attempt.issue_id == issue_id
         )
 
-    def record_run_start(self, repo_root: Path, prd_path: Path, issues: list[str], dry_run: bool) -> None:
+    def record_run_start(
+        self,
+        repo_root: Path,
+        prd_path: Path,
+        issues: list[str],
+        dry_run: bool,
+    ) -> None:
         self.prd_state_path = prd_path.parent / "devloop.status.json"
         self.prd_board_path = prd_path.parent / "devloop.status.md"
         self.state.update(
             {
                 "repo_root": str(repo_root),
                 "prd_path": str(prd_path),
+                "issues_index": str(self.issues_index),
                 "selected_issues": issues,
                 "dry_run": dry_run,
             }
@@ -1331,7 +1449,7 @@ def write_text_creating_parent(path: Path, text: str) -> None:
 
 def load_existing_state(state_path: Path, issues_index: Path) -> dict[str, Any]:
     try:
-        state_text = state_path.read_text(encoding="utf-8")
+        return load_required_state(state_path)
     except FileNotFoundError:
         return {
             "started_at": now(),
@@ -1339,6 +1457,13 @@ def load_existing_state(state_path: Path, issues_index: Path) -> dict[str, Any]:
             "events": [],
             "issues": {},
         }
+
+
+def load_required_state(state_path: Path) -> dict[str, Any]:
+    try:
+        state_text = state_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise
     except OSError as error:
         raise ValueError(
             f"Cannot load existing loop state {state_path}: "

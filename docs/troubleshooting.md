@@ -39,6 +39,49 @@ Check the loop state files next to the issue README:
 Recent versions print selected issues, role status, and blocked summaries to
 the terminal. If a run still looks silent, open `README.loop.md` first.
 
+## A saved worktree is unavailable
+
+The Sessions tab keeps missing or moved worktrees visible as `UNAVAILABLE`.
+Choose **Relink** and select the moved canonical Git checkout, or choose
+**Forget** to remove only its machine-catalog metadata. Neither action should
+delete project files, PRDs, issues, logs, branches, or worktrees.
+
+## A worktree lease is stale or ambiguous
+
+An expired lease is reclaimed only when its owning process is confirmed dead.
+If the diagnostic says ownership is ambiguous, do not delete the catalog or
+force another session into that checkout. Close or inspect the named Dev Loop
+process, confirm its worker has stopped, and retry. Use a different Git
+worktree when the owner is still live.
+
+## A portable worker was interrupted
+
+An unexpected worker exit records the owning session as `INTERRUPTED`, retains
+bounded diagnostics, and does not replay work automatically. Inspect the
+session activity and project-local `.loop.logs`, then explicitly choose Resume
+or Retry. Sibling sessions and their worktrees remain independent.
+
+## The portable session catalog is corrupt or incompatible
+
+Do not delete it while sessions or leases may be live. Preserve a copy of the
+reported catalog path, stop Dev Loop workers, and inspect the schema/version
+diagnostic. Unsupported or corrupt catalogs fail closed; reinstalling the
+application alone does not authorize discarding saved project metadata.
+
+## The supervisor reports a protocol mismatch
+
+A protocol-version, frame, identity, sequence, or payload mismatch means the
+supervisor and worker do not share a supported contract. Stop the affected
+session, update the complete portable bundle and runtime together, then retry.
+Do not reuse a worker from a different installed version.
+
+## A v0.2.1 planning-only conversation is missing after update
+
+Portable Dev Loop 0.2.1 did not persist a pre-PRD planning conversation after
+its process ended. V3 can adopt PRD-backed unfinished workflows but cannot
+reconstruct that already-lost conversation. Start a new planning session using
+the surviving project evidence.
+
 ## The Workflow Editor cannot apply a draft
 
 Read the validation message together with the selected Step Display Name and,
@@ -252,6 +295,29 @@ yourself before rerunning.
 
 If the path is registered on a different branch, choose a different worktree path
 or rerun with the branch name that matches that checkout.
+
+## Portable install pointer or journal is rejected
+
+Do not edit or delete the reported release, pointer, journal, or backup path.
+The updater intentionally fails closed when metadata is torn, has unknown
+fields, escapes `InstallDir/releases/<commit>`, references a symbolic link or
+reparse point, or disagrees with the release commit and fingerprints. The
+previous `current.json` target remains the recovery source. Preserve
+`InstallDir/bootstrap`, the named release directories, and the complete error
+before retrying the same installed update command.
+
+An interrupted phase in `bootstrap/install-transaction.json` is recovered by
+the next foreground installer invocation. No detached recovery helper runs.
+`release_ready` means the immutable candidate exists but is not current;
+`adopted` means user-state adoption committed but the pointer has not switched;
+`switched` means the atomic pointer already names the candidate. A corrupt
+journal is retained for inspection and is never treated as deletion authority.
+
+A crash after the candidate directory is renamed but before `release_ready` is
+recorded is also recoverable. The prepared journal is accepted only when its
+independent installer-created ownership record and the candidate or canonical
+release fingerprints agree. A same-prefix directory without that ownership
+record is never moved or removed.
 
 ## MCP does not start
 

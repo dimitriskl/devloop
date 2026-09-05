@@ -25,6 +25,7 @@ from devloop.portable_runtime import (
     PortableRuntimeEventKind,
     portable_runtime_session,
 )
+from devloop.portable_sessions import PortablePartialWorkContext
 from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
     ANALYSIS_STEP_ID,
@@ -110,6 +111,10 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
             )
             parser = interactive_runner.build_parser()
             args = parser.parse_args(["--repo", str(root), "--goal", "plan it"])
+            partial_work_context = PortablePartialWorkContext.from_sequences(
+                activity=("Recovered planning activity",),
+                diagnostics=("Recovered planning diagnostic",),
+            )
             adapter = mock.Mock()
             adapter.load_catalog.return_value = live_catalog
             bundle = mock.Mock(root=root)
@@ -159,7 +164,11 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
                 "run_planning_chat",
                 return_value=None,
             ) as run_chat, redirect_stdout(StringIO()):
-                result = interactive_runner._run_planning(parser, args)
+                result = interactive_runner._run_planning(
+                    parser,
+                    args,
+                    partial_work_context=partial_work_context,
+                )
 
         self.assertEqual(result, 0)
         adapter_type.assert_called_with(cwd=root, codex="codex")
@@ -191,6 +200,10 @@ class PlanningExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(
             config.workflow_progress.active_step.model,
             "gpt-5.6-terra",
+        )
+        self.assertIn(
+            "Recovered planning diagnostic",
+            run_chat.call_args.kwargs["initial_prompt"],
         )
 
     def test_future_run_edits_during_analysis_do_not_replace_handoff_snapshot(
@@ -817,6 +830,7 @@ class BuildDevloopArgsTests(unittest.TestCase):
         self.assertIn("--start-issue", args)
         self.assertIn("0002", args)
         self.assertIn("--no-worktree", args)
+        self.assertIn("--single-issue", args)
         self.assertNotIn("--all", args)
 
     def test_handoff_summary_reports_pending_issue_count(self) -> None:

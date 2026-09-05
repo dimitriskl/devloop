@@ -1,24 +1,21 @@
 # Worktrees
 
-The runner assumes implementation should happen in a dedicated worktree when you
-choose one.
+The direct runner uses the source checkout unless you explicitly request a
+dedicated implementation worktree.
 
-Interactive mode:
+Default direct run:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\design\prd\feature\feature.md --issues E:\design\prd\feature\issues\README.md
+.\bin\devloop.ps1 --prd E:\design\prd\feature\feature.md
 ```
 
-If worktree flags are omitted, the runner asks:
+If worktree flags are omitted, the runner uses the source checkout without a
+prompt in both interactive and non-interactive modes. `--no-worktree` remains
+accepted when a command should state this default explicitly.
 
-1. Whether to create a dedicated implementation worktree.
-2. The implementation worktree parent path.
-3. The implementation worktree folder name.
-4. The implementation branch name.
-
-The interactive default is yes. If the PRD and issue pack were created but not
-committed yet, the runner copies the PRD folder or legacy PRD/issue files into
-the implementation worktree before starting coder/reviewer/QA passes.
+When a dedicated worktree is requested and the PRD Package has not been
+committed yet, the runner copies its planning artifacts into the implementation
+worktree before starting coder/reviewer/QA passes.
 
 Branch prompts accept friendly text and normalize it before Git runs. For
 example, `Reset Queue` becomes `Reset-Queue`.
@@ -31,7 +28,6 @@ Non-interactive creation:
 ```powershell
 .\bin\devloop.ps1 `
   --prd E:\design\prd\feature\feature.md `
-  --issues E:\design\prd\feature\issues\README.md `
   --create-worktree `
   --worktree-path E:\worktrees\my-feature-impl `
   --branch-name impl/my-feature-0001 `
@@ -41,7 +37,7 @@ Non-interactive creation:
 Use the current worktree directly:
 
 ```powershell
-.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md --issues E:\repo\prd\feature\issues\README.md --no-worktree
+.\bin\devloop.ps1 --prd E:\repo\prd\feature\feature.md
 ```
 
 When `devloop-plan` resumes from a checkout that is already on the default

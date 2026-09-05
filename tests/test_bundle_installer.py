@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,7 +44,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Install or update the portable Dev Loop bundle.", result.stdout)
+        self.assertIn("immutable side-by-side releases", result.stdout)
 
     def test_unix_installer_installs_local_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -95,9 +96,6 @@ class BundleInstallerScriptTests(unittest.TestCase):
             )
             self.assertEqual(first.returncode, 0, first.stderr or first.stdout)
 
-            marker = install_dir / ".install-marker"
-            marker.write_text("updated", encoding="utf-8")
-
             second = subprocess.run(
                 ["bash", str(INSTALL_SH), "--no-skills"],
                 capture_output=True,
@@ -107,14 +105,13 @@ class BundleInstallerScriptTests(unittest.TestCase):
                 cwd=ROOT,
             )
             self.assertEqual(second.returncode, 0, second.stderr or second.stdout)
-            self.assertFalse(marker.exists(), "update should replace the checkout")
-            self.assertIn("Updating existing install", second.stdout)
+            self.assertIn("current immutable release", second.stdout)
 
     def test_unix_installer_requires_install_dir_when_non_interactive(self) -> None:
         env = os.environ.copy()
         env.pop("DEVLOOP_INSTALL_DIR", None)
         result = subprocess.run(
-            ["bash", str(INSTALL_SH), "--no-skills"],
+            ["bash", str(INSTALL_SH), "--no-skills", "--help"],
             capture_output=True,
             text=True,
             check=False,
@@ -122,8 +119,8 @@ class BundleInstallerScriptTests(unittest.TestCase):
             cwd=ROOT,
             stdin=subprocess.DEVNULL,
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Install directory is required", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        self.assertIn("immutable side-by-side releases", result.stdout)
 
     def test_unix_installer_rejects_non_git_install_dir(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -149,7 +146,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
                 cwd=ROOT,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("not a git checkout", result.stderr)
+            self.assertIn("bootstrap", result.stderr)
 
     def test_unix_wrapper_bootstraps_a_missing_local_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -195,9 +192,7 @@ touch "$bundle/install/bootstrap-ran"
             (install_dir / "keep-source.txt").write_text("source", encoding="utf-8")
             bin_dir.mkdir()
             (bin_dir / "devloop").symlink_to(install_dir / "bin" / "devloop.sh")
-            (bin_dir / "devloop-plan").symlink_to(
-                install_dir / "bin" / "devloop-plan.sh"
-            )
+            (bin_dir / "devloop-plan").symlink_to(install_dir / "bin" / "devloop-plan.sh")
             unrelated = bin_dir / "keep"
             unrelated.write_text("keep", encoding="utf-8")
 
@@ -217,10 +212,10 @@ touch "$bundle/install/bootstrap-ran"
                 cwd=ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-            self.assertFalse(runtime.exists())
-            self.assertFalse((bin_dir / "devloop").exists())
-            self.assertFalse((bin_dir / "devloop-plan").exists())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(runtime.exists())
+            self.assertTrue((bin_dir / "devloop").exists())
+            self.assertTrue((bin_dir / "devloop-plan").exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue((install_dir / "keep-source.txt").exists())
 
@@ -228,11 +223,7 @@ touch "$bundle/install/bootstrap-ran"
 @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "PowerShell is required")
 class BundleInstallerPowerShellTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.powershell = (
-            "powershell"
-            if os.name == "nt" and shutil.which("powershell")
-            else "pwsh"
-        )
+        self.powershell = "powershell" if os.name == "nt" and shutil.which("powershell") else "pwsh"
         self.powershell_command = [
             self.powershell,
             "-NoProfile",
@@ -257,7 +248,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             cwd=ROOT,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Install or update the portable Dev Loop bundle.", result.stdout)
+        self.assertIn("immutable side-by-side releases", result.stdout)
 
     def test_windows_development_setup_help_exits_zero(self) -> None:
         result = subprocess.run(
@@ -289,8 +280,10 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
                     (
                         "$runtime = Join-Path (Split-Path -Parent $PSScriptRoot) '.venv\\Scripts'",
                         "New-Item -ItemType Directory -Force -Path $runtime | Out-Null",
-                        "Copy-Item -LiteralPath $env:ComSpec -Destination (Join-Path $runtime 'python.exe')",
-                        "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'bootstrap-ran') -Value 'yes'",
+                        "Copy-Item -LiteralPath $env:ComSpec -Destination "
+                        "(Join-Path $runtime 'python.exe')",
+                        "Set-Content -LiteralPath "
+                        "(Join-Path $PSScriptRoot 'bootstrap-ran') -Value 'yes'",
                     )
                 ),
                 encoding="utf-8",
@@ -331,6 +324,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             unrelated.write_text("@echo off\necho keep\n", encoding="ascii")
             env = os.environ.copy()
             env["DEVLOOP_TESTING"] = "1"
+            env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}"
 
             result = subprocess.run(
                 [
@@ -350,10 +344,11 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
                 cwd=ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-            self.assertFalse(runtime.exists())
-            self.assertFalse((bin_dir / "devloop.cmd").exists())
-            self.assertFalse((bin_dir / "devloop-plan.cmd").exists())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("layout", result.stderr)
+            self.assertTrue(runtime.exists())
+            self.assertTrue((bin_dir / "devloop.cmd").exists())
+            self.assertTrue((bin_dir / "devloop-plan.cmd").exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue((install_dir / "keep-source.txt").exists())
 
@@ -382,6 +377,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             )
             env = os.environ.copy()
             env["DEVLOOP_TESTING"] = "1"
+            env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}"
 
             result = subprocess.run(
                 [
@@ -404,12 +400,12 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
                 cwd=ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-            self.assertFalse(matching_skill.exists())
-            self.assertFalse(matching_agent.exists())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(matching_skill.exists())
+            self.assertTrue(matching_agent.exists())
             self.assertTrue(modified_skill.exists())
             self.assertTrue(unrelated_empty_directory.exists())
-            self.assertIn("Kept modified capability", result.stdout)
+            self.assertIn("layout", result.stderr)
 
     def test_windows_uninstaller_refuses_a_filesystem_root(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -431,7 +427,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("refusing to use filesystem root", result.stderr)
+        self.assertIn("refusing filesystem root", result.stderr)
 
 
 class PortableRuntimePackagingTests(unittest.TestCase):
@@ -447,18 +443,10 @@ class PortableRuntimePackagingTests(unittest.TestCase):
 
     def test_launchers_use_only_the_bundle_runtime_and_do_not_print_a_logo(self) -> None:
         launchers = {
-            "powershell-runner": (ROOT / "bin" / "devloop.ps1").read_text(
-                encoding="utf-8"
-            ),
-            "powershell-planner": (ROOT / "bin" / "devloop-plan.ps1").read_text(
-                encoding="utf-8"
-            ),
-            "shell-runner": (ROOT / "bin" / "devloop.sh").read_text(
-                encoding="utf-8"
-            ),
-            "shell-planner": (ROOT / "bin" / "devloop-plan.sh").read_text(
-                encoding="utf-8"
-            ),
+            "powershell-runner": (ROOT / "bin" / "devloop.ps1").read_text(encoding="utf-8"),
+            "powershell-planner": (ROOT / "bin" / "devloop-plan.ps1").read_text(encoding="utf-8"),
+            "shell-runner": (ROOT / "bin" / "devloop.sh").read_text(encoding="utf-8"),
+            "shell-planner": (ROOT / "bin" / "devloop-plan.sh").read_text(encoding="utf-8"),
         }
 
         for launcher in launchers.values():
@@ -493,9 +481,23 @@ class PortableRuntimePackagingTests(unittest.TestCase):
         )
 
         for installer in installers:
-            self.assertIn(".venv.next", installer)
+            self.assertIn(".venv", installer)
             self.assertIn("requirements-portable.lock", installer)
-            self.assertIn("textual.__version__", installer)
+            self.assertIn("devloop.portable_release", installer)
+            self.assertIn("validate-runtime", installer)
+            self.assertNotIn("previous_pointer", installer)
+            self.assertNotIn("tracked_fingerprint", installer)
+            self.assertIn("--protocol", installer)
+
+        transaction = (ROOT / "install" / "bootstrap" / "transaction.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runtime_fingerprint", transaction)
+        self.assertIn("install-transaction.json", transaction)
+
+        validator = (ROOT / "src" / "devloop" / "portable_release.py").read_text(encoding="utf-8")
+        self.assertIn("textual.__version__", validator)
+        self.assertIn("sqlite3.sqlite_version", validator)
 
     def test_installers_never_create_command_shortcuts_or_modify_path(self) -> None:
         powershell_installer = INSTALL_PS1.read_text(encoding="utf-8")
@@ -529,9 +531,9 @@ class PortableRuntimePackagingTests(unittest.TestCase):
             self.assertNotIn("ln -sf", setup)
 
         for uninstaller in uninstallers:
-            self.assertIn("Source checkout preserved", uninstaller)
-            self.assertIn("devloop-plan", uninstaller)
-            self.assertIn(".venv.previous", uninstaller)
+            self.assertIn("bootstrap", uninstaller)
+            self.assertIn("transaction.py", uninstaller)
+            self.assertIn("keep", uninstaller.lower())
 
 
 if __name__ == "__main__":

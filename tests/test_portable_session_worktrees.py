@@ -299,10 +299,18 @@ class PortableSessionWorktreeTests(unittest.TestCase):
             sessions = catalog.list_sessions()
             projects = catalog.list_saved_projects()
             remaining_lease = catalog.get_worktree_lease(checkout)
+            retained_capacity = catalog.owns_execution_capacity(
+                launch.session_id,
+                owner_id="shell-a",
+            )
+            supervisor.shutdown()
 
-        self.assertEqual(sessions, ())
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].session_id, launch.session_id)
+        self.assertEqual(sessions[0].status, PortableSessionStatus.FAILED)
         self.assertEqual([project.checkout for project in projects], [checkout.resolve()])
         self.assertIsNone(remaining_lease)
+        self.assertFalse(retained_capacity)
 
     def test_external_owner_blocks_competing_worker_and_session_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -336,11 +344,13 @@ class PortableSessionWorktreeTests(unittest.TestCase):
                 catalog=PortableSessionCatalog(catalog.path),
                 owner_id="shell-second",
             )
+            try:
+                with self.assertRaises(PortableWorktreeLeaseConflict) as raised:
+                    supervisor.start_session(second)
 
-            with self.assertRaises(PortableWorktreeLeaseConflict) as raised:
-                supervisor.start_session(second)
-
-            sessions = catalog.list_sessions()
+                sessions = catalog.list_sessions()
+            finally:
+                supervisor.shutdown()
 
         self.assertEqual(raised.exception.session_id, first.session_id)
         self.assertEqual(raised.exception.owner_id, "shell-first")
@@ -382,9 +392,11 @@ class PortableSessionWorktreeTests(unittest.TestCase):
                 operation=PortableWorkflowOperation.PLANNING,
                 arguments=("--repo", str(checkout)),
             )
-
-            focused = supervisor.start_session(requested)
-            sessions = catalog.list_sessions()
+            try:
+                focused = supervisor.start_session(requested)
+                sessions = catalog.list_sessions()
+            finally:
+                supervisor.shutdown()
 
         self.assertEqual(focused.session_id, existing.session_id)
         self.assertEqual(launched, [])

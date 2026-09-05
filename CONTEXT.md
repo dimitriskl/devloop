@@ -113,6 +113,27 @@ unfinished PRD workflows in the Portable Session Catalog without moving,
 rewriting, or taking ownership away from project-local state.
 _Avoid_: CodexCLI legacy import, project conversion, workflow-state migration
 
+**Portable Release Bootstrap**:
+The stable, installer-owned command and metadata layer at the configured
+Portable Dev Loop install directory. It validates and dispatches through the
+Portable Release Pointer and is not replaced when a new release activates.
+_Avoid_: Current release checkout, background updater, mutable payload
+
+**Portable Release Payload**:
+One validated, immutable Git checkout and isolated runtime stored at the
+canonical `releases/<commit>` path below the Portable Release Bootstrap.
+Multiple payloads may coexist so the previous current release survives update
+failure and rollback.
+_Avoid_: Stable launcher, in-place checkout, project worktree
+
+**Portable Release Pointer**:
+The atomically replaced `bootstrap/current.json` state containing the current
+and optional previous Portable Release Payload pointers. Each pointer binds a
+canonical path, exact Git commit, tracked fingerprint, and runtime fingerprint;
+rollback exchanges both pointers in one durable replacement. Invalid or
+tampered pointer state fails closed.
+_Avoid_: symbolic-link current directory, branch name, mutable alias
+
 **Portable Application Shell**:
 The single persistent full-screen TTY surface that hosts one or more Portable
 Workflow Sessions through Portable Session Tabs. Its outer frame remains

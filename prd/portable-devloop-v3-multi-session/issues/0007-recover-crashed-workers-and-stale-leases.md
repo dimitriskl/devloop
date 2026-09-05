@@ -53,4 +53,20 @@ Covers parent PRD user stories 35–37 and 66–72.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Implementation commit span: `22e3476` through `ad7faef`; issue commits are
+  `22e3476`, `d85c94f`, `4febcc2`, `8412793`, `c879959`, `4dc78dd`, `649294e`,
+  `4faa391`, and `ad7faef`.
+- Fresh independent review: PASS.
+- Fresh QA: PASS. The former regression area reported 237 passed and 1 POSIX
+  skip; recovery reported 30 passed and 1 skipped; catalog, concurrency,
+  supervisor, UI, and entry-point coverage reported 158/158; stress reported
+  70/70; migration/UI reported 8/8; and no helper processes remained.
+- Platform limitation: these results are Windows-side. Live POSIX execution is
+  deferred to issue 0013, and the POSIX-specific case above was skipped.
+- Broad-suite limitation: the reduced fallback was not green (1360 passed, 14
+  skipped, 10 integration tests deselected, and 11 non-issue failures). Full
+  collection was blocked by the Python 3.12 versus venv 3.13 Hypothesis native
+  mismatch. Ruff still reports 9 pre-existing CodexCLI findings, and mypy was
+  unavailable. This record does not claim whole-repository or release green.

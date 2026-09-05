@@ -30,9 +30,163 @@ from devloop.portable_sessions import (
     PortableSessionSupervisor,
     PortableWorkflowOperation,
 )
+from devloop.subprocess_utils import (
+    ProcessTreeIdentity,
+    ProcessTreeKind,
+    capture_process_identity,
+)
+
+
+def _fake_worker_tree_identity(_worker: object) -> ProcessTreeIdentity:
+    identity = capture_process_identity()
+    return ProcessTreeIdentity(
+        root=identity,
+        kind=ProcessTreeKind.ROOT_PROCESS,
+        tree_id=identity.pid,
+    )
 
 
 class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
+    def test_version_six_migration_matches_fresh_session_schema_and_preserves_data_index(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            migrated_database = root / "migrated.sqlite3"
+            fresh_database = root / "fresh.sqlite3"
+            catalog = PortableSessionCatalog(migrated_database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    "preserved-v6-session",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                )
+            )
+            with closing(sqlite3.connect(migrated_database)) as connection:
+                _restore_version_six_sessions_schema(connection)
+                connection.execute(
+                    "CREATE INDEX session_activity_custom_idx "
+                    "ON sessions(activity_summary DESC)"
+                )
+                connection.commit()
+
+            migrated = PortableSessionCatalog(migrated_database)
+            fresh = PortableSessionCatalog(fresh_database)
+            with (
+                closing(sqlite3.connect(migrated.path)) as migrated_connection,
+                closing(sqlite3.connect(fresh.path)) as fresh_connection,
+            ):
+                migrated_schema = migrated_connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'"
+                ).fetchone()[0]
+                fresh_schema = fresh_connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'"
+                ).fetchone()[0]
+                indexes = tuple(
+                    row[0]
+                    for row in migrated_connection.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='index' AND tbl_name='sessions' AND sql IS NOT NULL"
+                    )
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    migrated_connection.execute(
+                        "UPDATE sessions SET completed_issues=2, total_issues=1"
+                    )
+
+            record = migrated.get_session("preserved-v6-session")
+
+        self.assertEqual("".join(migrated_schema.split()), "".join(fresh_schema.split()))
+        self.assertEqual(indexes, ("session_activity_custom_idx",))
+        self.assertEqual(record.session_id, "preserved-v6-session")
+
+    def test_already_stamped_weak_version_seven_is_repaired(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "weak-v7.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    "weak-v7-session",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                )
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                _restore_weak_version_seven_sessions_schema(connection)
+                connection.commit()
+
+            repaired = PortableSessionCatalog(database)
+            record = repaired.get_session("weak-v7-session")
+            with closing(sqlite3.connect(database)) as connection:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "UPDATE sessions SET completed_issues=3, total_issues=2"
+                    )
+
+        self.assertEqual(record.session_id, "weak-v7-session")
+
+    def test_version_six_rebuild_rolls_back_schema_data_and_index_on_failure(self) -> None:
+        class FailingCatalog(PortableSessionCatalog):
+            @staticmethod
+            def _validate_records(connection: sqlite3.Connection) -> None:
+                del connection
+                raise PortableSessionCatalogError("forced v7 validation failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "rollback-v6.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session(
+                PortableSessionLaunch(
+                    "rollback-v6-session",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                )
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                _restore_version_six_sessions_schema(connection)
+                connection.execute(
+                    "CREATE INDEX session_rollback_idx ON sessions(activity_summary)"
+                )
+                connection.commit()
+                before = tuple(
+                    connection.execute(
+                        "SELECT type, name, sql FROM sqlite_master "
+                        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                    )
+                )
+                rows_before = tuple(connection.execute("SELECT * FROM sessions"))
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "forced v7 validation failure",
+            ):
+                FailingCatalog(database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                after = tuple(
+                    connection.execute(
+                        "SELECT type, name, sql FROM sqlite_master "
+                        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                    )
+                )
+                rows_after = tuple(connection.execute("SELECT * FROM sessions"))
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(after, before)
+        self.assertEqual(rows_after, rows_before)
+        self.assertEqual(version, 6)
+
     def test_planning_settings_reject_timeout_above_runtime_maximum_before_write(
         self,
     ) -> None:
@@ -827,6 +981,13 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                                     prd_path TEXT,
                                     issues_index_path TEXT,
                                     activity_summary TEXT NOT NULL DEFAULT '',
+                                    worktree_available INTEGER NOT NULL DEFAULT 1,
+                                    unavailable_from_status TEXT,
+                                    result INTEGER,
+                                    progress_stage TEXT NOT NULL DEFAULT '',
+                                    completed_issues INTEGER NOT NULL DEFAULT 0,
+                                    total_issues INTEGER NOT NULL DEFAULT 0,
+                                    active_issue TEXT,
                                     created_at REAL NOT NULL,
                                     updated_at REAL NOT NULL,
                                     revision INTEGER NOT NULL
@@ -908,13 +1069,16 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
             supervisor = PortableSessionSupervisor(
                 worker_launcher=lambda _launch: worker,
                 catalog=PortableSessionCatalog(catalog.path),
+                worker_tree_identity_capture=_fake_worker_tree_identity,
             )
 
-            supervisor.resume_session(launch.session_id)
-            command = worker.stdin.lines[0]
-            worker.stdout.close()
-            worker.stderr.close()
-            supervisor.shutdown()
+            try:
+                supervisor.resume_session(launch.session_id)
+                command = worker.stdin.lines[0]
+            finally:
+                worker.stdout.close()
+                worker.stderr.close()
+                supervisor.shutdown()
 
         self.assertIn('"kind":"START"', command)
         self.assertNotIn('"kind":"RESUME"', command)
@@ -1139,7 +1303,10 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                     ),
                 ),
             )
-            sessions_after_restart = reopened_supervisor.list_sessions()
+            try:
+                sessions_after_restart = reopened_supervisor.list_sessions()
+            finally:
+                reopened_supervisor.shutdown()
 
         self.assertEqual(result, 23)
         self.assertEqual(len(published_before_handoff), 1)
@@ -1189,67 +1356,63 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                 catalog=PortableSessionCatalog(catalog.path),
                 resume_candidates=(candidate,),
             )
+            try:
+                self.assertEqual(
+                    supervisor.list_sessions()[0].status,
+                    PortableSessionStatus.READY,
+                )
+                self.assertEqual(
+                    catalog.get_session("unfinished-summary").status,
+                    PortableSessionStatus.READY,
+                )
+            finally:
+                supervisor.shutdown()
+
+    def test_completed_issue_pack_retires_ready_published_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            prd = checkout / "change.md"
+            issues = checkout / "README.md"
+            prd.write_text("# Change\n", encoding="utf-8")
+            issue = checkout / "0001-change.md"
+            issues.write_text(
+                "[Issue 0001](./0001-change.md)\n",
+                encoding="utf-8",
+            )
+            issue.write_text("# Issue\n\nCompleted: [x]\n", encoding="utf-8")
+            catalog = PortableSessionCatalog(root / "catalog.sqlite3")
+            catalog.create_session(
+                PortableSessionLaunch(
+                    session_id="stale-published",
+                    checkout=checkout,
+                    operation=PortableWorkflowOperation.PLANNING,
+                    arguments=(),
+                )
+            )
+            catalog.publish_workflow(
+                "stale-published",
+                prd_path=prd,
+                issues_index_path=issues,
+                activity_summary="previous discovery",
+            )
+            supervisor = PortableSessionSupervisor(
+                worker_launcher=lambda _launch: self.fail("must remain passive"),
+                catalog=PortableSessionCatalog(catalog.path),
+                resume_candidates=(),
+                resume_candidates_loader=lambda: (),
+            )
 
             self.assertEqual(
                 supervisor.list_sessions()[0].status,
-                PortableSessionStatus.READY,
+                PortableSessionStatus.COMPLETED,
             )
             self.assertEqual(
-                catalog.get_session("unfinished-summary").status,
-                PortableSessionStatus.READY,
+                catalog.get_session("stale-published").status,
+                PortableSessionStatus.COMPLETED,
             )
-
-    def test_authoritative_absence_retires_stale_published_session(self) -> None:
-        for stale_status in (
-            PortableSessionStatus.READY,
-            PortableSessionStatus.FAILED,
-        ):
-            with self.subTest(stale_status=stale_status):
-                with tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    checkout = root / "checkout"
-                    checkout.mkdir()
-                    prd = checkout / "change.md"
-                    issues = checkout / "README.md"
-                    prd.write_text("# Change\n", encoding="utf-8")
-                    issues.write_text("# Issues\n", encoding="utf-8")
-                    catalog = PortableSessionCatalog(root / "catalog.sqlite3")
-                    catalog.create_session(
-                        PortableSessionLaunch(
-                            session_id="stale-published",
-                            checkout=checkout,
-                            operation=PortableWorkflowOperation.PLANNING,
-                            arguments=(),
-                        )
-                    )
-                    catalog.publish_workflow(
-                        "stale-published",
-                        prd_path=prd,
-                        issues_index_path=issues,
-                        activity_summary="previous discovery",
-                    )
-                    catalog.update_session_status(
-                        "stale-published",
-                        stale_status,
-                    )
-
-                    supervisor = PortableSessionSupervisor(
-                        worker_launcher=lambda _launch: self.fail(
-                            "must remain passive"
-                        ),
-                        catalog=PortableSessionCatalog(catalog.path),
-                        resume_candidates=(),
-                        resume_candidates_loader=lambda: (),
-                    )
-
-                    self.assertEqual(
-                        supervisor.list_sessions()[0].status,
-                        PortableSessionStatus.COMPLETED,
-                    )
-                    self.assertEqual(
-                        catalog.get_session("stale-published").status,
-                        PortableSessionStatus.COMPLETED,
-                    )
+            supervisor.shutdown()
 
     def test_authoritative_reconciliation_preserves_pre_prd_planning(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1272,14 +1435,16 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
                 resume_candidates=(),
                 resume_candidates_loader=lambda: (),
             )
-
-            self.assertEqual(
-                supervisor.list_sessions()[0].status,
-                PortableSessionStatus.READY,
-            )
-            self.assertIsNone(
-                catalog.get_session("pre-prd-planning").prd_path,
-            )
+            try:
+                self.assertEqual(
+                    supervisor.list_sessions()[0].status,
+                    PortableSessionStatus.READY,
+                )
+                self.assertIsNone(
+                    catalog.get_session("pre-prd-planning").prd_path,
+                )
+            finally:
+                supervisor.shutdown()
 
     def test_zero_exit_before_prd_keeps_planning_session_resumable(self) -> None:
         class FakeWorker:
@@ -1317,43 +1482,122 @@ class PortableSessionCatalogCompatibilityTests(unittest.TestCase):
             supervisor = PortableSessionSupervisor(
                 worker_launcher=lambda _launch: worker,
                 catalog=catalog,
+                worker_tree_identity_capture=_fake_worker_tree_identity,
             )
-            supervisor.resume_session(launch.session_id)
-            worker.stdout.put(
-                PortableProtocolFrame(
-                    version=PORTABLE_PROTOCOL_VERSION,
-                    session_id=launch.session_id,
-                    sequence=1,
-                    kind=WorkerMessageKind.HELLO.value,
-                    payload={},
-                ).to_json_line()
-                + "\n"
-            )
-            worker.stdout.put(
-                PortableProtocolFrame(
-                    version=PORTABLE_PROTOCOL_VERSION,
-                    session_id=launch.session_id,
-                    sequence=2,
-                    kind=WorkerMessageKind.COMPLETION.value,
-                    payload={"exit_code": 0},
-                ).to_json_line()
-                + "\n"
-            )
-            deadline = time.monotonic() + 1
-            while (
-                supervisor.snapshot(launch.session_id).status
-                is PortableSessionStatus.RUNNING
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.01)
-            snapshot = supervisor.snapshot(launch.session_id)
-            worker.stdout.close()
-            worker.stderr.close()
-            supervisor.shutdown()
-            catalog_status = catalog.get_session(launch.session_id).status
+            try:
+                supervisor.resume_session(launch.session_id)
+                worker.stdout.put(
+                    PortableProtocolFrame(
+                        version=PORTABLE_PROTOCOL_VERSION,
+                        session_id=launch.session_id,
+                        sequence=1,
+                        kind=WorkerMessageKind.HELLO.value,
+                        payload={},
+                    ).to_json_line()
+                    + "\n"
+                )
+                worker.stdout.put(
+                    PortableProtocolFrame(
+                        version=PORTABLE_PROTOCOL_VERSION,
+                        session_id=launch.session_id,
+                        sequence=2,
+                        kind=WorkerMessageKind.COMPLETION.value,
+                        payload={"exit_code": 0},
+                    ).to_json_line()
+                    + "\n"
+                )
+                deadline = time.monotonic() + 1
+                while (
+                    supervisor.snapshot(launch.session_id).status
+                    is PortableSessionStatus.RUNNING
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                snapshot = supervisor.snapshot(launch.session_id)
+                catalog_status = catalog.get_session(launch.session_id).status
+            finally:
+                worker.stdout.close()
+                worker.stderr.close()
+                supervisor.shutdown()
 
         self.assertEqual(snapshot.status, PortableSessionStatus.READY)
         self.assertEqual(catalog_status, PortableSessionStatus.READY)
+
+
+def _restore_version_six_sessions_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        PRAGMA foreign_keys = OFF;
+        PRAGMA legacy_alter_table = ON;
+        DROP TABLE session_relink_receipts;
+        ALTER TABLE sessions RENAME TO sessions_v7;
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY CHECK (length(session_id) BETWEEN 1 AND 128),
+            project_id TEXT NOT NULL REFERENCES saved_projects(project_id),
+            status TEXT NOT NULL CHECK (status IN (
+                'READY', 'QUEUED', 'RUNNING', 'WAITING_FOR_INPUT', 'PAUSING',
+                'PAUSED', 'INTERRUPTED', 'COMPLETED', 'FAILED', 'CANCELLED',
+                'UNAVAILABLE'
+            )),
+            operation TEXT NOT NULL CHECK (operation IN ('PLANNING', 'DELIVERY')),
+            arguments_json TEXT NOT NULL CHECK (length(arguments_json) BETWEEN 2 AND 4096),
+            planning_thread_id TEXT CHECK (
+                planning_thread_id IS NULL OR length(planning_thread_id) = 36
+            ),
+            planning_settings_json TEXT CHECK (
+                planning_settings_json IS NULL
+                OR length(planning_settings_json) BETWEEN 2 AND 4096
+            ),
+            prd_path TEXT CHECK (prd_path IS NULL OR length(prd_path) BETWEEN 1 AND 4096),
+            issues_index_path TEXT CHECK (
+                issues_index_path IS NULL OR length(issues_index_path) BETWEEN 1 AND 4096
+            ),
+            activity_summary TEXT NOT NULL DEFAULT ''
+                CHECK (length(activity_summary) <= 500),
+            created_at REAL NOT NULL CHECK (
+                typeof(created_at) IN ('integer', 'real') AND created_at >= 0
+            ),
+            updated_at REAL NOT NULL CHECK (
+                typeof(updated_at) IN ('integer', 'real') AND updated_at >= 0
+            ),
+            revision INTEGER NOT NULL DEFAULT 1
+                CHECK (typeof(revision) = 'integer' AND revision > 0)
+        );
+        INSERT INTO sessions (
+            session_id, project_id, status, operation, arguments_json,
+            planning_thread_id, planning_settings_json, prd_path,
+            issues_index_path, activity_summary, created_at, updated_at, revision
+        )
+        SELECT session_id, project_id, status, operation, arguments_json,
+            planning_thread_id, planning_settings_json, prd_path,
+            issues_index_path, activity_summary, created_at, updated_at, revision
+        FROM sessions_v7;
+        DROP TABLE sessions_v7;
+        PRAGMA legacy_alter_table = OFF;
+        PRAGMA user_version = 6;
+        """
+    )
+
+
+def _restore_weak_version_seven_sessions_schema(connection: sqlite3.Connection) -> None:
+    _restore_version_six_sessions_schema(connection)
+    additions = (
+        "worktree_available INTEGER NOT NULL DEFAULT 1 "
+        "CHECK (worktree_available IN (0, 1))",
+        "unavailable_from_status TEXT CHECK (unavailable_from_status IS NULL OR "
+        "unavailable_from_status IN ('READY','QUEUED','RUNNING','WAITING_FOR_INPUT',"
+        "'PAUSING','PAUSED','INTERRUPTED','COMPLETED','FAILED','CANCELLED'))",
+        "result INTEGER CHECK (result IS NULL OR typeof(result) = 'integer')",
+        "progress_stage TEXT NOT NULL DEFAULT '' CHECK (length(progress_stage) <= 200)",
+        "completed_issues INTEGER NOT NULL DEFAULT 0 "
+        "CHECK (typeof(completed_issues) = 'integer' AND completed_issues >= 0)",
+        "total_issues INTEGER NOT NULL DEFAULT 0 "
+        "CHECK (typeof(total_issues) = 'integer' AND total_issues >= 0)",
+        "active_issue TEXT CHECK (active_issue IS NULL OR length(active_issue) <= 128)",
+    )
+    for declaration in additions:
+        connection.execute(f"ALTER TABLE sessions ADD COLUMN {declaration}")
+    connection.execute("PRAGMA user_version = 7")
 
 
 class _WritableLines:

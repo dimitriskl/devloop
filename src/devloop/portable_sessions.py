@@ -1,36 +1,49 @@
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Condition, Event as ThreadEvent, RLock, Thread
-from typing import IO, Protocol
+from threading import Condition, RLock, Thread
+from threading import Event as ThreadEvent
+from typing import IO, Any, Protocol
 
+from .portable_launch_target import validated_portable_launch_target
 from .portable_protocol import (
+    MAX_PORTABLE_PROTOCOL_FRAME_BYTES,
     PortableProtocolError,
     PortableProtocolFrame,
+    PortableProtocolStreamDecoder,
     SupervisorMessageKind,
     WorkerMessageKind,
     supervisor_frame,
 )
 from .portable_runtime import PortableRunContext
+from .redaction import redact_persisted_evidence
 from .subprocess_utils import (
     ProcessIdentity,
-    ProcessTreeState,
     ProcessTerminationResult,
+    ProcessTreeIdentity,
+    ProcessTreeKind,
+    ProcessTreeState,
     capture_process_identity,
+    capture_process_tree_identity,
     launch_process_tree,
     register_process_tree,
     terminate_process,
 )
+from .terminal_text import compact_terminal_text, sanitize_terminal_text
+
+_MAX_PARTIAL_CONTEXT_ITEMS_PER_KIND = 10
+_MAX_PARTIAL_CONTEXT_ITEM_CHARACTERS = 500
 
 
 class PortableSessionStatus(str, Enum):
@@ -60,6 +73,170 @@ class PortableWorkflowOperation(str, Enum):
     DELIVERY = "DELIVERY"
 
 
+class PortableCheckpointKind(str, Enum):
+    PLANNING = "PLANNING"
+    PRD = "PRD"
+
+
+@dataclass(frozen=True)
+class PortablePartialWorkContext:
+    """Bounded non-authoritative evidence supplied to one resumed model turn."""
+
+    activity: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
+
+    @classmethod
+    def from_sequences(
+        cls,
+        *,
+        activity: Iterable[str],
+        diagnostics: Iterable[str],
+    ) -> PortablePartialWorkContext:
+        return cls(
+            activity=_sanitize_partial_context_items(activity),
+            diagnostics=_sanitize_partial_context_items(diagnostics),
+        )
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self.activity or self.diagnostics)
+
+    def to_prompt(self) -> str:
+        lines = [
+            "PRESERVED PARTIAL-WORK CONTEXT",
+            (
+                "This context is non-authoritative. Verify it against the current "
+                "checkout; the durable recovery checkpoint and cursor remain "
+                "authoritative. Do not replay an active turn or tool operation."
+            ),
+        ]
+        if self.activity:
+            lines.extend(("Observed activity:", *(f"- {item}" for item in self.activity)))
+        if self.diagnostics:
+            lines.extend(
+                ("Retained diagnostics:", *(f"- {item}" for item in self.diagnostics))
+            )
+        return "\n".join(lines)
+
+
+def _sanitize_partial_context_items(values: Iterable[str]) -> tuple[str, ...]:
+    selected = tuple(values)[-_MAX_PARTIAL_CONTEXT_ITEMS_PER_KIND:]
+    sanitized = (
+        compact_terminal_text(
+            redact_persisted_evidence(value),
+            max_length=_MAX_PARTIAL_CONTEXT_ITEM_CHARACTERS,
+        )
+        for value in selected
+    )
+    return tuple(value for value in sanitized if value)
+
+
+@dataclass(frozen=True)
+class PortableRecoveryData:
+    """Exact durable cursor and preserved checkout supplied to a fresh worker."""
+
+    checkpoint_kind: PortableCheckpointKind
+    checkout: Path
+    activity: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
+    planning_thread_id: str | None = None
+    planning_settings: Mapping[str, object] | None = None
+    prd_path: Path | None = None
+    issues_index_path: Path | None = None
+    issue_id: str | None = None
+    next_role: str | None = None
+    pass_number: int | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "checkpoint_kind": self.checkpoint_kind.value,
+            "checkout": str(self.checkout),
+            "activity": list(self.activity),
+            "diagnostics": list(self.diagnostics),
+            "planning_thread_id": self.planning_thread_id,
+            "planning_settings": (
+                dict(self.planning_settings)
+                if self.planning_settings is not None
+                else None
+            ),
+            "prd_path": str(self.prd_path) if self.prd_path is not None else None,
+            "issues_index_path": (
+                str(self.issues_index_path)
+                if self.issues_index_path is not None
+                else None
+            ),
+            "issue_id": self.issue_id,
+            "next_role": self.next_role,
+            "pass_number": self.pass_number,
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> PortableRecoveryData:
+        if not isinstance(value, dict):
+            raise PortableProtocolError("Recovery data must be an object.")
+        try:
+            checkpoint_kind = PortableCheckpointKind(value["checkpoint_kind"])
+            checkout_value = value["checkout"]
+        except (KeyError, ValueError) as error:
+            raise PortableProtocolError("Recovery checkpoint kind is invalid.") from error
+        if not isinstance(checkout_value, str) or not checkout_value:
+            raise PortableProtocolError("Recovery checkout must be non-empty text.")
+        activity = _recovery_text_list(value.get("activity"), "activity")
+        diagnostics = _recovery_text_list(
+            value.get("diagnostics"),
+            "diagnostics",
+        )
+        if checkpoint_kind is PortableCheckpointKind.PLANNING:
+            thread_id = value.get("planning_thread_id")
+            settings = value.get("planning_settings")
+            if not isinstance(thread_id, str) or not thread_id or not isinstance(settings, dict):
+                raise PortableProtocolError(
+                    "Planning recovery requires a durable thread and settings."
+                )
+            return cls(
+                checkpoint_kind=checkpoint_kind,
+                checkout=Path(checkout_value),
+                activity=activity,
+                diagnostics=diagnostics,
+                planning_thread_id=thread_id,
+                planning_settings=settings,
+            )
+        prd_path = value.get("prd_path")
+        issues_index_path = value.get("issues_index_path")
+        issue_id = value.get("issue_id")
+        next_role = value.get("next_role")
+        pass_number = value.get("pass_number")
+        if (
+            not isinstance(prd_path, str)
+            or not isinstance(issues_index_path, str)
+            or (issue_id is not None and not isinstance(issue_id, str))
+            or not isinstance(next_role, str)
+            or isinstance(pass_number, bool)
+            or not isinstance(pass_number, int)
+            or pass_number < 1
+        ):
+            raise PortableProtocolError("PRD recovery cursor is invalid.")
+        return cls(
+            checkpoint_kind=checkpoint_kind,
+            checkout=Path(checkout_value),
+            activity=activity,
+            diagnostics=diagnostics,
+            prd_path=Path(prd_path),
+            issues_index_path=Path(issues_index_path),
+            issue_id=issue_id,
+            next_role=next_role,
+            pass_number=pass_number,
+        )
+
+
+def _recovery_text_list(value: object, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise PortableProtocolError(
+            f"Recovery {field_name} must be a list of text values."
+        )
+    return tuple(value)
+
+
 class PortableSessionIntentKind(str, Enum):
     START = "START"
     RESUME = "RESUME"
@@ -75,6 +252,7 @@ class PortableSessionLaunch:
     checkout: Path
     operation: PortableWorkflowOperation
     arguments: tuple[str, ...]
+    argument_base: Path | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -125,6 +303,15 @@ class PortableSessionSnapshot:
     prd_path: Path | None = None
     progress: PortableSessionProgress = PortableSessionProgress()
     updated_at: float = 0.0
+    recovery_available: bool = False
+    unavailable_from_status: PortableSessionStatus | None = None
+
+    @property
+    def in_history(self) -> bool:
+        return self.status is PortableSessionStatus.COMPLETED or (
+            self.status is PortableSessionStatus.UNAVAILABLE
+            and self.unavailable_from_status is PortableSessionStatus.COMPLETED
+        )
 
 
 @dataclass(frozen=True)
@@ -142,6 +329,33 @@ class PortableWorktreeLease:
     heartbeat_at: float
     process_start_fingerprint: int | None = None
     worker_generation: int | None = None
+    worker_process_id: int | None = None
+    worker_process_start_fingerprint: int | None = None
+    process_tree_kind: ProcessTreeKind | None = None
+    process_tree_id: int | None = None
+
+    @property
+    def worker_process_identity(self) -> ProcessIdentity | None:
+        if (
+            self.worker_process_id is None
+            or self.worker_process_start_fingerprint is None
+        ):
+            return None
+        return ProcessIdentity(
+            pid=self.worker_process_id,
+            creation_time=self.worker_process_start_fingerprint,
+        )
+
+    @property
+    def process_tree_identity(self) -> ProcessTreeIdentity | None:
+        worker = self.worker_process_identity
+        if worker is None or self.process_tree_kind is None or self.process_tree_id is None:
+            return None
+        return ProcessTreeIdentity(
+            root=worker,
+            kind=self.process_tree_kind,
+            tree_id=self.process_tree_id,
+        )
 
 
 class PortableWorktreeLeaseConflict(RuntimeError):
@@ -183,13 +397,17 @@ class PortableSessionController(Protocol):
 
     def cancel_session(self, session_id: str) -> PortableSessionSnapshot: ...
 
+    def relink_session(self, session_id: str, checkout: Path) -> PortableSessionSnapshot: ...
+
+    def forget_session(self, session_id: str) -> None: ...
+
     def shutdown(self) -> None: ...
 
 
 class PortableWorkerProcess(Protocol):
-    stdin: IO[str] | None
-    stdout: IO[str] | None
-    stderr: IO[str] | None
+    stdin: IO[Any] | None
+    stdout: IO[Any] | None
+    stderr: IO[Any] | None
 
     def poll(self) -> int | None: ...
 
@@ -199,6 +417,7 @@ class PortableWorkerProcess(Protocol):
 
 
 WorkerLauncher = Callable[[PortableSessionLaunch], PortableWorkerProcess]
+WorkerTreeIdentityCapture = Callable[[PortableWorkerProcess], ProcessTreeIdentity]
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PROGRESS_REFRESH_INTERVAL_SECONDS = 1.0
 _CAPACITY_REFRESH_INTERVAL_SECONDS = 0.05
@@ -206,8 +425,10 @@ _COOPERATIVE_PAUSE_TIMEOUT_SECONDS = 2.0
 _TERMINATION_ACK_TIMEOUT_SECONDS = 8.0
 _CLEANUP_RETRY_SECONDS = 0.5
 _CLEANUP_REAPER_MAX_ATTEMPTS = 3
+_STDERR_TERMINAL_DRAIN_TIMEOUT_SECONDS = 0.5
 _MAX_DIAGNOSTIC_LINES = 100
 _MAX_DIAGNOSTIC_CHARACTERS = 2_000
+_MAX_DIAGNOSTIC_READ_CHARACTERS = 8_192
 
 
 class PortablePlanningSettingsRecord(Protocol):
@@ -221,10 +442,24 @@ class PortableCatalogSessionRecord(Protocol):
     planning_thread_id: str | None
     planning_settings: PortablePlanningSettingsRecord | None
     prd_path: Path | None
+    issues_index_path: Path | None
     activity_summary: str
     updated_at: float
     revision: int
+    unavailable_from_status: PortableSessionStatus | None
+    result: int | None
+    progress: PortableSessionProgress
     launch: PortableSessionLaunch
+
+
+class PortableRelinkReceiptRecord(Protocol):
+    source_checkout: Path
+    source_prd_path: Path
+    source_issues_index_path: Path
+    target_checkout: Path
+    target_prd_path: Path
+    target_issues_index_path: Path
+    state_sha256: str
 
 
 class PortableResumeCandidateRecord(Protocol):
@@ -258,6 +493,13 @@ class PortableSessionCatalogController(Protocol):
     def list_sessions(self) -> tuple[PortableCatalogSessionRecord, ...]: ...
 
     def list_saved_projects(self) -> tuple[PortableSavedProjectRecord, ...]: ...
+
+    def get_relink_receipt(
+        self,
+        session_id: str,
+    ) -> PortableRelinkReceiptRecord | None: ...
+
+    def clear_relink_receipt(self, session_id: str) -> None: ...
 
     def update_session_status(
         self,
@@ -361,6 +603,13 @@ class _RunningSession:
     stop_requested: bool = False
     pending_lifecycle: _LifecycleCommandIdentity | None = None
     launch_failure_rollback_new_session: bool | None = None
+    stderr_drained: ThreadEvent = field(default_factory=ThreadEvent)
+    pending_terminal: _PendingTerminalProjection | None = None
+
+
+@dataclass(frozen=True)
+class _PendingTerminalProjection:
+    frame: PortableProtocolFrame
 
 
 @dataclass(frozen=True)
@@ -399,6 +648,7 @@ class _QueuedSession:
 @dataclass(frozen=True)
 class _QueuedInput:
     value: str
+    request_kind: PortableSessionInputKind
     request_id: str
     request_generation: int
 
@@ -416,6 +666,7 @@ class PortableSessionSupervisor:
             Callable[[], Iterable[PortableResumeCandidateRecord]] | None
         ) = None,
         owner_id: str | None = None,
+        worker_tree_identity_capture: WorkerTreeIdentityCapture | None = None,
     ) -> None:
         self._catalog = catalog
         self._owner_id = owner_id or str(uuid.uuid4())
@@ -429,10 +680,19 @@ class PortableSessionSupervisor:
                 owner_id=self._owner_id,
             )
         )
+        self._worker_tree_identity_capture = (
+            worker_tree_identity_capture
+            or (
+                lambda process: capture_process_tree_identity(
+                    process  # type: ignore[arg-type]
+                )
+            )
+        )
         self._snapshots: dict[str, PortableSessionSnapshot] = {}
         self._launches: dict[str, PortableSessionLaunch] = {}
         self._candidate_launches: dict[str, PortableSessionLaunch] = {}
         self._running: dict[str, _RunningSession] = {}
+        self._stderr_readers: dict[str, _RunningSession] = {}
         self._queued: dict[str, _QueuedSession | _QueuedInput] = {}
         self._owned_session_ids: set[str] = set()
         self._catalog_revisions: dict[str, int] = {}
@@ -460,12 +720,23 @@ class PortableSessionSupervisor:
                     checkout=record.checkout,
                     status=record.status,
                     activity=(
-                        (getattr(record, "activity_summary"),)
+                        (_safe_protocol_diagnostic(record.activity_summary),)
                         if getattr(record, "activity_summary", "")
                         else ()
                     ),
                     prd_path=record.prd_path,
                     updated_at=getattr(record, "updated_at", 0.0),
+                    result=getattr(record, "result", None),
+                    progress=getattr(record, "progress", PortableSessionProgress()),
+                    unavailable_from_status=getattr(
+                        record,
+                        "unavailable_from_status",
+                        None,
+                    ),
+                    recovery_available=(
+                        record.status is PortableSessionStatus.RUNNING
+                        and not self._owns_catalog_session_lease(record)
+                    ),
                 )
                 self._launches[record.session_id] = record.launch
         known_prd_paths = {
@@ -482,11 +753,10 @@ class PortableSessionSupervisor:
                 if (
                     snapshot.prd_path is not None
                     and snapshot.prd_path.resolve() not in self._unfinished_prd_paths
-                    and snapshot.status
-                    in {
-                        PortableSessionStatus.READY,
-                        PortableSessionStatus.FAILED,
-                    }
+                    and snapshot.status is PortableSessionStatus.READY
+                    and _catalog_workflow_is_complete(
+                        catalog.get_session(snapshot.session_id)
+                    )
                 ):
                     completed = replace(
                         snapshot,
@@ -582,15 +852,18 @@ class PortableSessionSupervisor:
                 "Portable session identity must contain 1-128 letters, digits, "
                 "periods, underscores, or hyphens."
             )
-        checkout = launch.checkout.resolve()
-        if not checkout.is_dir():
-            raise ValueError(f"Portable session checkout does not exist: {checkout}")
+        launch_target = validated_portable_launch_target(launch)
+        checkout = launch_target.checkout
         with self._condition:
             if launch.session_id in self._snapshots:
                 raise ValueError(
                     f"Portable session already exists: {launch.session_id}"
                 )
-            normalized_launch = replace(launch, checkout=checkout)
+            normalized_launch = replace(
+                launch,
+                checkout=checkout,
+                argument_base=launch_target.argument_base,
+            )
             focused = self._claim_new_session(normalized_launch)
             if focused is not None:
                 return focused
@@ -646,6 +919,16 @@ class PortableSessionSupervisor:
                     getattr(record, "revision", 0),
                 )
                 launch = record.launch
+                if record.status is PortableSessionStatus.UNAVAILABLE:
+                    raise ValueError(
+                        "Portable session is unavailable; Relink its saved worktree first."
+                    )
+                launch_target = validated_portable_launch_target(launch)
+                launch = replace(
+                    launch,
+                    checkout=launch_target.checkout,
+                    argument_base=launch_target.argument_base,
+                )
                 self._launches[session_id] = launch
                 self._snapshots[session_id] = replace(
                     self._snapshots[session_id],
@@ -657,7 +940,55 @@ class PortableSessionSupervisor:
                     payload["planning_settings"] = record.planning_settings.to_dict()
                 if record.planning_thread_id is None:
                     command_kind = SupervisorMessageKind.START
-                self._acquire_existing_session_lease(session_id)
+                recovering_orphaned_running = (
+                    record.status is PortableSessionStatus.RUNNING
+                    and self._snapshots[session_id].recovery_available
+                )
+                owns_running_lease = (
+                    record.status is PortableSessionStatus.RUNNING
+                    and self._owns_catalog_session_lease(record)
+                )
+                if record.status is PortableSessionStatus.RUNNING and not (
+                    recovering_orphaned_running or owns_running_lease
+                ):
+                    raise ValueError(
+                        f"Portable session is already running: {session_id}"
+                    )
+                if recovering_orphaned_running:
+                    self._acquire_existing_session_lease(session_id)
+                    record = self._catalog.get_session(session_id)
+                    self._remember_catalog_revision(
+                        session_id,
+                        getattr(record, "revision", 0),
+                    )
+                    if record.status is not PortableSessionStatus.INTERRUPTED:
+                        self._release_session_lease(session_id)
+                        raise RuntimeError(
+                            "Portable running-session recovery did not establish "
+                            "an interrupted durable checkpoint."
+                        )
+                    self._snapshots[session_id] = replace(
+                        self._snapshots[session_id],
+                        status=record.status,
+                        recovery_available=False,
+                        updated_at=record.updated_at,
+                    )
+                needs_recovery = record.status in {
+                    PortableSessionStatus.INTERRUPTED,
+                    PortableSessionStatus.PAUSED,
+                } and not self._is_never_started_paused_session(record)
+                try:
+                    if needs_recovery:
+                        payload["recovery"] = self._resolve_recovery_data(
+                            record,
+                            self._snapshots[session_id],
+                        ).to_payload()
+                    if not recovering_orphaned_running:
+                        self._acquire_existing_session_lease(session_id)
+                except BaseException:
+                    if recovering_orphaned_running:
+                        self._release_session_lease(session_id)
+                    raise
                 if record.status.terminal:
                     revision = self._catalog.update_session_status(
                         session_id,
@@ -670,6 +1001,90 @@ class PortableSessionSupervisor:
                 command_kind,
                 payload,
             )
+
+    @staticmethod
+    def _is_never_started_paused_session(
+        record: PortableCatalogSessionRecord,
+    ) -> bool:
+        return (
+            record.status is PortableSessionStatus.PAUSED
+            and record.planning_thread_id is None
+            and record.prd_path is None
+            and record.issues_index_path is None
+            and not record.activity_summary
+        )
+
+    def _resolve_recovery_data(
+        self,
+        record: PortableCatalogSessionRecord,
+        snapshot: PortableSessionSnapshot,
+    ) -> PortableRecoveryData:
+        activity = snapshot.activity[-20:]
+        diagnostics = snapshot.diagnostics[-20:]
+        if record.prd_path is None:
+            if record.planning_thread_id is None or record.planning_settings is None:
+                raise ValueError(
+                    "Interrupted planning recovery has no durable thread and settings."
+                )
+            return PortableRecoveryData(
+                checkpoint_kind=PortableCheckpointKind.PLANNING,
+                checkout=record.checkout.resolve(),
+                activity=activity,
+                diagnostics=diagnostics,
+                planning_thread_id=record.planning_thread_id,
+                planning_settings=record.planning_settings.to_dict(),
+            )
+        issues_index_path = getattr(record, "issues_index_path", None)
+        if not isinstance(issues_index_path, Path):
+            raise ValueError(
+                "Interrupted delivery recovery has no authoritative Issue Index."
+            )
+        prd_path = record.prd_path.resolve()
+        issues_index_path = issues_index_path.resolve()
+        if not prd_path.is_file() or not issues_index_path.is_file():
+            raise ValueError(
+                "Interrupted delivery recovery checkpoint files are unavailable."
+            )
+        from .issue_pack import parse_issue_index
+        from .state import LoopStateWriter
+
+        writer = LoopStateWriter(issues_index_path)
+        receipt = record_relink_receipt(record, self._catalog)
+        checkpoint = writer.durable_scheduling_checkpoint(
+            repo_root=record.checkout,
+            prd_path=prd_path,
+            **receipt,
+        )
+        active_attempt = checkpoint.active_attempt
+        if active_attempt is None:
+            issue_id = None
+            next_role = "scheduler"
+            pass_number = 1
+        else:
+            issue_id = active_attempt["issue"]
+            issues = {
+                issue.number: issue
+                for issue in parse_issue_index(issues_index_path)
+            }
+            issue = issues.get(issue_id)
+            if issue is None:
+                raise ValueError(
+                    f"Durable recovery references unknown issue {issue_id!r}."
+                )
+            cursor = writer.resume_issue(issue)
+            next_role = cursor.next_role.value
+            pass_number = cursor.pass_number
+        return PortableRecoveryData(
+            checkpoint_kind=PortableCheckpointKind.PRD,
+            checkout=record.checkout.resolve(),
+            activity=activity,
+            diagnostics=diagnostics,
+            prd_path=prd_path,
+            issues_index_path=issues_index_path,
+            issue_id=issue_id,
+            next_role=next_role,
+            pass_number=pass_number,
+        )
 
     def _schedule_session(
         self,
@@ -713,6 +1128,7 @@ class PortableSessionSupervisor:
             result=None,
             input_request=None,
             updated_at=time.time(),
+            recovery_available=False,
         )
         self._snapshots[launch.session_id] = queued
         self._launches[launch.session_id] = launch
@@ -766,6 +1182,7 @@ class PortableSessionSupervisor:
                 result=None,
                 input_request=None,
                 updated_at=time.time(),
+                recovery_available=False,
             )
             self._snapshots[launch.session_id] = snapshot
             self._launches[launch.session_id] = launch
@@ -813,7 +1230,8 @@ class PortableSessionSupervisor:
                 ),
             )
             if self._process_identity is not None:
-                running.process_identity = self._process_identity
+                process_tree_identity = self._worker_tree_identity_capture(process)
+                running.process_identity = process_tree_identity.root
                 if self._catalog is not None:
                     bind_worker = getattr(
                         self._catalog,
@@ -824,7 +1242,8 @@ class PortableSessionSupervisor:
                         bind_worker(
                             launch.session_id,
                             owner_id=self._owner_id,
-                            process_identity=running.process_identity,
+                            owner_process_identity=self._process_identity,
+                            process_tree_identity=process_tree_identity,
                             worker_generation=running.generation,
                         )
         except BaseException as error:
@@ -848,6 +1267,17 @@ class PortableSessionSupervisor:
             name=f"portable-session-{launch.session_id}-stderr",
         )
         self._threads.extend((stdout_thread, stderr_thread))
+        retired_stderr_reader = self._stderr_readers.get(launch.session_id)
+        self._stderr_readers[launch.session_id] = running
+        if (
+            retired_stderr_reader is not None
+            and retired_stderr_reader.process.poll() is not None
+            and retired_stderr_reader.process.stderr is not None
+        ):
+            try:
+                retired_stderr_reader.process.stderr.close()
+            except OSError:
+                pass
         stdout_thread.start()
         stderr_thread.start()
         return snapshot
@@ -1023,10 +1453,7 @@ class PortableSessionSupervisor:
                 )
                 running.next_supervisor_sequence += 1
                 try:
-                    process_input = running.process.stdin
-                    if process_input is not None:
-                        process_input.write(frame.to_json_line() + "\n")
-                        process_input.flush()
+                    self._write_frame(session_id, frame)
                 except (BrokenPipeError, OSError):
                     pass
                 self._condition.wait_for(
@@ -1151,6 +1578,18 @@ class PortableSessionSupervisor:
                     "Portable session input is no longer the current input "
                     f"request: {session_id}"
                 )
+            if (
+                request.kind
+                in {
+                    PortableSessionInputKind.CHOICE,
+                    PortableSessionInputKind.APPROVAL,
+                }
+                and value not in {key for key, _label in request.options}
+            ):
+                raise ValueError(
+                    "Portable session response is not one of the offered decisions: "
+                    f"{session_id}"
+                )
             enqueue_capacity = (
                 getattr(self._catalog, "enqueue_execution_capacity", None)
                 if self._catalog is not None
@@ -1164,6 +1603,7 @@ class PortableSessionSupervisor:
                 self._remember_catalog_revision(session_id, revision)
                 self._queued[session_id] = _QueuedInput(
                     value=value,
+                    request_kind=request.kind,
                     request_id=request.request_id,
                     request_generation=request.generation,
                 )
@@ -1188,6 +1628,7 @@ class PortableSessionSupervisor:
             ):
                 self._queued[session_id] = _QueuedInput(
                     value=value,
+                    request_kind=request.kind,
                     request_id=request.request_id,
                     request_generation=request.generation,
                 )
@@ -1206,6 +1647,7 @@ class PortableSessionSupervisor:
                 value,
                 request_id=request.request_id,
                 request_generation=request.generation,
+                request_kind=request.kind,
                 running=running,
             )
 
@@ -1216,15 +1658,26 @@ class PortableSessionSupervisor:
         *,
         request_id: str,
         request_generation: int,
+        request_kind: PortableSessionInputKind,
         running: _RunningSession,
     ) -> PortableSessionSnapshot:
         snapshot = self.snapshot(session_id)
+        command_kind = (
+            SupervisorMessageKind.APPROVAL_DECISION
+            if request_kind is PortableSessionInputKind.APPROVAL
+            else SupervisorMessageKind.USER_INPUT
+        )
+        response_key = (
+            "decision"
+            if command_kind is SupervisorMessageKind.APPROVAL_DECISION
+            else "value"
+        )
         frame = supervisor_frame(
             session_id,
             running.next_supervisor_sequence,
-            SupervisorMessageKind.USER_INPUT,
+            command_kind,
             {
-                "value": value,
+                response_key: value,
                 "request_id": request_id,
                 "request_generation": request_generation,
             },
@@ -1258,8 +1711,74 @@ class PortableSessionSupervisor:
                 raise ValueError(f"Unknown portable session: {session_id}") from error
 
     def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+        self._synchronize_catalog_sessions()
         with self._condition:
             return tuple(self._snapshots.values())
+
+    def list_active_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+        return tuple(snapshot for snapshot in self.list_sessions() if not snapshot.in_history)
+
+    def list_history_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+        return tuple(snapshot for snapshot in self.list_sessions() if snapshot.in_history)
+
+    def relink_session(
+        self,
+        session_id: str,
+        checkout: Path,
+    ) -> PortableSessionSnapshot:
+        if self._catalog is None:
+            raise RuntimeError("Relink requires a machine session catalog.")
+        relink = getattr(self._catalog, "relink_unavailable_session", None)
+        if not callable(relink):
+            raise RuntimeError("Relink is unavailable for this session catalog.")
+        with self._condition:
+            if session_id in self._running or session_id in self._queued:
+                raise ValueError("Relink cannot change a live portable session.")
+            updated_ids = relink(session_id, checkout)
+            selected: PortableSessionSnapshot | None = None
+            for updated_id in updated_ids:
+                record = self._catalog.get_session(updated_id)
+                previous = self._snapshots[updated_id]
+                snapshot = replace(
+                    previous,
+                    checkout=record.checkout,
+                    status=record.status,
+                    result=getattr(record, "result", None),
+                    prd_path=record.prd_path,
+                    progress=getattr(record, "progress", PortableSessionProgress()),
+                    updated_at=record.updated_at,
+                    unavailable_from_status=getattr(
+                        record,
+                        "unavailable_from_status",
+                        None,
+                    ),
+                )
+                self._snapshots[updated_id] = snapshot
+                self._launches[updated_id] = record.launch
+                self._remember_catalog_revision(updated_id, record.revision)
+                self._publish(snapshot)
+                if updated_id == session_id:
+                    selected = snapshot
+            self._saved_projects = tuple(self._catalog.list_saved_projects())
+            assert selected is not None
+            return selected
+
+    def forget_session(self, session_id: str) -> None:
+        if self._catalog is None:
+            raise RuntimeError("Forget requires a machine session catalog.")
+        forget = getattr(self._catalog, "forget_session", None)
+        if not callable(forget):
+            raise RuntimeError("Forget is unavailable for this session catalog.")
+        with self._condition:
+            if session_id in self._running or session_id in self._queued:
+                raise ValueError("Forget cannot remove a live portable session.")
+            forget(session_id)
+            self._snapshots.pop(session_id, None)
+            self._launches.pop(session_id, None)
+            self._candidate_launches.pop(session_id, None)
+            self._catalog_revisions.pop(session_id, None)
+            self._owned_session_ids.discard(session_id)
+            self._saved_projects = tuple(self._catalog.list_saved_projects())
 
     def list_saved_projects(self) -> tuple[PortableSavedProjectRecord, ...]:
         return self._saved_projects
@@ -1340,6 +1859,7 @@ class PortableSessionSupervisor:
                     "a cooperative checkpoint"
                 ),
             )
+        self._close_stopped_stderr_readers()
         for thread in tuple(self._threads):
             thread.join(timeout=1)
         self._threads = [thread for thread in self._threads if thread.is_alive()]
@@ -1347,6 +1867,25 @@ class PortableSessionSupervisor:
         cleanup_reaper = self._cleanup_reaper_thread
         if cleanup_reaper is not None:
             cleanup_reaper.join(timeout=_COOPERATIVE_PAUSE_TIMEOUT_SECONDS)
+
+    def _close_stopped_stderr_readers(self) -> None:
+        with self._condition:
+            readers = tuple(self._stderr_readers.values())
+        for running in readers:
+            stderr = running.process.stderr
+            if (
+                stderr is None
+                or running.stderr_drained.is_set()
+                or (
+                    running.process.poll() is None
+                    and not running.cleanup.confirmed
+                )
+            ):
+                continue
+            try:
+                stderr.close()
+            except OSError:
+                pass
 
     def _run_capacity_scheduler(self) -> None:
         while not self._scheduler_stop.wait(_CAPACITY_REFRESH_INTERVAL_SECONDS):
@@ -1407,6 +1946,7 @@ class PortableSessionSupervisor:
                                 queued.value,
                                 request_id=queued.request_id,
                                 request_generation=queued.request_generation,
+                                request_kind=queued.request_kind,
                                 running=running,
                             )
                         except ValueError:
@@ -1450,7 +1990,12 @@ class PortableSessionSupervisor:
                     running.cleanup.record(cleanup)
                     continue
                 running.cleanup.record(cleanup)
-                self._close_worker_streams(running)
+                self._close_worker_streams(
+                    running,
+                    close_stderr=(
+                        self._stderr_readers.get(session_id) is not running
+                    ),
+                )
                 self._running.pop(session_id, None)
                 if running.launch_failure_rollback_new_session is not None:
                     self._finalize_post_launch_failure(
@@ -1517,6 +2062,20 @@ class PortableSessionSupervisor:
         except RuntimeError:
             return
         with self._condition:
+            record_ids = {record.session_id for record in records}
+            removable_ids = tuple(
+                session_id
+                for session_id in self._catalog_revisions
+                if session_id not in record_ids
+                and session_id not in self._owned_session_ids
+                and session_id not in self._running
+                and session_id not in self._queued
+            )
+            for session_id in removable_ids:
+                self._snapshots.pop(session_id, None)
+                self._launches.pop(session_id, None)
+                self._candidate_launches.pop(session_id, None)
+                self._catalog_revisions.pop(session_id, None)
             for record in records:
                 if (
                     record.session_id in self._owned_session_ids
@@ -1538,7 +2097,7 @@ class PortableSessionSupervisor:
                 ):
                     continue
                 activity = (
-                    (record.activity_summary,)
+                    (_safe_protocol_diagnostic(record.activity_summary),)
                     if record.activity_summary
                     else (() if previous is None else previous.activity)
                 )
@@ -1549,15 +2108,20 @@ class PortableSessionSupervisor:
                     context=None if previous is None else previous.context,
                     activity=activity,
                     diagnostics=() if previous is None else previous.diagnostics,
-                    result=None if previous is None else previous.result,
+                    result=getattr(record, "result", None),
                     input_request=None,
                     prd_path=record.prd_path,
-                    progress=(
-                        PortableSessionProgress()
-                        if previous is None
-                        else previous.progress
-                    ),
+                    progress=getattr(record, "progress", PortableSessionProgress()),
                     updated_at=record.updated_at,
+                    recovery_available=(
+                        record.status is PortableSessionStatus.RUNNING
+                        and not self._owns_catalog_session_lease(record)
+                    ),
+                    unavailable_from_status=getattr(
+                        record,
+                        "unavailable_from_status",
+                        None,
+                    ),
                 )
                 self._launches[record.session_id] = record.launch
                 self._remember_catalog_revision(record.session_id, revision)
@@ -1602,7 +2166,12 @@ class PortableSessionSupervisor:
     def _write_frame(self, session_id: str, frame: PortableProtocolFrame) -> None:
         process = self._running[session_id].process
         assert process.stdin is not None
-        process.stdin.write(frame.to_json_line() + "\n")
+        encoded = (frame.to_json_line() + "\n").encode("utf-8")
+        if isinstance(process.stdin, (io.BufferedIOBase, io.RawIOBase)):
+            process.stdin.write(encoded)
+        else:
+            # Injected v1 test/process adapters may still expose text streams.
+            process.stdin.write(encoded.decode("utf-8"))
         process.stdin.flush()
 
     def _read_worker_stdout(
@@ -1611,23 +2180,47 @@ class PortableSessionSupervisor:
         running: _RunningSession,
     ) -> None:
         assert running.process.stdout is not None
+        decoder = PortableProtocolStreamDecoder.for_worker_events(
+            session_id,
+            expected_sequence=running.next_worker_sequence,
+        )
         try:
-            for line in running.process.stdout:
-                frame = PortableProtocolFrame.parse(
-                    line,
-                    expected_session_id=session_id,
-                    expected_sequence=running.next_worker_sequence,
+            stdout = running.process.stdout
+            readline = getattr(stdout, "readline", None)
+            chunks = _bounded_stream_chunks(
+                stdout,
+                readline,
+                MAX_PORTABLE_PROTOCOL_FRAME_BYTES + 2,
+            )
+            for line in chunks:
+                encoded = (
+                    line.encode("utf-8", errors="strict")
+                    if isinstance(line, str)
+                    else line
                 )
-                running.next_worker_sequence += 1
-                if not self._apply_worker_frame(session_id, frame, running):
-                    return
-                if frame.kind in {
-                    WorkerMessageKind.CHECKPOINT.value,
-                    WorkerMessageKind.CHECKPOINT_FAILURE.value,
-                    WorkerMessageKind.COMPLETION.value,
-                    WorkerMessageKind.FAILURE.value,
-                }:
-                    return
+                for frame in decoder.feed(encoded):
+                    running.next_worker_sequence = frame.sequence + 1
+                    if frame.kind in {
+                        WorkerMessageKind.COMPLETION.value,
+                        WorkerMessageKind.FAILURE.value,
+                    }:
+                        applied = self._project_terminal_after_stderr_drain(
+                            session_id,
+                            frame,
+                            running,
+                        )
+                    else:
+                        applied = self._apply_worker_frame(session_id, frame, running)
+                    if not applied:
+                        return
+                    if frame.kind in {
+                        WorkerMessageKind.CHECKPOINT.value,
+                        WorkerMessageKind.CHECKPOINT_FAILURE.value,
+                        WorkerMessageKind.COMPLETION.value,
+                        WorkerMessageKind.FAILURE.value,
+                    }:
+                        return
+            decoder.finish()
             if (
                 self._running.get(session_id) is running
                 and not self.snapshot(session_id).status.terminal
@@ -1643,7 +2236,7 @@ class PortableSessionSupervisor:
                     "Worker exited without a terminal result.",
                     running,
                 )
-        except (PortableProtocolError, OSError) as error:
+        except (PortableProtocolError, OSError, UnicodeError) as error:
             self._fail_session(session_id, str(error), running)
         finally:
             cleanup = self._reap_worker(running)
@@ -1732,25 +2325,103 @@ class PortableSessionSupervisor:
         running: _RunningSession,
     ) -> None:
         assert running.process.stderr is not None
-        for line in running.process.stderr:
-            diagnostic = line.rstrip("\r\n")[:_MAX_DIAGNOSTIC_CHARACTERS]
-            if not diagnostic:
-                continue
-            with self._condition:
-                snapshot = self._snapshots[session_id]
-                active_running = self._running.get(session_id)
-                if (
-                    (
-                        active_running is not running
-                        and not (
-                            active_running is None
-                            and snapshot.status
-                            is PortableSessionStatus.INTERRUPTED
-                        )
+        try:
+            stderr = running.process.stderr
+            readline = getattr(stderr, "readline", None)
+            chunks = _bounded_stream_chunks(
+                stderr,
+                readline,
+                _MAX_DIAGNOSTIC_READ_CHARACTERS + 2,
+            )
+            discard_oversized_line = False
+            for line in chunks:
+                if isinstance(line, bytes):
+                    line_ended = line.endswith((b"\n", b"\r"))
+                    content = line.rstrip(b"\r\n")
+                else:
+                    line_ended = line.endswith(("\n", "\r"))
+                    content = line.rstrip("\r\n")
+                if discard_oversized_line:
+                    if line_ended:
+                        discard_oversized_line = False
+                    continue
+                if len(content) > _MAX_DIAGNOSTIC_READ_CHARACTERS:
+                    diagnostic = (
+                        "Worker stderr diagnostic exceeded the configured "
+                        "size limit and was discarded."
                     )
-                    or snapshot.status.terminal
-                ):
-                    return
+                    discard_oversized_line = not line_ended
+                else:
+                    diagnostic = _safe_protocol_diagnostic(
+                        content.decode("utf-8", errors="replace")
+                        if isinstance(content, bytes)
+                        else content
+                    )
+                if not diagnostic:
+                    continue
+                with self._condition:
+                    if self._stderr_readers.get(session_id) is not running:
+                        return
+                    snapshot = self._snapshots[session_id]
+                    updated = replace(
+                        snapshot,
+                        diagnostics=(
+                            *snapshot.diagnostics,
+                            diagnostic,
+                        )[-_MAX_DIAGNOSTIC_LINES:],
+                        updated_at=time.time(),
+                    )
+                    self._snapshots[session_id] = updated
+                    self._persist_snapshot(updated)
+                    self._publish(updated)
+                    self._condition.notify_all()
+        except (OSError, UnicodeError, ValueError):
+            pass
+        finally:
+            try:
+                running.process.stderr.close()
+            except OSError:
+                pass
+            running.stderr_drained.set()
+            with self._condition:
+                if self._stderr_readers.get(session_id) is running:
+                    self._stderr_readers.pop(session_id, None)
+                self._condition.notify_all()
+
+    def _project_terminal_after_stderr_drain(
+        self,
+        session_id: str,
+        frame: PortableProtocolFrame,
+        running: _RunningSession,
+    ) -> bool:
+        pending = _PendingTerminalProjection(frame=frame)
+        with self._condition:
+            snapshot = self._snapshots[session_id]
+            if (
+                self._running.get(session_id) is not running
+                or snapshot.status.terminal
+            ):
+                return False
+            running.pending_terminal = pending
+
+        drained = running.stderr_drained.wait(
+            timeout=_STDERR_TERMINAL_DRAIN_TIMEOUT_SECONDS
+        )
+
+        with self._condition:
+            snapshot = self._snapshots[session_id]
+            if (
+                self._running.get(session_id) is not running
+                or running.pending_terminal is not pending
+                or snapshot.status.terminal
+            ):
+                return False
+            if not drained and not running.stderr_drained.is_set():
+                diagnostic = (
+                    "Worker stderr remained open after the bounded terminal "
+                    "drain deadline; later diagnostics from this worker "
+                    "generation will continue to be retained."
+                )
                 updated = replace(
                     snapshot,
                     diagnostics=(
@@ -1760,7 +2431,10 @@ class PortableSessionSupervisor:
                     updated_at=time.time(),
                 )
                 self._snapshots[session_id] = updated
+                self._persist_snapshot(updated)
                 self._publish(updated)
+            running.pending_terminal = None
+        return self._apply_worker_frame(session_id, frame, running)
 
     def _apply_worker_frame(
         self,
@@ -1878,17 +2552,27 @@ class PortableSessionSupervisor:
                     snapshot,
                     context,
                 )
+                display_context = PortableRunContext(
+                    project_root=_safe_protocol_display(context.project_root),
+                    implementation_branch=_safe_protocol_display(
+                        context.implementation_branch
+                    ),
+                    implementation_worktree=_safe_protocol_display(
+                        context.implementation_worktree
+                    ),
+                    prd_path=_safe_protocol_display(context.prd_path),
+                )
                 updated = replace(
                     snapshot,
                     checkout=checkout,
-                    context=context,
+                    context=display_context,
                 )
             elif kind is WorkerMessageKind.ACTIVITY:
                 updated = replace(
                     snapshot,
                     activity=(
                         *snapshot.activity,
-                        _payload_text(frame, "message"),
+                        _safe_protocol_display(_payload_text(frame, "message")),
                     )[-100:],
                 )
             elif kind is WorkerMessageKind.SAFE_OUTPUT:
@@ -1896,7 +2580,7 @@ class PortableSessionSupervisor:
                     snapshot,
                     activity=(
                         *snapshot.activity,
-                        _payload_text(frame, "content"),
+                        _safe_protocol_display(_payload_text(frame, "content")),
                     )[-100:],
                 )
             elif kind is WorkerMessageKind.STATUS:
@@ -1946,7 +2630,7 @@ class PortableSessionSupervisor:
                 ):
                     progress = PortableSessionProgress(
                         stage=(
-                            _payload_text(frame, "stage")
+                            _safe_protocol_display(_payload_text(frame, "stage"))
                             if "stage" in frame.payload
                             else progress.stage
                         ),
@@ -1961,7 +2645,9 @@ class PortableSessionSupervisor:
                             else progress.total_issues
                         ),
                         active_issue=(
-                            _payload_optional_text(frame, "active_issue")
+                            _safe_protocol_optional_display(
+                                _payload_optional_text(frame, "active_issue")
+                            )
                             if "active_issue" in frame.payload
                             else progress.active_issue
                         ),
@@ -2028,12 +2714,20 @@ class PortableSessionSupervisor:
                         kind=request_kind,
                         request_id=request_id,
                         generation=request_generation,
-                        prompt=_payload_text(frame, "prompt"),
-                        options=tuple(
-                            (option[0], option[1]) for option in options_value
+                        prompt=_safe_protocol_display(
+                            _payload_text(frame, "prompt")
                         ),
-                        default_key=_payload_text(frame, "default_key"),
-                        cancel_key=cancel_key,
+                        options=tuple(
+                            (
+                                _safe_protocol_display(option[0]),
+                                _safe_protocol_display(option[1]),
+                            )
+                            for option in options_value
+                        ),
+                        default_key=_safe_protocol_display(
+                            _payload_text(frame, "default_key")
+                        ),
+                        cancel_key=_safe_protocol_optional_display(cancel_key),
                     ),
                 )
             elif kind is WorkerMessageKind.CHECKPOINT:
@@ -2058,7 +2752,7 @@ class PortableSessionSupervisor:
                     input_request=None,
                     diagnostics=(
                         *snapshot.diagnostics,
-                        _payload_text(frame, "message"),
+                        _safe_protocol_diagnostic(_payload_text(frame, "message")),
                     )[-100:],
                 )
             elif kind is WorkerMessageKind.TERMINATION:
@@ -2078,7 +2772,9 @@ class PortableSessionSupervisor:
                         "Worker TERMINATION descendants_confirmed must be boolean."
                     )
                 running.termination_ack = descendants_confirmed
-                running.termination_detail = _payload_text(frame, "detail")
+                running.termination_detail = _safe_protocol_diagnostic(
+                    _payload_text(frame, "detail")
+                )
                 updated = snapshot
             elif kind is WorkerMessageKind.COMPLETION:
                 exit_code = frame.payload.get("exit_code")
@@ -2117,7 +2813,7 @@ class PortableSessionSupervisor:
                     input_request=None,
                     diagnostics=(
                         *snapshot.diagnostics,
-                        _payload_text(frame, "message"),
+                        _safe_protocol_diagnostic(_payload_text(frame, "message")),
                     )[-100:],
                 )
             if kind in {
@@ -2156,7 +2852,7 @@ class PortableSessionSupervisor:
             )
         record = self._catalog.get_session(session_id)
         checkpoint_kind = _payload_text(frame, "checkpoint_kind")
-        summary = _payload_text(frame, "summary")
+        summary = _safe_protocol_diagnostic(_payload_text(frame, "summary"))
         if checkpoint_kind == "PLANNING":
             thread_id = _payload_text(frame, "planning_thread_id")
             settings = frame.payload.get("planning_settings")
@@ -2366,7 +3062,10 @@ class PortableSessionSupervisor:
                     else 1
                 ),
                 input_request=None,
-                diagnostics=(*snapshot.diagnostics, message)[-100:],
+                diagnostics=(
+                    *snapshot.diagnostics,
+                    _safe_protocol_diagnostic(message),
+                )[-_MAX_DIAGNOSTIC_LINES:],
                 updated_at=time.time(),
             )
             self._snapshots[session_id] = updated
@@ -2409,7 +3108,7 @@ class PortableSessionSupervisor:
                 input_request=None,
                 diagnostics=(
                     *snapshot.diagnostics,
-                    message[:_MAX_DIAGNOSTIC_CHARACTERS],
+                    _safe_protocol_diagnostic(message),
                 )[-_MAX_DIAGNOSTIC_LINES:],
                 updated_at=time.time(),
             )
@@ -2433,16 +3132,25 @@ class PortableSessionSupervisor:
             pass
         cleanup = terminate_process(running.process)  # type: ignore[arg-type]
         if cleanup.tree_terminated:
-            PortableSessionSupervisor._close_worker_streams(running)
+            running.stderr_drained.wait(
+                timeout=_STDERR_TERMINAL_DRAIN_TIMEOUT_SECONDS
+            )
+            PortableSessionSupervisor._close_worker_streams(
+                running,
+                close_stderr=True,
+            )
         return cleanup
 
     @staticmethod
-    def _close_worker_streams(running: _RunningSession) -> None:
-        for stream in (
-            running.process.stdin,
-            running.process.stdout,
-            running.process.stderr,
-        ):
+    def _close_worker_streams(
+        running: _RunningSession,
+        *,
+        close_stderr: bool = False,
+    ) -> None:
+        streams = [running.process.stdin, running.process.stdout]
+        if close_stderr or running.stderr_drained.is_set():
+            streams.append(running.process.stderr)
+        for stream in streams:
             if stream is not None:
                 try:
                     stream.close()
@@ -2491,13 +3199,15 @@ class PortableSessionSupervisor:
                         status=snapshot.status,
                         activity_summary=summary,
                     )
+                self._persist_catalog_summary(snapshot, summary)
                 return True
-            revision = self._catalog.update_session_status(
-                snapshot.session_id,
-                snapshot.status,
-                activity_summary=summary,
-            )
-            self._remember_catalog_revision(snapshot.session_id, revision)
+            if not self._persist_catalog_summary(snapshot, summary):
+                revision = self._catalog.update_session_status(
+                    snapshot.session_id,
+                    snapshot.status,
+                    activity_summary=summary,
+                )
+                self._remember_catalog_revision(snapshot.session_id, revision)
             return True
         except (KeyError, RuntimeError) as error:
             current = self._snapshots[snapshot.session_id]
@@ -2509,6 +3219,25 @@ class PortableSessionSupervisor:
                 )[-100:],
             )
             return False
+
+    def _persist_catalog_summary(
+        self,
+        snapshot: PortableSessionSnapshot,
+        activity_summary: str,
+    ) -> bool:
+        assert self._catalog is not None
+        update_summary = getattr(self._catalog, "update_session_summary", None)
+        if not callable(update_summary):
+            return False
+        revision = update_summary(
+            snapshot.session_id,
+            status=snapshot.status,
+            result=snapshot.result,
+            progress=snapshot.progress,
+            activity_summary=activity_summary,
+        )
+        self._remember_catalog_revision(snapshot.session_id, revision)
+        return True
 
     def _release_execution_capacity(
         self,
@@ -2574,6 +3303,25 @@ class PortableSessionSupervisor:
         if callable(acquire):
             acquire(session_id, owner_id=self._owner_id)
             self._owned_session_ids.add(session_id)
+
+    def _owns_catalog_session_lease(
+        self,
+        record: PortableCatalogSessionRecord,
+    ) -> bool:
+        if self._catalog is None or self._process_identity is None:
+            return False
+        get_lease = getattr(self._catalog, "get_worktree_lease", None)
+        if not callable(get_lease):
+            return False
+        lease = get_lease(record.checkout)
+        return (
+            lease is not None
+            and lease.session_id == record.session_id
+            and lease.owner_id == self._owner_id
+            and lease.process_id == self._process_identity.pid
+            and lease.process_start_fingerprint
+            == self._process_identity.creation_time
+        )
 
     def _release_session_lease(self, session_id: str) -> None:
         if self._catalog is None:
@@ -2646,7 +3394,7 @@ class PortableSessionSupervisor:
         )
         running.cleanup.record(cleanup)
         if cleanup.state is ProcessTreeState.STOPPED:
-            self._close_worker_streams(running)
+            self._close_worker_streams(running, close_stderr=True)
             if self._running.get(launch.session_id) is running:
                 self._running.pop(launch.session_id, None)
             self._finalize_post_launch_failure(
@@ -2776,22 +3524,36 @@ def run_portable_plain_session(
     created = False
     final_status = PortableSessionStatus.INTERRUPTED
     try:
-        create_with_lease = getattr(catalog, "create_session_with_lease", None)
-        if not callable(create_with_lease):
-            raise RuntimeError(
-                "Portable Plain Mode requires catalog worktree leasing."
+        try:
+            create_with_lease = getattr(catalog, "create_session_with_lease", None)
+            if not callable(create_with_lease):
+                raise RuntimeError(
+                    "Portable Plain Mode requires catalog worktree leasing."
+                )
+            create_with_lease(launch, owner_id=active_owner_id)
+            created = True
+            queued_notice_written = False
+            while not catalog.request_execution_capacity(
+                launch.session_id,
+                owner_id=active_owner_id,
+            ):
+                if not queued_notice_written:
+                    notice("Portable session [QUEUED]")
+                    queued_notice_written = True
+                time.sleep(poll_interval)
+        except (
+            OSError,
+            PortableWorktreeLeaseConflict,
+            RuntimeError,
+            ValueError,
+        ) as error:
+            final_status = PortableSessionStatus.FAILED
+            safe_error = compact_terminal_text(error, max_length=1000)
+            print(
+                f"Portable Plain Mode could not start: {safe_error}",
+                file=sys.stderr,
             )
-        create_with_lease(launch, owner_id=active_owner_id)
-        created = True
-        queued_notice_written = False
-        while not catalog.request_execution_capacity(
-            launch.session_id,
-            owner_id=active_owner_id,
-        ):
-            if not queued_notice_written:
-                notice(f"Portable session {launch.session_id} [QUEUED]")
-                queued_notice_written = True
-            time.sleep(poll_interval)
+            return 73
         result = operation()
         final_status = (
             PortableSessionStatus.COMPLETED
@@ -2847,6 +3609,36 @@ def _payload_text(frame: PortableProtocolFrame, key: str) -> str:
     return value
 
 
+def _bounded_stream_chunks(
+    stream: IO[Any],
+    readline: object,
+    limit: int,
+) -> Iterable[str | bytes]:
+    if not callable(readline):
+        yield from stream
+        return
+    while True:
+        chunk = readline(limit)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _safe_protocol_display(value: str) -> str:
+    return sanitize_terminal_text(value)[:_MAX_DIAGNOSTIC_CHARACTERS]
+
+
+def _safe_protocol_optional_display(value: str | None) -> str | None:
+    return None if value is None else _safe_protocol_display(value)
+
+
+def _safe_protocol_diagnostic(value: str) -> str:
+    return compact_terminal_text(
+        redact_persisted_evidence(value),
+        max_length=_MAX_DIAGNOSTIC_CHARACTERS,
+    )
+
+
 def _candidate_progress(
     candidate: PortableResumeCandidateRecord,
 ) -> PortableSessionProgress:
@@ -2856,6 +3648,58 @@ def _candidate_progress(
         total_issues=getattr(candidate, "total_issues", 0),
         active_issue=getattr(candidate, "active_issue", None),
     )
+
+
+def _catalog_workflow_is_complete(record: PortableCatalogSessionRecord) -> bool:
+    """Require positive project-local completion evidence before History."""
+    if record.prd_path is None or record.issues_index_path is None:
+        return False
+    prd_path = record.prd_path.resolve()
+    issues_index_path = record.issues_index_path.resolve()
+    checkout = record.checkout.resolve()
+    if (
+        not prd_path.is_relative_to(checkout)
+        or not issues_index_path.is_relative_to(checkout)
+        or not prd_path.is_file()
+        or not issues_index_path.is_file()
+    ):
+        return False
+    try:
+        from .issue_pack import parse_issue_index
+
+        issues = parse_issue_index(issues_index_path)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return bool(issues) and all(issue.completed for issue in issues)
+
+
+def record_relink_receipt(
+    record: PortableCatalogSessionRecord,
+    catalog: PortableSessionCatalogController,
+) -> dict[str, object]:
+    receipt = catalog.get_relink_receipt(record.session_id)
+    if receipt is None:
+        return {}
+    target_checkout = getattr(receipt, "target_checkout", None)
+    target_prd_path = getattr(receipt, "target_prd_path", None)
+    target_issues_path = getattr(receipt, "target_issues_index_path", None)
+    if (
+        not isinstance(target_checkout, Path)
+        or target_checkout.resolve() != record.checkout.resolve()
+        or not isinstance(target_prd_path, Path)
+        or record.prd_path is None
+        or target_prd_path.resolve() != record.prd_path.resolve()
+        or not isinstance(target_issues_path, Path)
+        or record.issues_index_path is None
+        or target_issues_path.resolve() != record.issues_index_path.resolve()
+    ):
+        raise ValueError("Durable Relink receipt does not match catalog pointers.")
+    return {
+        "relocated_from_repo_root": receipt.source_checkout,
+        "relocated_from_prd_path": receipt.source_prd_path,
+        "relocated_from_issues_index_path": receipt.source_issues_index_path,
+        "relocated_state_sha256": receipt.state_sha256,
+    }
 
 
 def _payload_optional_text(
@@ -2889,7 +3733,8 @@ def _launch_portable_worker(
     *,
     catalog_path: Path | None = None,
     owner_id: str | None = None,
-) -> subprocess.Popen[str]:
+) -> subprocess.Popen[bytes]:
+    launch_target = validated_portable_launch_target(launch)
     environment = os.environ.copy()
     environment["DEVLOOP_UI_MODE"] = "application"
     environment["DEVLOOP_PORTABLE_SESSION_ID"] = launch.session_id
@@ -2906,13 +3751,10 @@ def _launch_portable_worker(
             "--session-id",
             launch.session_id,
         ],
-        cwd=launch.checkout,
+        cwd=launch_target.argument_base,
         env=environment,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
     )
     return process

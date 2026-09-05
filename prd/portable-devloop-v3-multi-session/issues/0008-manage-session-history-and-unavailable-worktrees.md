@@ -53,4 +53,21 @@ Covers parent PRD user stories 41–47.
 
 ## Implementation Notes
 
-Completed: [ ]
+Completed: [x]
+
+- Implementation commit span: `bef3a59` through `41d6260`; issue commits are
+  `bef3a59`, `f5b925c`, `3d58b85`, and `41d6260`.
+- Fresh independent review: PASS. No functional defect was identified.
+- Fresh QA: PASS. Shared regression coverage and a clean-snapshot rerun reported
+  59/59; stress coverage reported 96/96; the broad sandbox-safe run reported
+  254 passed and 1 POSIX-only skip; and focused behavior probes reported 7/7.
+- Platform and environment limitation: these results are Windows-side. No Linux
+  gate or real/authenticated Codex gate ran. The prescribed all-tests environment
+  is not claimed green because cached Python 3.12 cannot load the repository
+  venv's Python 3.13 Hypothesis native module.
+- Tooling limitation: strict mypy did not run because the repository venv launcher
+  points to an unavailable Windows Store Python, and cached Python 3.12 reports
+  `No module named mypy`. Repo-wide Ruff remains red with nine unrelated/pre-existing
+  findings; four findings in `portable_session_catalog.py` and `test_portable_ui.py`
+  reproduce at `bef3a59^`, while the other eight issue-changed files pass focused
+  Ruff. This record does not claim whole-repository or release green.

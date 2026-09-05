@@ -7,10 +7,10 @@ import subprocess
 import threading
 import time
 import types
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
 
 
 _REAL_POPEN_TYPE = subprocess.Popen
@@ -69,6 +69,23 @@ class ProcessTreeState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ProcessTreeKind(str, Enum):
+    """The OS ownership primitive that contains one launched worker tree."""
+
+    ROOT_PROCESS = "ROOT_PROCESS"
+    POSIX_PROCESS_GROUP = "POSIX_PROCESS_GROUP"
+    WINDOWS_KILL_ON_CLOSE_JOB = "WINDOWS_KILL_ON_CLOSE_JOB"
+
+
+@dataclass(frozen=True)
+class ProcessTreeIdentity:
+    """Durable identity for a worker and its OS-owned descendant tree."""
+
+    root: ProcessIdentity
+    kind: ProcessTreeKind
+    tree_id: int
+
+
 def capture_process_identity(process_id: int | None = None) -> ProcessIdentity:
     """Capture one stable OS process incarnation for later liveness checks."""
     selected_process_id = os.getpid() if process_id is None else process_id
@@ -99,6 +116,70 @@ def process_identity_state(identity: ProcessIdentity) -> ProcessTreeState:
         )
     try:
         os.kill(identity.pid, 0)
+    except ProcessLookupError:
+        return ProcessTreeState.STOPPED
+    except OSError:
+        return ProcessTreeState.UNKNOWN
+    return ProcessTreeState.UNKNOWN
+
+
+def capture_process_tree_identity(
+    process: subprocess.Popen[str],
+) -> ProcessTreeIdentity:
+    """Capture the registered ownership primitive for an exact worker process."""
+    root = capture_process_identity(process.pid)
+    with _ACTIVE_PROCESS_TREES_LOCK:
+        windows_job = _ACTIVE_WINDOWS_JOBS.get(process)
+        posix_group = _ACTIVE_POSIX_PROCESS_GROUPS.get(process)
+    if (
+        windows_job is not None
+        and windows_job.state is WindowsJobAssignmentState.ASSIGNED
+    ):
+        return ProcessTreeIdentity(
+            root=root,
+            kind=ProcessTreeKind.WINDOWS_KILL_ON_CLOSE_JOB,
+            tree_id=root.pid,
+        )
+    if posix_group is not None:
+        return ProcessTreeIdentity(
+            root=root,
+            kind=ProcessTreeKind.POSIX_PROCESS_GROUP,
+            tree_id=posix_group.group_id,
+        )
+    return ProcessTreeIdentity(
+        root=root,
+        kind=ProcessTreeKind.ROOT_PROCESS,
+        tree_id=root.pid,
+    )
+
+
+def process_tree_identity_state(
+    identity: ProcessTreeIdentity,
+    owner: ProcessIdentity,
+) -> ProcessTreeState:
+    """Conservatively prove whether a durable worker tree has stopped."""
+    root_state = process_identity_state(identity.root)
+    if root_state is not ProcessTreeState.STOPPED:
+        return root_state
+    if identity.kind is ProcessTreeKind.ROOT_PROCESS:
+        # A root-only identity cannot prove that an unobserved descendant did
+        # not survive it. It may renew while live, but never authorizes reclaim.
+        return ProcessTreeState.UNKNOWN
+    if identity.kind is ProcessTreeKind.WINDOWS_KILL_ON_CLOSE_JOB:
+        return (
+            ProcessTreeState.STOPPED
+            if process_identity_state(owner) is ProcessTreeState.STOPPED
+            else ProcessTreeState.UNKNOWN
+        )
+    if os.name == "nt" or identity.tree_id <= 0:
+        return ProcessTreeState.UNKNOWN
+    current_members = _linux_process_group_identities(identity.tree_id)
+    if current_members:
+        # Once the leader has gone, a present PGID may contain a surviving old
+        # descendant or a reused unrelated group. Neither proves the old tree dead.
+        return ProcessTreeState.UNKNOWN
+    try:
+        os.killpg(identity.tree_id, 0)
     except ProcessLookupError:
         return ProcessTreeState.STOPPED
     except OSError:

@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .codex_runner import CodexRunner, RoleResult, RunWideBlockerError
-from .issue_pack import Issue, find_repo_root, parse_issue_index, select_issues
+from .issue_pack import (
+    Issue,
+    canonical_issue_index_for_prd,
+    find_repo_root,
+    parse_issue_index,
+    select_issues,
+)
 from .issue_scheduler import (
     DependencyScheduler,
     IssueDependencyGraph,
@@ -30,7 +36,9 @@ from .portable_execution_backend import (
     RunWideBlocker,
 )
 from .portable_execution_backend.codex_cli import CodexCliExecutionBackend
+from .portable_launch_target import delivery_launch_checkout
 from .portable_session_catalog import bind_active_catalog_session_checkout
+from .portable_sessions import PortablePartialWorkContext
 from .product_scope import require_portable_target
 from .portable_component_catalog import build_portable_component_catalog
 from .portable_workflow import (
@@ -375,6 +383,7 @@ def main(
     argv: list[str] | None = None,
     *,
     workflow_snapshot: WorkflowDefinition | None = None,
+    partial_work_context: PortablePartialWorkContext | None = None,
 ) -> int:
     raw_arguments = tuple(argv if argv is not None else sys.argv[1:])
     parser = build_parser()
@@ -399,7 +408,27 @@ def main(
         stdout_is_tty=sys.stdout.isatty(),
         term=os.environ.get("TERM"),
     )
-    operation = lambda: _run_devloop(parser, args, workflow_snapshot)
+    argument_base = Path.cwd().resolve()
+    try:
+        launch_checkout = delivery_launch_checkout(
+            current_checkout=argument_base,
+            prd_argument=args.prd,
+            issues_argument=args.issues,
+            create_worktree=args.create_worktree,
+            worktree_path_argument=args.worktree_path,
+            dry_run=args.dry_run,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    def operation() -> int:
+        if partial_work_context is None:
+            return _run_devloop(parser, args, workflow_snapshot)
+        return _run_devloop(
+            parser,
+            args,
+            workflow_snapshot,
+            partial_work_context=partial_work_context,
+        )
     if ui_mode is PortableUiMode.APPLICATION:
         if active_portable_runtime() is None:
             try:
@@ -421,9 +450,10 @@ def main(
             return run_portable_sessions_application(
                 PortableSessionLaunch(
                     session_id=str(uuid.uuid4()),
-                    checkout=Path.cwd(),
+                    checkout=launch_checkout,
                     operation=PortableWorkflowOperation.DELIVERY,
                     arguments=raw_arguments,
+                    argument_base=argument_base,
                 )
             )
         return operation()
@@ -440,9 +470,10 @@ def main(
         return run_portable_plain_session(
             PortableSessionLaunch(
                 session_id=str(uuid.uuid4()),
-                checkout=Path.cwd(),
+                checkout=launch_checkout,
                 operation=PortableWorkflowOperation.DELIVERY,
                 arguments=raw_arguments,
+                argument_base=argument_base,
             ),
             operation,
         )
@@ -452,9 +483,18 @@ def _run_devloop(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
     workflow_snapshot: WorkflowDefinition | None,
+    *,
+    partial_work_context: PortablePartialWorkContext | None = None,
 ) -> int:
+    pending_partial_work_context = partial_work_context
     while True:
-        result = _run_devloop_attempt(parser, args, workflow_snapshot)
+        result = _run_devloop_attempt(
+            parser,
+            args,
+            workflow_snapshot,
+            partial_work_context=pending_partial_work_context,
+        )
+        pending_partial_work_context = None
         if isinstance(result, int):
             return result
         if result.review_action is RunReviewAction.EXIT:
@@ -465,6 +505,8 @@ def _run_devloop_attempt(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
     workflow_snapshot: WorkflowDefinition | None,
+    *,
+    partial_work_context: PortablePartialWorkContext | None = None,
 ) -> int | DevLoopAttemptResult:
 
     if args.self_improvement_max_lessons < 1:
@@ -475,7 +517,11 @@ def _run_devloop_attempt(
         parser.error("--blocked-retry-max-passes must be at least 1")
 
     prd_path = Path(args.prd).expanduser().resolve()
-    issues_index = Path(args.issues).expanduser().resolve()
+    issues_index = (
+        Path(args.issues).expanduser().resolve()
+        if args.issues
+        else canonical_issue_index_for_prd(prd_path)
+    )
 
     if not prd_path.is_file():
         parser.error(f"PRD file not found: {prd_path}")
@@ -543,7 +589,11 @@ def _run_devloop_attempt(
     elif worktree.repo_root != source_repo:
         print(f"Using implementation worktree: {worktree.repo_root}")
 
-    repo_root = worktree.repo_root
+    repo_root = (
+        source_repo
+        if args.dry_run and not worktree.repo_root.is_dir()
+        else worktree.repo_root
+    )
     prd_in_repo = map_path_to_worktree(prd_path, source_repo, repo_root)
     issues_index_in_repo = map_path_to_worktree(issues_index, source_repo, repo_root)
     if repo_root != source_repo and not args.dry_run:
@@ -610,6 +660,7 @@ def _run_devloop_attempt(
         execution_backend=execution_backend,
         dry_run=args.dry_run,
         use_self_improvement_wiki=args.self_improvement_wiki,
+        partial_work_context=partial_work_context,
     )
 
     try:
@@ -908,14 +959,53 @@ def validate_issue_target_product(issue_path: Path) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .portable_version import portable_version_text
+
     parser = argparse.ArgumentParser(
         prog="devloop",
         description="Run local PRD + issue-pack tasks through Codex coder, review, and QA gates.",
     )
     parser.add_argument("--prd", required=True, help="Path to the parent PRD Markdown file.")
-    parser.add_argument("--issues", required=True, help="Path to the local issue README/index Markdown file.")
-    parser.add_argument("--preset", default="presets/generic-minimal.json", help="Preset JSON path. Relative paths are resolved from the bundle root.")
-    parser.add_argument("--all", action="store_true", help="Run dependency-ready issues until completion or bounded exhaustion.")
+    parser.add_argument(
+        "--issues",
+        help=(
+            "Path to the local issue README/index Markdown file. "
+            "Default: <PRD folder>/issues/README.md."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=portable_version_text("devloop"),
+    )
+    parser.add_argument(
+        "--preset",
+        default="presets/generic-minimal.json",
+        help=(
+            "Preset JSON path. Relative paths are resolved from the bundle root. "
+            "Default: presets/generic-minimal.json."
+        ),
+    )
+    breadth_group = parser.add_mutually_exclusive_group()
+    breadth_group.add_argument(
+        "--all",
+        dest="all",
+        action="store_true",
+        default=True,
+        help=(
+            "Run dependency-ready issues until completion or bounded exhaustion. "
+            "This is the default."
+        ),
+    )
+    breadth_group.add_argument(
+        "--single-issue",
+        dest="all",
+        action="store_false",
+        help=(
+            "Run only the first selected unfinished issue, or only the issue "
+            "matched by --start-issue."
+        ),
+    )
     parser.add_argument("--start-issue", help="Issue number or filename prefix to start from.")
     parser.add_argument("--max-passes", type=int, default=3, help="Maximum coder passes per issue.")
     parser.add_argument("--blocked-retry-rounds", type=int, default=DEFAULT_BLOCKER_RESOLUTION_PASSES, help="Maximum fair Blocker Resolution passes per ready issue, capped at 5. Default: 5.")
@@ -931,11 +1021,23 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_group = parser.add_mutually_exclusive_group()
     wiki_group.add_argument("--self-improvement-wiki", dest="self_improvement_wiki", action="store_true", default=True, help="Read and update the Dev Loop self-improvement wiki. This is the default.")
     wiki_group.add_argument("--no-self-improvement-wiki", dest="self_improvement_wiki", action="store_false", help="Do not read or update the Dev Loop self-improvement wiki.")
-    parser.add_argument("--create-worktree", action="store_true", help="Create a dedicated implementation worktree.")
-    parser.add_argument("--no-worktree", action="store_true", help="Use the issue worktree directly.")
+    parser.add_argument(
+        "--create-worktree",
+        action="store_true",
+        help="Explicitly create or reuse a dedicated implementation worktree.",
+    )
+    parser.add_argument(
+        "--no-worktree",
+        action="store_true",
+        help="Use the source checkout directly. This is the default.",
+    )
     parser.add_argument("--worktree-path", help="Path for a new implementation worktree.")
     parser.add_argument("--branch-name", help="Branch name for a new implementation worktree.")
-    parser.add_argument("--non-interactive", action="store_true", help="Do not prompt for missing worktree decisions.")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Do not prompt for missing explicit worktree details.",
+    )
     return parser
 
 

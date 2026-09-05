@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -18,8 +19,10 @@ from devloop.portable_execution_backend import (
     ExecutionBackendId,
     StepActivityEvent,
     StepActivityKind,
+    StepAttemptResult,
     codex_cli,
 )
+from devloop.portable_sessions import PortablePartialWorkContext
 from devloop.portable_workflow import (
     FINAL_REVIEW_STEP_ID,
     SECURITY_REVIEW_STEP_ID,
@@ -34,6 +37,90 @@ from tests.terminal_safety import (
     HOSTILE_TERMINAL_TEXT,
     assert_terminal_text_is_safe,
 )
+
+
+class RecoveryPromptContextTests(unittest.TestCase):
+    def test_delivery_runner_without_recovery_field_runs_an_ordinary_role(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            backend = mock.Mock()
+            backend.backend_id = ExecutionBackendId.CODEX_CLI
+            backend.invoke.return_value = StepAttemptResult(
+                process=subprocess.CompletedProcess(
+                    args=["fake-backend"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+                message=json.dumps({"status": "PASS", "summary": "ordinary"}),
+            )
+            runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+            runner.bundle = BundleContext(root=root, prompts=root, schemas=root)
+            runner.repo_root = root
+            runner.log_root = root / ".loop.logs"
+            runner.execution_backend = backend
+            runner.build_prompt = mock.Mock(return_value="ordinary prompt")
+            runner.ensure_log_root()
+
+            result = runner.run_role(
+                "coder",
+                Issue("0001", "Ordinary role", root / "0001.md", False),
+                1,
+            )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertIsNone(
+            runner.build_prompt.call_args.kwargs["partial_work_context"]
+        )
+
+    def test_delivery_runner_injects_partial_context_into_first_role_prompt_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prd_path = root / "change.md"
+            issues_index = root / "README.md"
+            issue_path = root / "0001-change.md"
+            for path in (prd_path, issues_index, issue_path):
+                path.write_text("# Recovery test\n", encoding="utf-8")
+            backend = mock.Mock()
+            backend.backend_id = ExecutionBackendId.CODEX_CLI
+            backend.invoke.return_value = StepAttemptResult(
+                process=subprocess.CompletedProcess(
+                    args=["fake-backend"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+                message=json.dumps(
+                    {"status": "PASS", "summary": "recovered"}
+                ),
+            )
+            runner = codex_runner.CodexRunner(
+                bundle=BundleContext.from_file(Path(codex_runner.__file__).resolve()),
+                repo_root=root,
+                prd_path=prd_path,
+                issues_index=issues_index,
+                preset=Preset(name="recovery", required_docs=[], roles={}),
+                execution_backend=backend,
+                dry_run=False,
+                use_self_improvement_wiki=False,
+                partial_work_context=PortablePartialWorkContext.from_sequences(
+                    activity=("Recovered delivery activity",),
+                    diagnostics=("Recovered delivery diagnostic",),
+                ),
+            )
+            issue = Issue("0001", "Recovery test", issue_path, False)
+
+            runner.run_role("coder", issue, 1)
+            runner.run_role("coder", issue, 2)
+
+        first_prompt = backend.invoke.call_args_list[0].args[0].prompt
+        second_prompt = backend.invoke.call_args_list[1].args[0].prompt
+        self.assertIn("Recovered delivery diagnostic", first_prompt)
+        self.assertIn("non-authoritative", first_prompt)
+        self.assertIn("durable recovery checkpoint", first_prompt)
+        self.assertNotIn("Recovered delivery diagnostic", second_prompt)
 
 
 class ResolveCodexExecutableTests(unittest.TestCase):

@@ -32,6 +32,7 @@ from .portable_execution_backend import (
     extract_json_object,
     resolve_execution_backend,
 )
+from .portable_sessions import PortablePartialWorkContext
 from .portable_text import normalize_single_line_display_name
 from .redaction import redact_persisted_evidence
 from .self_improvement_wiki import DEFAULT_SELF_IMPROVEMENT_WIKI_PATH
@@ -173,6 +174,7 @@ class CodexRunner:
         execution_backend: ExecutionBackend,
         dry_run: bool,
         use_self_improvement_wiki: bool,
+        partial_work_context: PortablePartialWorkContext | None = None,
     ) -> None:
         self.bundle = bundle
         self.repo_root = repo_root
@@ -182,6 +184,7 @@ class CodexRunner:
         self.execution_backend = execution_backend
         self.dry_run = dry_run
         self.use_self_improvement_wiki = use_self_improvement_wiki
+        self._partial_work_context = partial_work_context
         self.log_root = issues_index.parent / ".loop.logs"
         self.ensure_log_root()
 
@@ -249,6 +252,8 @@ class CodexRunner:
         agent_paths: Iterable[str] | None = None,
         step_guidance: str | None = None,
     ) -> RoleResult:
+        partial_work_context = getattr(self, "_partial_work_context", None)
+        self._partial_work_context = None
         prompt = self.build_prompt(
             role=role,
             issue=issue,
@@ -266,6 +271,7 @@ class CodexRunner:
             agent_paths=agent_paths,
             step_guidance=step_guidance,
             execution_budget=execution_budget,
+            partial_work_context=partial_work_context,
         )
 
         logs = _attempt_log_paths(
@@ -527,6 +533,7 @@ class CodexRunner:
         agent_paths: Iterable[str] | None = None,
         step_guidance: str | None = None,
         execution_budget: ExecutionBudget | None = None,
+        partial_work_context: PortablePartialWorkContext | None = None,
     ) -> str:
         role_config = self.preset.roles.get(role, {})
         execution_role = role_adapter or role
@@ -587,7 +594,10 @@ class CodexRunner:
             "REVIEW_RESULT": json.dumps(result_to_dict(review_result), indent=2),
             "TIMESTAMP": datetime.now().isoformat(timespec="seconds"),
         }
-        return render_template(self.bundle.prompts / template_name, values)
+        prompt = render_template(self.bundle.prompts / template_name, values)
+        if partial_work_context is not None and partial_work_context.has_content:
+            return f"{prompt.rstrip()}\n\n{partial_work_context.to_prompt()}\n"
+        return prompt
 
     def bundle_memory_docs(self) -> list[Path | str]:
         if not self.use_self_improvement_wiki:

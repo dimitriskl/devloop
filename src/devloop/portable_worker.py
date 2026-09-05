@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import sys
 import traceback
@@ -8,23 +9,33 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from itertools import count
+from pathlib import Path
 from queue import Queue
 from threading import Event, RLock, Thread
-from typing import Any, TextIO
+from typing import Any, BinaryIO, TextIO
 
 from .portable_protocol import (
+    MAX_PORTABLE_PROTOCOL_FRAME_BYTES,
     PORTABLE_PROTOCOL_VERSION,
+    PortableApprovalDecision,
     PortableProtocolError,
     PortableProtocolFrame,
+    PortableProtocolStreamDecoder,
     SupervisorMessageKind,
     WorkerMessageKind,
+    validated_portable_approval_decisions,
 )
 from .portable_runtime import (
     PortableRunContext,
     PortableRuntimeStopped,
     portable_runtime_session,
 )
-from .portable_sessions import PortableWorkflowOperation
+from .portable_sessions import (
+    PortablePartialWorkContext,
+    PortableRecoveryData,
+    PortableWorkflowOperation,
+    record_relink_receipt,
+)
 
 
 class _ProtocolOutputStream:
@@ -50,14 +61,18 @@ class PortableWorkerRuntimeBridge:
         self,
         session_id: str,
         *,
-        command_stream: TextIO,
-        event_stream: TextIO,
+        command_stream: BinaryIO | TextIO,
+        event_stream: BinaryIO | TextIO,
     ) -> None:
         self._session_id = session_id
         self._command_stream = command_stream
         self._event_stream = event_stream
         self._event_sequences = count(1)
         self._expected_command_sequence = 2
+        self._command_decoder = PortableProtocolStreamDecoder.for_supervisor_commands(
+            session_id,
+            expected_sequence=2,
+        )
         self._request_generations = count(1)
         self._write_lock = RLock()
         self._lifecycle_request: SupervisorMessageKind | None = None
@@ -137,6 +152,43 @@ class PortableWorkerRuntimeBridge:
         return self._read_user_input(
             request_id=request_id,
             request_generation=request_generation,
+        )
+
+    def request_approval(
+        self,
+        prompt: str,
+        *,
+        supported_decisions: Sequence[str],
+        default_decision: str,
+        cancel_decision: str,
+    ) -> str:
+        self._raise_if_stopping()
+        decisions = validated_portable_approval_decisions(
+            supported_decisions,
+            default_decision=default_decision,
+            cancel_decision=cancel_decision,
+        )
+        request_id = str(uuid.uuid4())
+        request_generation = next(self._request_generations)
+        self._send(
+            WorkerMessageKind.INPUT_REQUEST,
+            {
+                "request_id": request_id,
+                "request_generation": request_generation,
+                "request_kind": "APPROVAL",
+                "prompt": prompt,
+                "options": [
+                    [decision, decision.replace("_", " ").title()]
+                    for decision in decisions
+                ],
+                "default_key": default_decision,
+                "cancel_key": cancel_decision,
+            },
+        )
+        return self._read_approval_decision(
+            request_id=request_id,
+            request_generation=request_generation,
+            offered_decisions=frozenset(decisions),
         )
 
     def request_stop(self) -> None:
@@ -264,7 +316,12 @@ class PortableWorkerRuntimeBridge:
                 kind=kind.value,
                 payload=payload,
             )
-            self._event_stream.write(frame.to_json_line() + "\n")
+            encoded = (frame.to_json_line() + "\n").encode("utf-8")
+            if isinstance(self._event_stream, (io.BufferedIOBase, io.RawIOBase)):
+                self._event_stream.write(encoded)
+            else:
+                # Retain the in-memory text-stream seam used by focused tests.
+                self._event_stream.write(encoded.decode("utf-8"))
             self._event_stream.flush()
 
     def _read_user_input(
@@ -272,6 +329,8 @@ class PortableWorkerRuntimeBridge:
         *,
         request_id: str,
         request_generation: int,
+        expected_kind: SupervisorMessageKind = SupervisorMessageKind.USER_INPUT,
+        response_key: str = "value",
     ) -> str:
         frame = self._next_command()
         try:
@@ -289,21 +348,48 @@ class PortableWorkerRuntimeBridge:
             raise PortableRuntimeStopped(
                 f"Portable worker received {lifecycle_kind.value}."
             )
-        if frame.kind != SupervisorMessageKind.USER_INPUT.value:
+        if frame.kind != expected_kind.value:
             raise PortableProtocolError(
-                f"Expected USER_INPUT; received {frame.kind!r}."
+                f"Expected {expected_kind.value}; received {frame.kind!r}."
             )
         if (
             frame.payload.get("request_id") != request_id
             or frame.payload.get("request_generation") != request_generation
         ):
             raise PortableProtocolError(
-                "Supervisor USER_INPUT does not match the current input request."
+                f"Supervisor {expected_kind.value} does not match the current "
+                "input request."
             )
-        value = frame.payload.get("value")
+        value = frame.payload.get(response_key)
         if not isinstance(value, str):
-            raise PortableProtocolError("Supervisor USER_INPUT value must be text.")
+            raise PortableProtocolError(
+                f"Supervisor {expected_kind.value} response must be text."
+            )
+        if (
+            expected_kind is SupervisorMessageKind.APPROVAL_DECISION
+            and value not in {decision.value for decision in PortableApprovalDecision}
+        ):
+            raise PortableProtocolError("Supervisor approval decision is unsupported.")
         return value
+
+    def _read_approval_decision(
+        self,
+        *,
+        request_id: str,
+        request_generation: int,
+        offered_decisions: frozenset[str],
+    ) -> str:
+        decision = self._read_user_input(
+            request_id=request_id,
+            request_generation=request_generation,
+            expected_kind=SupervisorMessageKind.APPROVAL_DECISION,
+            response_key="decision",
+        )
+        if decision not in offered_decisions:
+            raise PortableProtocolError(
+                "Supervisor approval decision was not offered by the current request."
+            )
+        return decision
 
     def _next_command(self) -> PortableProtocolFrame:
         if self._control_reader_started:
@@ -311,14 +397,7 @@ class PortableWorkerRuntimeBridge:
             if isinstance(queued, PortableProtocolError):
                 raise queued
             return queued
-        line = self._command_stream.readline()
-        if not line:
-            raise PortableProtocolError("Supervisor closed worker input.")
-        frame = PortableProtocolFrame.parse(
-            line,
-            expected_session_id=self._session_id,
-            expected_sequence=self._expected_command_sequence,
-        )
+        frame = _read_command_frame(self._command_stream, self._command_decoder)
         self._expected_command_sequence += 1
         return frame
 
@@ -327,20 +406,19 @@ class PortableWorkerRuntimeBridge:
         on_lifecycle: Callable[[PortableProtocolFrame], None] | None,
     ) -> None:
         while True:
-            line = self._command_stream.readline()
-            if not line:
-                self._command_queue.put(
-                    PortableProtocolError("Supervisor closed worker input.")
-                )
-                return
             try:
-                frame = PortableProtocolFrame.parse(
-                    line,
-                    expected_session_id=self._session_id,
-                    expected_sequence=self._expected_command_sequence,
+                frame = _read_command_frame(
+                    self._command_stream,
+                    self._command_decoder,
                 )
-            except PortableProtocolError as error:
-                self._command_queue.put(error)
+            except (OSError, PortableProtocolError, UnicodeError) as error:
+                self._command_queue.put(
+                    error
+                    if isinstance(error, PortableProtocolError)
+                    else PortableProtocolError(
+                        f"Supervisor command stream failed: {error}"
+                    )
+                )
                 return
             self._expected_command_sequence += 1
             try:
@@ -425,11 +503,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--session-id", required=True)
     options = parser.parse_args(argv)
     protocol_stdout = sys.stdout
-    start = _read_launch_frame(options.session_id, sys.stdin)
+    protocol_stdin = sys.stdin.buffer
+    protocol_stdout_buffer = sys.stdout.buffer
+    start = _read_launch_frame(options.session_id, protocol_stdin)
     bridge = PortableWorkerRuntimeBridge(
         options.session_id,
-        command_stream=sys.stdin,
-        event_stream=protocol_stdout,
+        command_stream=protocol_stdin,
+        event_stream=protocol_stdout_buffer,
     )
     sys.stdout = _ProtocolOutputStream(bridge, is_error=False)
     heartbeat_emitter: PortableWorkerHeartbeatEmitter | None = None
@@ -500,6 +580,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             isinstance(argument, str) for argument in arguments
         ):
             raise PortableProtocolError("START arguments must be a list of strings.")
+        recovery = (
+            PortableRecoveryData.from_payload(start.payload["recovery"])
+            if "recovery" in start.payload
+            else None
+        )
         with portable_runtime_session(bridge):
             bridge.update_session_status(
                 stage=(
@@ -514,7 +599,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else "delivery"
                 )
             )
-            result = _run_operation(operation, arguments)
+            result = (
+                _run_operation(operation, arguments)
+                if recovery is None
+                else _run_operation(operation, arguments, recovery=recovery)
+            )
     except PortableRuntimeStopped:
         result = 0
     except SystemExit as error:
@@ -550,15 +639,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _read_launch_frame(
     session_id: str,
-    command_stream: TextIO,
+    command_stream: BinaryIO | TextIO,
 ) -> PortableProtocolFrame:
-    line = command_stream.readline()
-    if not line:
-        raise PortableProtocolError("Supervisor did not send START or RESUME.")
-    frame = PortableProtocolFrame.parse(
-        line,
-        expected_session_id=session_id,
-        expected_sequence=1,
+    frame = _read_command_frame(
+        command_stream,
+        PortableProtocolStreamDecoder.for_supervisor_commands(session_id),
     )
     launch_kinds = {
         SupervisorMessageKind.START.value,
@@ -571,17 +656,133 @@ def _read_launch_frame(
     return frame
 
 
+def _read_command_frame(
+    command_stream: BinaryIO | TextIO,
+    decoder: PortableProtocolStreamDecoder,
+) -> PortableProtocolFrame:
+    while True:
+        line = command_stream.readline(MAX_PORTABLE_PROTOCOL_FRAME_BYTES + 2)
+        if not line:
+            decoder.finish()
+            raise PortableProtocolError("Supervisor closed worker input.")
+        encoded = (
+            line.encode("utf-8", errors="strict")
+            if isinstance(line, str)
+            else line
+        )
+        frames = decoder.feed(encoded)
+        if frames:
+            if len(frames) != 1:
+                raise PortableProtocolError(
+                    "Supervisor command read contained multiple protocol frames."
+                )
+            return frames[0]
+
+
 def _run_operation(
     operation: PortableWorkflowOperation,
     arguments: list[str],
+    *,
+    recovery: PortableRecoveryData | None = None,
 ) -> int:
+    if recovery is not None:
+        arguments = _arguments_for_recovery(operation, arguments, recovery)
+    partial_work_context = (
+        PortablePartialWorkContext.from_sequences(
+            activity=recovery.activity,
+            diagnostics=recovery.diagnostics,
+        )
+        if recovery is not None
+        else None
+    )
     if operation is PortableWorkflowOperation.PLANNING:
         from .interactive_runner import main as run_planning
 
-        return run_planning(arguments)
+        if partial_work_context is None:
+            return run_planning(arguments)
+        return run_planning(
+            arguments,
+            partial_work_context=partial_work_context,
+        )
     from .cli import main as run_delivery
 
-    return run_delivery(arguments)
+    if partial_work_context is None:
+        return run_delivery(arguments)
+    return run_delivery(
+        arguments,
+        partial_work_context=partial_work_context,
+    )
+
+
+def _arguments_for_recovery(
+    operation: PortableWorkflowOperation,
+    arguments: list[str],
+    recovery: PortableRecoveryData,
+) -> list[str]:
+    if Path.cwd().resolve() != recovery.checkout.resolve():
+        raise PortableProtocolError(
+            "Recovery checkout does not match the worker current directory."
+        )
+    observed = _capture_durable_checkpoint(operation, arguments)
+    expected = recovery.to_payload()
+    checkpoint_fields = (
+        "checkpoint_kind",
+        "planning_thread_id",
+        "planning_settings",
+        "prd_path",
+        "issues_index_path",
+        "issue_id",
+        "next_role",
+        "pass_number",
+    )
+    for field_name in checkpoint_fields:
+        if observed.get(field_name) != expected.get(field_name):
+            raise PortableProtocolError(
+                "Recovery data no longer matches the latest durable checkpoint."
+            )
+    if operation is PortableWorkflowOperation.PLANNING:
+        return list(arguments)
+    assert recovery.prd_path is not None
+    assert recovery.issues_index_path is not None
+    if (
+        _argument_path(arguments, "--prd") != recovery.prd_path.resolve()
+        or _argument_path(arguments, "--issues")
+        != recovery.issues_index_path.resolve()
+    ):
+        raise PortableProtocolError(
+            "Recovery launch arguments do not match the durable workflow pointers."
+        )
+    if recovery.issue_id is None:
+        return list(arguments)
+    return _with_recovery_issue(arguments, recovery.issue_id)
+
+
+def _argument_path(arguments: Sequence[str], option: str) -> Path | None:
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            return Path(arguments[index + 1]).expanduser().resolve()
+        prefix = f"{option}="
+        if argument.startswith(prefix):
+            return Path(argument[len(prefix) :]).expanduser().resolve()
+    return None
+
+
+def _with_recovery_issue(arguments: Sequence[str], issue_id: str) -> list[str]:
+    recovered = list(arguments)
+    for index, argument in enumerate(recovered):
+        if argument == "--start-issue":
+            if index + 1 >= len(recovered) or recovered[index + 1] != issue_id:
+                raise PortableProtocolError(
+                    "Recovery --start-issue conflicts with the durable checkpoint."
+                )
+            return recovered
+        if argument.startswith("--start-issue="):
+            if argument.partition("=")[2] != issue_id:
+                raise PortableProtocolError(
+                    "Recovery --start-issue conflicts with the durable checkpoint."
+                )
+            return recovered
+    return [*recovered, "--start-issue", issue_id]
 
 
 def _capture_durable_checkpoint(
@@ -628,7 +829,15 @@ def _capture_durable_checkpoint(
 
     issues = {issue.number: issue for issue in parse_issue_index(issues_index)}
     writer = LoopStateWriter(issues_index)
-    active_attempt = writer.active_scheduling_attempt()
+    receipt = record_relink_receipt(record, _catalog)
+    checkpoint = writer.durable_scheduling_checkpoint(
+        repo_root=record.checkout,
+        prd_path=prd_path,
+        **receipt,
+    )
+    if not checkpoint.used_relink_receipt:
+        _catalog.clear_relink_receipt(record.session_id)
+    active_attempt = checkpoint.active_attempt
     if active_attempt is None:
         return {
             "checkpoint_kind": "PRD",

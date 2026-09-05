@@ -23,9 +23,227 @@ from devloop.portable_sessions import (
     PortableSessionSupervisor,
     PortableWorkflowOperation,
 )
+from devloop.subprocess_utils import (
+    ProcessTreeIdentity,
+    ProcessTreeKind,
+    capture_process_identity,
+)
+
+
+def _fake_worker_tree_identity(_worker: object) -> ProcessTreeIdentity:
+    identity = capture_process_identity()
+    return ProcessTreeIdentity(
+        root=identity,
+        kind=ProcessTreeKind.ROOT_PROCESS,
+        tree_id=identity.pid,
+    )
+
+
+def _user_index_snapshot(connection: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
+    indexes = connection.execute(
+        """
+        SELECT name, sql
+        FROM sqlite_master
+        WHERE type = 'index'
+            AND tbl_name = 'worktree_leases'
+            AND sql IS NOT NULL
+        ORDER BY name
+        """
+    ).fetchall()
+    return tuple(
+        (
+            name,
+            sql,
+            connection.execute(
+                """
+                SELECT name, \"unique\", origin, partial
+                FROM pragma_index_list('worktree_leases')
+                WHERE name = ?
+                """,
+                (name,),
+            ).fetchone(),
+            tuple(
+                connection.execute(
+                    """
+                    SELECT seqno, cid, name, desc, coll, key
+                    FROM pragma_index_xinfo(?)
+                    ORDER BY seqno
+                    """,
+                    (name,),
+                )
+            ),
+        )
+        for name, sql in indexes
+    )
+
+
+def _restore_version_five_worktree_lease_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.executescript(
+        """
+        ALTER TABLE worktree_leases RENAME TO v6_worktree_leases;
+        CREATE TABLE worktree_leases (
+            checkout TEXT PRIMARY KEY
+                CHECK (length(checkout) BETWEEN 1 AND 4096),
+            session_id TEXT NOT NULL UNIQUE
+                REFERENCES sessions(session_id),
+            owner_id TEXT NOT NULL
+                CHECK (length(owner_id) BETWEEN 1 AND 128),
+            process_id INTEGER NOT NULL
+                CHECK (typeof(process_id) = 'integer' AND process_id > 0),
+            acquired_at REAL NOT NULL
+                CHECK (typeof(acquired_at) IN ('integer', 'real')
+                    AND acquired_at >= 0),
+            heartbeat_at REAL NOT NULL
+                CHECK (typeof(heartbeat_at) IN ('integer', 'real')
+                    AND heartbeat_at >= 0),
+            process_start_fingerprint INTEGER
+                CHECK (process_start_fingerprint IS NULL
+                    OR (typeof(process_start_fingerprint) = 'integer'
+                        AND process_start_fingerprint > 0)),
+            worker_generation INTEGER
+                CHECK (worker_generation IS NULL
+                    OR (typeof(worker_generation) = 'integer'
+                        AND worker_generation > 0))
+        );
+        INSERT INTO worktree_leases (
+            checkout, session_id, owner_id, process_id,
+            acquired_at, heartbeat_at, process_start_fingerprint,
+            worker_generation
+        )
+        SELECT checkout, session_id, owner_id, process_id,
+            acquired_at, heartbeat_at, process_start_fingerprint,
+            worker_generation
+        FROM v6_worktree_leases;
+        DROP TABLE v6_worktree_leases;
+        PRAGMA user_version = 5;
+        """
+    )
 
 
 class PortableSessionCatalogTests(unittest.TestCase):
+    def test_fresh_catalog_persists_current_schema_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "portable-sessions.sqlite3"
+
+            PortableSessionCatalog(database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(version, 8)
+
+    def test_schema_rejects_incomplete_worker_tree_tuple(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session_with_lease(
+                PortableSessionLaunch(
+                    "incomplete-tree-schema",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                ),
+                owner_id="schema-shell",
+            )
+
+            with closing(sqlite3.connect(database)) as connection:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        UPDATE worktree_leases
+                        SET worker_process_id = 4301
+                        WHERE session_id = 'incomplete-tree-schema'
+                        """
+                    )
+
+    def test_schema_enforces_worker_tree_kind_and_root_relationship(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session_with_lease(
+                PortableSessionLaunch(
+                    "semantic-tree-schema",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                ),
+                owner_id="semantic-schema-shell",
+            )
+
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute(
+                    """
+                    UPDATE worktree_leases
+                    SET worker_generation = 1,
+                        worker_process_id = 4302,
+                        worker_process_start_fingerprint = 5302,
+                        process_tree_kind = 'WINDOWS_KILL_ON_CLOSE_JOB',
+                        process_tree_id = 4302
+                    WHERE session_id = 'semantic-tree-schema'
+                    """
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        UPDATE worktree_leases
+                        SET process_tree_id = 4303
+                        WHERE session_id = 'semantic-tree-schema'
+                        """
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        UPDATE worktree_leases
+                        SET process_tree_kind = 'UNSAFE_TREE'
+                        WHERE session_id = 'semantic-tree-schema'
+                        """
+                    )
+
+    def test_row_parser_rejects_corrupt_complete_worker_tree_tuple(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session_with_lease(
+                PortableSessionLaunch(
+                    "corrupt-tree-row",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                ),
+                owner_id="corrupt-row-shell",
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("PRAGMA ignore_check_constraints = ON")
+                connection.execute(
+                    """
+                    UPDATE worktree_leases
+                    SET worker_generation = 1,
+                        worker_process_id = 4304,
+                        worker_process_start_fingerprint = 5304,
+                        process_tree_kind = 'ROOT_PROCESS',
+                        process_tree_id = 4305
+                    WHERE session_id = 'corrupt-tree-row'
+                    """
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "invalid worktree lease",
+            ):
+                catalog.get_worktree_lease(checkout)
+
     def test_corrupt_catalog_fails_with_catalog_specific_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "portable-sessions.sqlite3"
@@ -46,7 +264,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PortableSessionCatalogError,
-                "newer than supported version 5",
+                "newer than supported version 8",
             ):
                 PortableSessionCatalog(database)
 
@@ -146,6 +364,189 @@ class PortableSessionCatalogTests(unittest.TestCase):
 
         self.assertEqual(first.revision, 1)
         self.assertEqual(recreated.revision, 2)
+
+    def test_version_five_catalog_migrates_worker_tree_schema_without_data_loss(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            identities = (
+                ("legacy-unbound", root / "unbound", None),
+                ("legacy-bound", root / "bound", 1),
+            )
+            process_identity = capture_process_identity()
+            for offset, (session_id, checkout, generation) in enumerate(identities):
+                checkout.mkdir()
+                catalog.create_session_with_lease(
+                    PortableSessionLaunch(
+                        session_id,
+                        checkout,
+                        PortableWorkflowOperation.PLANNING,
+                        (),
+                    ),
+                    owner_id=f"legacy-shell-{offset}",
+                    process_identity=process_identity,
+                    worker_generation=generation,
+                )
+            with closing(sqlite3.connect(database)) as connection:
+                connection.executescript(
+                    """
+                    ALTER TABLE worktree_leases RENAME TO v6_worktree_leases;
+                    CREATE TABLE worktree_leases (
+                        checkout TEXT PRIMARY KEY
+                            CHECK (length(checkout) BETWEEN 1 AND 4096),
+                        session_id TEXT NOT NULL UNIQUE
+                            REFERENCES sessions(session_id),
+                        owner_id TEXT NOT NULL
+                            CHECK (length(owner_id) BETWEEN 1 AND 128),
+                        process_id INTEGER NOT NULL
+                            CHECK (typeof(process_id) = 'integer'
+                                AND process_id > 0),
+                        acquired_at REAL NOT NULL
+                            CHECK (typeof(acquired_at) IN ('integer', 'real')
+                                AND acquired_at >= 0),
+                        heartbeat_at REAL NOT NULL
+                            CHECK (typeof(heartbeat_at) IN ('integer', 'real')
+                                AND heartbeat_at >= 0),
+                        process_start_fingerprint INTEGER
+                            CHECK (process_start_fingerprint IS NULL
+                                OR (typeof(process_start_fingerprint) = 'integer'
+                                    AND process_start_fingerprint > 0)),
+                        worker_generation INTEGER
+                            CHECK (worker_generation IS NULL
+                                OR (typeof(worker_generation) = 'integer'
+                                    AND worker_generation > 0))
+                    );
+                    INSERT INTO worktree_leases (
+                        checkout, session_id, owner_id, process_id,
+                        acquired_at, heartbeat_at, process_start_fingerprint,
+                        worker_generation
+                    )
+                    SELECT checkout, session_id, owner_id, process_id,
+                        acquired_at, heartbeat_at, process_start_fingerprint,
+                        worker_generation
+                    FROM v6_worktree_leases;
+                    DROP TABLE v6_worktree_leases;
+                    PRAGMA user_version = 5;
+                    """
+                )
+                v5_indexes = tuple(
+                    (row[2], row[3], row[4])
+                    for row in connection.execute(
+                        "PRAGMA index_list(worktree_leases)"
+                    )
+                )
+                connection.executescript(
+                    """
+                    CREATE INDEX lease_owner_idx
+                        ON worktree_leases(owner_id);
+                    CREATE UNIQUE INDEX lease_owner_heartbeat_uq
+                        ON worktree_leases(owner_id, heartbeat_at);
+                    CREATE INDEX lease_checkout_owner_idx
+                        ON worktree_leases(checkout, owner_id DESC);
+                    CREATE INDEX lease_bound_owner_expression_idx
+                        ON worktree_leases(lower(owner_id), heartbeat_at DESC)
+                        WHERE worker_generation IS NOT NULL;
+                    """
+                )
+                v5_user_indexes = _user_index_snapshot(connection)
+
+            migrated = PortableSessionCatalog(database)
+            unbound = migrated.get_worktree_lease(root / "unbound")
+            bound = migrated.get_worktree_lease(root / "bound")
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                v6_indexes = tuple(
+                    (row[2], row[3], row[4])
+                    for row in connection.execute(
+                        "PRAGMA index_list(worktree_leases)"
+                    )
+                )
+                v6_user_indexes = _user_index_snapshot(connection)
+
+        assert unbound is not None
+        assert bound is not None
+        self.assertEqual(version, 8)
+        self.assertIsNone(unbound.worker_generation)
+        self.assertIsNone(unbound.process_tree_identity)
+        self.assertEqual(bound.worker_generation, 1)
+        self.assertIsNone(bound.process_tree_identity)
+        self.assertEqual(v6_indexes[-len(v5_indexes) :], v5_indexes)
+        self.assertEqual(v6_user_indexes, v5_user_indexes)
+
+    def test_version_five_index_recreation_failure_rolls_back_entire_migration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            database = root / "portable-sessions.sqlite3"
+            catalog = PortableSessionCatalog(database)
+            catalog.create_session_with_lease(
+                PortableSessionLaunch(
+                    "rollback-v5-index",
+                    checkout,
+                    PortableWorkflowOperation.PLANNING,
+                    (),
+                ),
+                owner_id="rollback-shell",
+                process_identity=capture_process_identity(),
+                worker_generation=1,
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                _restore_version_five_worktree_lease_schema(connection)
+                connection.create_collation(
+                    "lease_order",
+                    lambda left, right: (left > right) - (left < right),
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX lease_custom_collation_idx
+                    ON worktree_leases(owner_id COLLATE lease_order)
+                    """
+                )
+                connection.commit()
+                original_schema = connection.execute(
+                    """
+                    SELECT sql FROM sqlite_master
+                    WHERE type = 'table' AND name = 'worktree_leases'
+                    """
+                ).fetchone()[0]
+                original_rows = tuple(
+                    connection.execute(
+                        "SELECT * FROM worktree_leases ORDER BY checkout"
+                    )
+                )
+                original_indexes = _user_index_snapshot(connection)
+
+            with self.assertRaisesRegex(
+                PortableSessionCatalogError,
+                "no such collation sequence: lease_order",
+            ):
+                PortableSessionCatalog(database)
+
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                restored_schema = connection.execute(
+                    """
+                    SELECT sql FROM sqlite_master
+                    WHERE type = 'table' AND name = 'worktree_leases'
+                    """
+                ).fetchone()[0]
+                restored_rows = tuple(
+                    connection.execute(
+                        "SELECT * FROM worktree_leases ORDER BY checkout"
+                    )
+                )
+                restored_indexes = _user_index_snapshot(connection)
+
+        self.assertEqual(version, 5)
+        self.assertEqual(restored_schema, original_schema)
+        self.assertEqual(restored_rows, original_rows)
+        self.assertEqual(restored_indexes, original_indexes)
 
     def test_version_one_catalog_migrates_without_losing_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -788,6 +1189,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
                 worker_launcher=launch_worker,
                 catalog=PortableSessionCatalog(database),
                 owner_id="restarted-shell",
+                worker_tree_identity_capture=_fake_worker_tree_identity,
             )
             supervisor.resume_session(launch.session_id)
             worker.stdout.close()
@@ -868,6 +1270,7 @@ class PortableSessionCatalogTests(unittest.TestCase):
             supervisor = PortableSessionSupervisor(
                 worker_launcher=launch_worker,
                 catalog=PortableSessionCatalog(catalog.path),
+                worker_tree_identity_capture=_fake_worker_tree_identity,
             )
 
             self.assertEqual(launched, [])
