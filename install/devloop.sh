@@ -102,7 +102,7 @@ validate_release_command() {
 begin_transaction() {
   local entry="$1" operation="$2" output
   output="$(mktemp "${TMPDIR:-/tmp}/devloop-transaction.XXXXXX")"
-  if ! "$(find_python)" "$entry" begin "$INSTALL_DIR" "$operation" --protocol 2 > "$output"; then
+  if ! "$(find_python)" -B "$entry" begin "$INSTALL_DIR" "$operation" --protocol 2 > "$output"; then
     rm -f -- "$output"
     return 1
   fi
@@ -115,7 +115,7 @@ begin_transaction() {
 begin_legacy_migration() {
   local entry="$1" output
   output="$(mktemp "${TMPDIR:-/tmp}/devloop-transaction.XXXXXX")"
-  if ! "$(find_python)" "$entry" begin-legacy-migration "$INSTALL_DIR" --protocol 2 > "$output"; then
+  if ! "$(find_python)" -B "$entry" begin-legacy-migration "$INSTALL_DIR" --protocol 2 > "$output"; then
     rm -f -- "$output"
     return 1
   fi
@@ -163,23 +163,28 @@ recover_transaction() {
   [ -f "$INSTALL_DIR/bootstrap/install-transaction.json" ] || return 1
   local python result action release
   python="$(find_python)" || die 'Python 3.10+ is required'
-  result="$($python "$INSTALL_DIR/bootstrap/transaction.py" recover "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2)"
+  result="$("$python" -B "$INSTALL_DIR/bootstrap/transaction.py" recover "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2)" || return $?
   action="${result%%$'\t'*}"
   release="${result#*$'\t'}"
   case "$action" in
-    NEEDS_ADOPTION) initialize_user_state "$release"; "$python" "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 ;;
-    READY_TO_SWITCH) "$python" "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 ;;
+    NEEDS_ADOPTION)
+      initialize_user_state "$release" || return $?
+      "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 || return $?
+      ;;
+    READY_TO_SWITCH)
+      "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 || return $?
+      ;;
     COMPLETE) ;;
     *) die "unsupported recovery action: $action" ;;
   esac
-  install_capabilities "$release"
+  install_capabilities "$release" || return $?
   return 0
 }
 
 current_release() {
   local python
   python="$(find_python)" || die 'Python 3.10+ is required'
-  "$python" "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR"
+  "$python" -B "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR"
 }
 
 main() {
@@ -190,7 +195,7 @@ main() {
   if [ "$ROLLBACK" -eq 1 ]; then
     [ -f "$INSTALL_DIR/bootstrap/layout.json" ] || die 'stable bootstrap is not installed'
     begin_transaction "$INSTALL_DIR/bootstrap/transaction.py" rollback
-    "$(find_python)" "$INSTALL_DIR/bootstrap/transaction.py" rollback "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
+    "$(find_python)" -B "$INSTALL_DIR/bootstrap/transaction.py" rollback "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
     log "rolled back current release: $(current_release)"
     return 0
   fi
@@ -202,7 +207,10 @@ main() {
     bootstrap_entry="$source_entry"
     begin_legacy_migration "$bootstrap_entry" || die 'could not acquire compatible install lock'
   fi
-  if [ -f "$INSTALL_DIR/bootstrap/layout.json" ] && recover_transaction; then
+  if [ -f "$INSTALL_DIR/bootstrap/layout.json" ] && [ -f "$INSTALL_DIR/bootstrap/install-transaction.json" ]; then
+    # A missing journal means a new install; failed recovery must stop this run.
+    # Explicit propagation is required even when this function is conditional.
+    recover_transaction || return $?
     log "recovered current release: $(current_release)"
     return 0
   fi
@@ -213,24 +221,27 @@ main() {
   python="$(find_python)"
   if [ -f "$INSTALL_DIR/bootstrap/current.json" ]; then
     local current_release current_commit
-    current_release="$($python "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR")"
+    current_release="$("$python" -B "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR")"
     current_commit="$(git -C "$current_release" rev-parse HEAD)"
     if [ "$current_commit" = "$CANDIDATE_COMMIT" ]; then
       cleanup_candidate
       CANDIDATE_DIR=""
       initialize_user_state "$current_release"
-      "$python" "$bootstrap_entry" abort "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
+      "$python" -B "$bootstrap_entry" abort "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
       trap - EXIT
       install_capabilities "$current_release"
       log "current immutable release: $CANDIDATE_COMMIT"
       return 0
     fi
   fi
-  "$python" "$CANDIDATE_DIR/install/bootstrap/transaction.py" publish "$INSTALL_DIR" "$CANDIDATE_DIR" "$TRANSACTION_ID" --protocol 2
-  release="$($python "$INSTALL_DIR/bootstrap/transaction.py" prepare "$INSTALL_DIR" "$CANDIDATE_DIR" "$CANDIDATE_COMMIT" "$TRANSACTION_ID" --protocol 2)"
+  "$python" -B "$CANDIDATE_DIR/install/bootstrap/transaction.py" publish "$INSTALL_DIR" "$CANDIDATE_DIR" "$TRANSACTION_ID" --protocol 2
+  # Preparation can journal the candidate before failing. From this point only
+  # the transaction layer may recover or remove it, including on EXIT.
+  local transaction_candidate="$CANDIDATE_DIR"
   CANDIDATE_DIR=""
+  release="$("$python" -B "$INSTALL_DIR/bootstrap/transaction.py" prepare "$INSTALL_DIR" "$transaction_candidate" "$CANDIDATE_COMMIT" "$TRANSACTION_ID" --protocol 2)"
   initialize_user_state "$release"
-  "$python" "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
+  "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
   trap - EXIT
   install_capabilities "$release"
   log "current immutable release: $CANDIDATE_COMMIT"

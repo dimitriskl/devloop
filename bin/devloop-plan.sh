@@ -25,4 +25,4 @@ else
   export DEVLOOP_UI_MODE=plain
 fi
 
-exec "$PYTHON_BIN" -m devloop.interactive_runner "$@"
+exec "$PYTHON_BIN" -B -m devloop.interactive_runner "$@"

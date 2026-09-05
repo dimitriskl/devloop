@@ -8,7 +8,7 @@ PYTHON="$(find_python)" || { printf 'devloop-bootstrap: error: Python 3.10+ is r
 case "$COMMAND" in
   uninstall)
     TRANSACTION_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/devloop-uninstall.XXXXXX")"
-    "$PYTHON" "$INSTALL_ROOT/bootstrap/transaction.py" begin "$INSTALL_ROOT" uninstall --protocol 2 > "$TRANSACTION_OUTPUT"
+    "$PYTHON" -B "$INSTALL_ROOT/bootstrap/transaction.py" begin "$INSTALL_ROOT" uninstall --protocol 2 > "$TRANSACTION_OUTPUT"
     IFS= read -r TRANSACTION_ID < "$TRANSACTION_OUTPUT"
     TRANSACTION_ID="${TRANSACTION_ID%$'\r'}"
     rm -f -- "$TRANSACTION_OUTPUT"
@@ -26,12 +26,12 @@ case "$COMMAND" in
     else
       UNINSTALL_ARGS+=(--skills-destination "${CODEX_SKILLS_PATH:-$HOME/.codex/skills}" --agents-destination "${CODEX_AGENTS_PATH:-$HOME/.codex/agents}")
     fi
-    exec "$PYTHON" "${UNINSTALL_ARGS[@]}"
+    exec "$PYTHON" -B "${UNINSTALL_ARGS[@]}"
     ;;
 esac
 VERIFY_ARGS=("$INSTALL_ROOT/bootstrap/verify.py" "$INSTALL_ROOT")
 [ "$COMMAND" != update ] || VERIFY_ARGS+=(--update-driver)
-RELEASE_ROOT="$($PYTHON "${VERIFY_ARGS[@]}")"
+RELEASE_ROOT="$("$PYTHON" -B "${VERIFY_ARGS[@]}")"
 case "$COMMAND" in
   devloop) TARGET="$RELEASE_ROOT/bin/devloop.sh" ;;
   devloop-plan) TARGET="$RELEASE_ROOT/bin/devloop-plan.sh" ;;

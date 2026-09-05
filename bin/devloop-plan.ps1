@@ -41,9 +41,9 @@ else {
 }
 
 if ($Help) {
-    & $python -m devloop.interactive_runner --help
+    & $python -B -m devloop.interactive_runner --help
     exit $LASTEXITCODE
 }
 
-& $python -m devloop.interactive_runner @RemainingArgs
+& $python -B -m devloop.interactive_runner @RemainingArgs
 exit $LASTEXITCODE

@@ -56,3 +56,10 @@ Covers parent PRD user stories 80, 92, and 100.
 ## Implementation Notes
 
 Completed: [ ]
+
+Recovery continuation (2026-09-05): recovered checkpoint `a69baa8` has not passed
+release verification. Fresh independent installer review failed with ten P1
+findings; do not promote this issue based on earlier implementation or test
+records. See [recovery status](../../../docs/portable-v3-recovery-status.md) and
+[the repair checklist](../../../docs/portable-v3-issue0012-recovery-review.md)
+for resumable stage status, evidence, and remaining work.

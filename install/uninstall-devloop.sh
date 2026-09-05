@@ -28,7 +28,7 @@ case "$INSTALL_DIR" in ''|/) die 'refusing filesystem root' ;; esac
 [ -f "$INSTALL_DIR/bootstrap/transaction.py" ] || die 'stable layout manifest is missing; nothing was removed'
 PYTHON="$(find_python)" || die 'Python 3.10+ is required to verify managed releases'
 TRANSACTION_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/devloop-uninstall.XXXXXX")"
-$PYTHON "$INSTALL_DIR/bootstrap/transaction.py" begin "$INSTALL_DIR" uninstall --protocol 2 > "$TRANSACTION_OUTPUT"
+"$PYTHON" -B "$INSTALL_DIR/bootstrap/transaction.py" begin "$INSTALL_DIR" uninstall --protocol 2 > "$TRANSACTION_OUTPUT"
 IFS= read -r TRANSACTION_ID < "$TRANSACTION_OUTPUT"
 TRANSACTION_ID="${TRANSACTION_ID%$'\r'}"
 rm -f -- "$TRANSACTION_OUTPUT"
@@ -38,6 +38,6 @@ if [ "$KEEP_SKILLS" -eq 1 ]; then
 else
   ARGS+=(--skills-destination "$CODEX_SKILLS_PATH" --agents-destination "$CODEX_AGENTS_PATH")
 fi
-"$PYTHON" "${ARGS[@]}"
+"$PYTHON" -B "${ARGS[@]}"
 printf 'Dev Loop managed bootstrap and immutable releases were removed.\n'
 printf 'Portable catalog, project data, and legacy checkout content were preserved.\n'

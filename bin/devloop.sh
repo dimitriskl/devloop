@@ -25,6 +25,6 @@ else
   export DEVLOOP_UI_MODE=plain
 fi
 
-exec "$PYTHON_BIN" -m devloop "$@"
+exec "$PYTHON_BIN" -B -m devloop "$@"
 
 

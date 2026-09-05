@@ -71,7 +71,7 @@ function Invoke-ReleaseCommand {
 }
 function Invoke-Bootstrap {
     param([string] $Entry, [Parameter(ValueFromRemainingArguments = $true)][object[]] $Arguments)
-    & (Get-DevLoopPython) $Entry @Arguments --protocol $BootstrapProtocol
+    & (Get-DevLoopPython) -B $Entry @Arguments --protocol $BootstrapProtocol
 }
 function Clone-Candidate {
     $parent = Split-Path -Parent $InstallDir; $leaf = Split-Path -Leaf $InstallDir
@@ -115,7 +115,7 @@ function Initialize-UserState {
     Invoke-ReleaseCommand $python $ReleaseRoot 'prepare-user-state'
 }
 function Get-VerifiedRelease {
-    $release = (& (Get-DevLoopPython) (Join-Path $InstallDir 'bootstrap\verify.py') $InstallDir).Trim()
+    $release = (& (Get-DevLoopPython) -B (Join-Path $InstallDir 'bootstrap\verify.py') $InstallDir).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'devloop-install: error: current release verification failed' }; return $release
 }
 function Recover-PendingTransaction {

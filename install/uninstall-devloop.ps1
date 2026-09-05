@@ -34,7 +34,7 @@ foreach ($candidate in @('python', 'python3', 'py')) {
     catch { continue }
 }
 if ($null -eq $python) { throw 'devloop-uninstall: Python 3.10+ is required' }
-$transactionId = (& $python $transaction begin $InstallDir uninstall --owner-pid $PID --protocol 2).Trim()
+$transactionId = (& $python -B $transaction begin $InstallDir uninstall --owner-pid $PID --protocol 2).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'devloop-uninstall: could not acquire install lock' }
 $arguments = @($transaction, 'uninstall', $InstallDir, $transactionId, '--protocol', '2')
 if ($KeepSkills) { $arguments += '--keep-capabilities' }
@@ -42,7 +42,7 @@ else {
     $arguments += @('--skills-destination', $CodexSkillsPath)
     $arguments += @('--agents-destination', $CodexAgentsPath)
 }
-& $python @arguments
+& $python -B @arguments
 if ($LASTEXITCODE -eq 95) { [Environment]::Exit(95) }
 if ($LASTEXITCODE -ne 0) { throw 'devloop-uninstall: core uninstall failed; no capability cleanup ran' }
 Write-Host 'Dev Loop managed bootstrap and immutable releases were removed.'

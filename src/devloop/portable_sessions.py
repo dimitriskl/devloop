@@ -3745,6 +3745,7 @@ def _launch_portable_worker(
     process = launch_process_tree(
         [
             sys.executable,
+            "-B",
             "-u",
             "-m",
             "devloop.portable_worker",

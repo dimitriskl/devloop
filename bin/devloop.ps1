@@ -40,9 +40,9 @@ else {
 }
 
 if ($Help) {
-    & $python -m devloop --help
+    & $python -B -m devloop --help
     exit $LASTEXITCODE
 }
 
-& $python -m devloop @RemainingArgs
+& $python -B -m devloop @RemainingArgs
 exit $LASTEXITCODE

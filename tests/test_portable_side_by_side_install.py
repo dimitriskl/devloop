@@ -1111,7 +1111,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             )
 
             self.assertNotEqual(recovered.returncode, 0)
-            self.assertIn("ownership evidence does not match", recovered.stderr)
+            self.assertIn("candidate path is not owned by this transaction", recovered.stderr)
             self.assertEqual(victim_file.read_bytes(), b"keep\x00\xff")
 
     def test_bootstrap_publication_recovers_every_asset_boundary(self) -> None:

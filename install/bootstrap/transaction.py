@@ -25,6 +25,7 @@ from verify import (
     _plain,
     _plain_ancestors,
     _tracked_fingerprint,
+    _validate_release_content,
     read_pointer_state,
     verify,
     verify_pointer,
@@ -365,13 +366,7 @@ def _release_evidence(root: Path, commit: str) -> dict[str, object]:
         _git(root, "diff", "--cached", "--quiet", "--")
     except RuntimeError as error:
         raise RuntimeError("release has staged changes") from error
-    unexpected = [
-        item
-        for item in _git(root, "ls-files", "--others", "--exclude-standard").splitlines()
-        if not item.replace("\\", "/").startswith(".venv/")
-    ]
-    if unexpected:
-        raise RuntimeError("release has unexpected untracked content")
+    _validate_release_content(root)
     return {
         "commit": commit,
         "release_path": f"releases/{commit}",
@@ -603,29 +598,32 @@ def _ownership_path(install: Path, transaction_id: str) -> Path:
     return install / "bootstrap" / f"candidate-{transaction_id}.json"
 
 
-def _candidate_name_is_owned(install: Path, candidate: Path) -> bool:
-    escaped = re.escape(install.name)
-    return (
-        re.fullmatch(
-            rf"\.{escaped}\.candidate-(?:"
-            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|"
-            r"[0-9a-f]{32}|[0-9]+-[0-9]+)",
-            candidate.name,
-        )
-        is not None
-    )
+def _validate_candidate_path(install: Path, value: object, transaction_id: str) -> Path:
+    expected = install.parent / f".{install.name}.candidate-{transaction_id}"
+    if not isinstance(value, str) or value != str(expected):
+        raise RuntimeError("candidate path is not owned by this transaction")
+    candidate = Path(value)
+    if not candidate.is_absolute() or str(candidate) != value:
+        raise RuntimeError("candidate path is not canonical and absolute")
+    for path in (candidate, *candidate.parents):
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(status.st_mode) or (
+            getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RuntimeError(f"candidate path contains a reparse or symbolic link: {path}")
+        if not stat.S_ISDIR(status.st_mode):
+            raise RuntimeError(f"candidate path is not a plain directory: {path}")
+    if candidate.parent.resolve(strict=True) != candidate.parent:
+        raise RuntimeError("candidate path parent is not canonical")
+    return candidate
 
 
-def _validate_candidate_ownership(install: Path, journal: dict[str, object]) -> Path:
-    candidate = Path(str(journal["candidate_path"]))
-    _plain_ancestors(candidate.parent, Path(candidate.anchor))
-    _plain_ancestors(install.parent, Path(install.anchor))
-    expected_parent = install.parent.resolve(strict=True)
-    if candidate.parent.resolve(strict=True) != expected_parent or not _candidate_name_is_owned(
-        install, candidate
-    ):
-        raise RuntimeError("installation journal candidate path is not owned")
-    _plain_ancestors(candidate.parent, expected_parent)
+def _validate_candidate_ownership(
+    install: Path, journal: dict[str, object], candidate: Path
+) -> None:
     ownership = json.loads(
         _ownership_path(install, str(journal["transaction_id"])).read_text(encoding="utf-8")
     )
@@ -638,7 +636,6 @@ def _validate_candidate_ownership(install: Path, journal: dict[str, object]) -> 
         "commit": journal["commit"],
     }:
         raise RuntimeError("candidate ownership evidence does not match the journal")
-    return candidate
 
 
 def _journal(install: Path) -> dict[str, object] | None:
@@ -670,8 +667,9 @@ def _journal(install: Path) -> dict[str, object] | None:
         or TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is None
     ):
         raise RuntimeError("installation journal transaction identity is invalid")
+    candidate = _validate_candidate_path(install, value["candidate_path"], transaction_id)
     if value["phase"] != "journaled":
-        _validate_candidate_ownership(install, value)
+        _validate_candidate_ownership(install, value, candidate)
     return value
 
 
@@ -679,9 +677,7 @@ def publish(install: Path, candidate: Path, transaction_id: str) -> None:
     install = install.absolute()
     candidate = candidate.absolute()
     _assert_lock(install, transaction_id, "install")
-    if candidate != install.parent / f".{install.name}.candidate-{transaction_id}":
-        raise RuntimeError("candidate path does not match transaction identity")
-    _plain_ancestors(candidate, install.parent)
+    candidate = _validate_candidate_path(install, str(candidate), transaction_id)
     _initialize_bootstrap(install, candidate)
 
 
@@ -689,11 +685,7 @@ def prepare(install: Path, candidate: Path, commit: str, transaction_id: str) ->
     install = install.absolute()
     candidate = candidate.absolute()
     _assert_lock(install, transaction_id, "install")
-    _plain_ancestors(candidate.parent, Path(candidate.anchor))
-    _plain_ancestors(install.parent, Path(install.anchor))
-    if not _candidate_name_is_owned(install, candidate) or candidate.parent != install.parent:
-        raise RuntimeError("candidate path is not installer-owned")
-    _plain_ancestors(candidate, candidate.parent)
+    candidate = _validate_candidate_path(install, str(candidate), transaction_id)
     evidence = _release_evidence(candidate, commit)
     if not (install / "bootstrap" / "layout.json").is_file():
         raise RuntimeError("stable bootstrap must be published before prepare")
@@ -711,8 +703,6 @@ def prepare(install: Path, candidate: Path, commit: str, transaction_id: str) ->
         if state.previous is not None:
             verify_pointer(install, state.previous, "previous")
         previous, previous_previous = state.current, state.previous
-    if candidate != install.parent / f".{install.name}.candidate-{transaction_id}":
-        raise RuntimeError("candidate path does not match transaction identity")
     journal = {
         "version": TRANSACTION_SCHEMA,
         "transaction_id": transaction_id,
@@ -789,8 +779,6 @@ def recover(install: Path, transaction_id: str) -> tuple[str, Path | None]:
         _atomic_json(_ownership_path(install, transaction_id), ownership)
         _write_journal(install, journal, "owned")
         phase = "owned"
-    else:
-        candidate = _validate_candidate_ownership(install, journal)
     if phase == "owned":
         evidence = _release_evidence(candidate, str(journal["commit"]))
         _atomic_json(

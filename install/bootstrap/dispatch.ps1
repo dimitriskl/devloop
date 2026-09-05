@@ -31,7 +31,7 @@ if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) {
 }
 if ($Command -eq 'uninstall') {
     $transaction = Join-Path $PSScriptRoot 'transaction.py'
-    $transactionId = (& $python $transaction begin $InstallRoot uninstall --owner-pid $PID --protocol 2).Trim()
+    $transactionId = (& $python -B $transaction begin $InstallRoot uninstall --owner-pid $PID --protocol 2).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Dev Loop bootstrap could not acquire install lock.' }
     $transactionArgs = @($transaction, 'uninstall', $InstallRoot, $transactionId, '--protocol', '2')
     $keepCapabilities = $false
@@ -49,12 +49,12 @@ if ($Command -eq 'uninstall') {
         if ('--skills-destination' -notin $transactionArgs) { $transactionArgs += @('--skills-destination', (Join-Path $env:USERPROFILE '.codex\skills')) }
         if ('--agents-destination' -notin $transactionArgs) { $transactionArgs += @('--agents-destination', (Join-Path $env:USERPROFILE '.codex\agents')) }
     }
-    & $python @transactionArgs
+    & $python -B @transactionArgs
     exit $LASTEXITCODE
 }
 $verifyArguments = @($verifier, $InstallRoot)
 if ($Command -eq 'update') { $verifyArguments += '--update-driver' }
-$releaseRoot = (& $python @verifyArguments)
+$releaseRoot = (& $python -B @verifyArguments)
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseRoot)) {
     throw 'Dev Loop bootstrap release verification failed.'
 }

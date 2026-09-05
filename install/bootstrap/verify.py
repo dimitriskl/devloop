@@ -93,6 +93,14 @@ def _tracked_fingerprint(root: Path) -> str:
     return hashlib.sha256("\n".join(entries).encode()).hexdigest().upper()
 
 
+def _validate_release_content(root: Path) -> None:
+    # No ignore exclusions: ignored data and empty untracked directories are not
+    # installer-owned payload. Git emits raw, NUL-delimited paths with -z.
+    paths = _git(root, "ls-files", "--others", "--directory", "-z").split("\0")
+    if any(path and not path.startswith(".venv/") for path in paths):
+        raise RuntimeError("release contains unexpected untracked content")
+
+
 def _validate_pointer(pointer: object, name: str) -> dict[str, object]:
     if not isinstance(pointer, dict) or set(pointer) != POINTER_FIELDS:
         raise RuntimeError(f"{name} release pointer has an unsupported schema")
@@ -180,13 +188,7 @@ def verify_release(install_root: Path, commit: str) -> Path:
         _git(release, "diff", "--cached", "--quiet", "--")
     except RuntimeError as error:
         raise RuntimeError("release has staged changes") from error
-    unexpected = [
-        item
-        for item in _git(release, "ls-files", "--others", "--exclude-standard").splitlines()
-        if not item.replace("\\", "/").startswith(".venv/")
-    ]
-    if unexpected:
-        raise RuntimeError("release contains unexpected untracked content")
+    _validate_release_content(release)
     if _tracked_fingerprint(release) != manifest["tracked_fingerprint"]:
         raise RuntimeError("tracked release fingerprint mismatch")
     if _directory_fingerprint(release / ".venv") != manifest["runtime_fingerprint"]:
