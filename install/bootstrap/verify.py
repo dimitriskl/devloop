@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -34,6 +35,10 @@ MANIFEST_FIELDS = LEGACY_POINTER_FIELDS | {
 }
 HASH_PATTERN = re.compile(r"[0-9A-F]{64}")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+GIT_OWNERSHIP_FIELDS = {"version", "commit", "git_fingerprint"}
+GIT_OWNERSHIP_SCHEMA = 1
+GIT_ENTRY_FILE = "file"
+GIT_ENTRY_DIRECTORY = "directory"
 
 
 @dataclass(frozen=True)
@@ -80,7 +85,8 @@ def _directory_fingerprint(root: Path) -> str:
 
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(root), "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
+        capture_output=True, text=True, check=False,
     )
     if result.returncode:
         detail = result.stderr.strip() or f"exit {result.returncode}"
@@ -99,6 +105,87 @@ def _validate_release_content(root: Path) -> None:
     paths = _git(root, "ls-files", "--others", "--directory", "-z").split("\0")
     if any(path and not path.startswith(".venv/") for path in paths):
         raise RuntimeError("release contains unexpected untracked content")
+
+
+def _git_ownership_path(install_root: Path, commit: str) -> Path:
+    if COMMIT_PATTERN.fullmatch(commit) is None:
+        raise RuntimeError("Git ownership has an invalid commit")
+    return install_root / "bootstrap" / f"git-ownership-{commit}.json"
+
+
+def _git_directory_entries(root: Path) -> list[tuple[str, str, str]]:
+    git_root = root / ".git"
+    _plain_ancestors(git_root, root)
+    root_status = git_root.lstat()
+    if not stat.S_ISDIR(root_status.st_mode) or (
+        getattr(root_status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise RuntimeError("Git ownership requires a plain .git directory")
+    entries: list[tuple[str, str, str]] = []
+    pending = [git_root]
+    while pending:
+        directory = pending.pop()
+        for path in sorted(directory.iterdir()):
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode) or (
+                getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise RuntimeError("Git ownership rejects reparse or symbolic links")
+            relative = path.relative_to(git_root).as_posix()
+            if stat.S_ISDIR(status.st_mode):
+                entries.append((relative, GIT_ENTRY_DIRECTORY, ""))
+                pending.append(path)
+            elif stat.S_ISREG(status.st_mode):
+                entries.append(
+                    (relative, GIT_ENTRY_FILE, hashlib.sha256(path.read_bytes()).hexdigest())
+                )
+            else:
+                raise RuntimeError("Git ownership rejects special filesystem entries")
+    return sorted(entries)
+
+
+def _git_entries_fingerprint(entries: list[tuple[str, str, str]]) -> str:
+    encoded = json.dumps(sorted(entries), ensure_ascii=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest().upper()
+
+
+def _git_directory_fingerprint(root: Path) -> str:
+    return _git_entries_fingerprint(_git_directory_entries(root))
+
+
+def _read_git_ownership(
+    install_root: Path, commit: str, *, required: bool = False,
+) -> dict[str, object] | None:
+    path = _git_ownership_path(install_root, commit)
+    _plain_ancestors(path, install_root)
+    if not path.exists():
+        if required:
+            raise RuntimeError(
+                "Git ownership evidence is missing; legacy release must be preserved"
+            )
+        return None
+    value = _json(path)
+    if (
+        set(value) != GIT_OWNERSHIP_FIELDS
+        or type(value.get("version")) is not int
+        or value.get("version") != GIT_OWNERSHIP_SCHEMA
+        or value.get("commit") != commit
+        or not isinstance(value.get("git_fingerprint"), str)
+        or HASH_PATTERN.fullmatch(str(value["git_fingerprint"])) is None
+    ):
+        raise RuntimeError("Git ownership evidence has an unsupported schema or identity")
+    return value
+
+
+def _verify_git_ownership(
+    install_root: Path, release: Path, *, required: bool = False, commit: str | None = None,
+) -> None:
+    commit = release.name if commit is None else commit
+    value = _read_git_ownership(install_root, commit, required=required)
+    if value is None:
+        return
+    if _git_directory_fingerprint(release) != value["git_fingerprint"]:
+        raise RuntimeError("Git ownership fingerprint mismatch; release must be preserved")
 
 
 def _validate_pointer(pointer: object, name: str) -> dict[str, object]:
@@ -193,6 +280,7 @@ def verify_release(install_root: Path, commit: str) -> Path:
         raise RuntimeError("tracked release fingerprint mismatch")
     if _directory_fingerprint(release / ".venv") != manifest["runtime_fingerprint"]:
         raise RuntimeError("runtime fingerprint mismatch")
+    _verify_git_ownership(install_root, release)
     return release
 
 

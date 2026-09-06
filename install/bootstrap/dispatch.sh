@@ -39,4 +39,5 @@ case "$COMMAND" in
   *) printf 'devloop-bootstrap: error: unsupported command: %s\n' "$COMMAND" >&2; exit 1 ;;
 esac
 [ -f "$TARGET" ] || { printf 'devloop-bootstrap: error: current command is missing: %s\n' "$TARGET" >&2; exit 1; }
-exec bash "$TARGET" "$@"
+# The policy belongs to this child, including immutable older wrappers without -B.
+PYTHONDONTWRITEBYTECODE=1 exec bash "$TARGET" "$@"

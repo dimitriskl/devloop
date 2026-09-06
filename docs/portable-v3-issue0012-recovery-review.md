@@ -33,6 +33,8 @@ required release gates are resolved.
   and independent in-memory Bash QA PASS. Native installer gates remain open.
 - [ ] R11: additional fresh read-only review confirms Git repository-selection
   settings can redirect validation outside the intended worktree/index.
+- [ ] R12: parent source-only reproduction of default wiki writes inside the
+  immutable release; fresh validation and a storage-location decision pending.
 
 ### R02 implementation and first re-review
 
@@ -126,6 +128,298 @@ repair so both stages can be reviewed together:
 | `tests/test_portable_bash_recovery_safety.py` | `77D30AFC0C2598CFC4952BD9876A3E4080E672BB0BCCEADC9243C0FE7EA7E1D0` |
 | `tests/test_portable_bytecode_safety.py` | `1386480BC651AFE9861F94015A93D735024C768C04A7B8697A15CD35078BD652` |
 
+### R02 final independent review, 2026-09-06
+
+Fresh reviewer `issue0012_r02_review_second_audit_2` returned scoped **FAIL**
+against `4a44144674cc74decb2cb052ebc72451d5bde4c7`. It verified all 17 frozen
+hashes and compared both baselines directly. Two blocking P1 gaps remain:
+
+1. **Git administration ownership**: `verify.py:92,99` fingerprints the index
+   and inventories untracked worktree entries, but neither includes `.git`
+   contents. Read-only real-Git probes confirmed that exclusion. Uninstall's
+   preflight at `transaction.py:939` accepts that verification before the
+   recursive release removal at line 1195. Unowned notes, additional refs, and
+   worktree administration can therefore escape preservation checks. This is
+   distinct from R11's inherited repository-selector defect. Establish Git
+   administration ownership or preserve/refuse unowned material; add guarded
+   real-Git regressions for `.git/operator-notes` and added refs/worktree metadata,
+   asserting complete preservation before any uninstall mutation.
+2. **Retained older launchers**: `dispatch.sh:42` and `dispatch.ps1:74` execute
+   the selected immutable release's wrapper without conveying a no-bytecode
+   policy. The verified older wrapper at `a69baa8:bin/devloop.sh:28`, and the
+   pre-startup PowerShell wrapper at line 47, do not pass `-B`. Rollback retains
+   those wrappers, so cold startup can create release-local `__pycache__` and
+   fail later strict verification. An intercepted loader probe recorded one
+   attempted cache write without suppression and zero with it; no cache was
+   written. Enforce suppression across stable dispatch for accepted older
+   payloads, preserve caller environment/arguments/cwd, and add an old-wrapper
+   cold-cache regression followed by public verification.
+
+Review checks: nine extracted-function Bash tests / 15 scenarios passed in
+2.222 seconds, 13 in-memory inventory cases passed, and seven Python files
+compiled in memory. The reviewer's initial guard rejected subprocess pipes;
+after restricting its exception to verified pipe descriptors, the same tests
+passed with no guard violations. Current-release invocation changes preserve
+existing arguments/environment/cwd, and the earlier R01/R07/R08 scoped deltas
+were retained. No files changed and no installer, uninstaller, full wrapper,
+real worker, or historical source was executed. These checks are not fresh QA
+or native release approval.
+
+Fresh developer `issue0012_r02_git_and_legacy_startup_repair` was then assigned
+both blockers. It must preserve existing supported manifest/migration/rollback
+contracts, establish ownership before user modifications rather than trusting
+a new uninstall-time snapshot, and retain immutable older payloads. Current
+repair code and focused regressions must receive another fresh independent
+review, then fresh QA. R02 and Issue 0012 remain incomplete.
+
+### R02 Git-ownership and retained-wrapper developer freeze, 2026-09-06
+
+Fresh developer: `issue0012_r02_git_and_legacy_startup_repair`. The developer
+stage is complete; R02 is not certified. The subsequent fresh independent
+review returned FAIL, recorded below. Fresh QA must follow a review PASS.
+No issue completion marker was changed and no commit was made.
+
+The seven-file delta against `4a44144674cc74decb2cb052ebc72451d5bde4c7` adds a
+separate versioned, commit-bound Git administration ownership receipt before
+activation. Recovery retains and validates the original receipt rather than
+recapturing it during uninstall or retry. Changed/unowned Git files, directories,
+refs and worktree administration refuse deletion before mutation. Legacy v1/v2
+payloads without prior ownership evidence remain verifiable but their deletion
+is refused; this preserves data, not a claim that every old uninstall succeeds.
+Git inspection suppresses optional locks and automatic diff index refresh.
+
+Stable dispatch passes `PYTHONDONTWRITEBYTECODE=1` only to the child shell.
+Caller environment and immutable historical wrappers are unchanged. PowerShell
+dispatch explicitly conveys argument-list entries and filesystem cwd, inherits
+stdio, waits for completion, and propagates the child exit code. Native console
+and interrupt behavior remain unverified by these source-only tests.
+
+Developer evidence (not independent QA): final guarded exec session `68030`
+exited zero with 82 test executions / 61 distinct tests in 123.838 seconds and
+no skips/audit violations. Twenty-one content tests repeat through the bytecode
+subclass. Coverage includes 17 R01 cases, nine Bash cases / 15 scenarios, five
+source-only packaging checks, Git receipt/recovery cases and hash-verified
+`a69baa8` wrapper cold-import regressions. RED-to-GREEN cases include unowned
+Git notes, refs/worktrees, additions during recovery/uninstall retry, root
+reparse metadata, strict integer receipt versions, and historical bytecode.
+
+Three changed test files passed Ruff. The verifier and two substantial test
+files passed strict mypy; five Bash syntax checks, five PowerShell AST checks,
+five in-memory Python compilations and scoped whitespace checks passed.
+Bootstrap-wide checks retain the exact HEAD baseline: two Ruff E501 findings
+and 26 transaction strict typing diagnostics, with no additions/removals.
+Those outstanding diagnostics are not waived for final release gates.
+
+The parent verified these frozen SHA-256 values against the current files:
+
+| File | SHA-256 |
+| --- | --- |
+| `install/bootstrap/verify.py` | `01B889A3C60830E81D20856EC695B307FC903C84DBD9E5C856331D1E77B36CE9` |
+| `install/bootstrap/transaction.py` | `B12C03B7DF00C1429B72C636F55F78BEA6E120F7A66AA0FB64043CA50487D6D4` |
+| `install/bootstrap/dispatch.sh` | `56EE2F738C5F7D628AE19BC01F18E7D3238900630DFAEC07CFEFD9B615EAD7D9` |
+| `install/bootstrap/dispatch.ps1` | `3C25F125E0FC9F829653857FAEDAA91B6F2B29B3831CA0C3E729C851AD0518F2` |
+| `tests/test_portable_release_content_safety.py` | `012F324C33896D797A12B271C5EEE87C4D01A6C146C97575803AB2AAC57045D4` |
+| `tests/test_portable_transaction_candidate_safety.py` | `D7976EDE92CE8C8E0F91AD927F6656EF379D5EC42C31BFB3A8C87DBA9A932905` |
+| `tests/test_portable_bytecode_safety.py` | `3DC3EC0F00306DB0D558ACDBE0F778E195E2ABE16DD52591765AD8147344D046` |
+
+Developer repeat harness:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-admin-guard-20260906.py`.
+Inspect its mutation/child allowlists before reuse. It runs only reviewed
+source-only/extracted-function seams in validated disposable C: leaves;
+destructive production operations are intercepted. No full installer,
+uninstaller, rollback, real worker or authenticated/native release gate ran.
+Independent review/QA, historical-fixture integration and R03-R06/R09-R12 remain
+open. These findings do not establish the cause of the vanished F: checkout.
+
+### R02 deletion-boundary independent review, 2026-09-06
+
+Fresh reviewer: `issue0012_r02_git_admin_startup_fresh_review`. Scoped result:
+**FAIL**, one P1 remaining ownership gap and one P2 retry regression. References
+below describe the seven-file frozen checkpoint immediately above.
+
+1. At `install/bootstrap/transaction.py:784`, recovery invokes Git ownership
+   verification optionally. Missing receipts are accepted at `verify.py:150`;
+   prepared recovery with both locations present reaches `rmtree(candidate)`
+   at `transaction.py:825`. A real-Git fixture using a supported legacy prepared
+   journal, no Git receipt and candidate `.git/operator-notes` reached the
+   intercepted removal. Its complete snapshot remained unchanged. Require
+   prior ownership before duplicate-candidate deletion, while preserving
+   compatible non-deleting recovery. This is R02, not the broader R03 finding.
+2. At `transaction.py:1189`, resumed uninstall compares the complete original
+   Git fingerprint even when its release-removal action is already `before`.
+   A partial removal can have deleted owned entries. The reviewer intercepted
+   production `rmtree`, removed only the validated disposable C: fixture's
+   owned `.git/HEAD`, then raised an injected `OSError`. Public retry failed
+   with `Git ownership fingerprint mismatch` before further mutation. Retain
+   original ownership proof and permit safe continuation with already-removed
+   entries, while rejecting additions or changed surviving material. Do not
+   recapture receipts, broadly suppress mismatches or refuse every retry.
+
+Independent checks: 23 existing focused checks passed in 50.354 seconds; the
+two boundary probes confirmed both defects in 4.071 seconds. No skips or audit
+violations occurred. Five Python sources compiled in memory and scoped
+whitespace checks passed. All seven supplied hashes matched before and after;
+HEAD remained `4a44144674cc74decb2cb052ebc72451d5bde4c7`. Historical-wrapper blob
+IDs matched actual `a69baa8` Git objects. No repository files or commits changed.
+
+Retained probe:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-review-boundaries-20260906.py`,
+SHA-256 `FEFB8D27C372580BD53B9183A7EAF521D5DA1E2169622908827DDE8BD5F31EC8`.
+The parent read the complete probe and inspected the implicated source paths.
+No production recursive removal or full installer/uninstaller/wrapper/worker
+ran. Native PowerShell Ctrl-C, TTY, pipeline and actual foreground behavior
+remain outside this source-only evidence. No independent QA or release PASS
+is claimed, and no additional R03 scope was certified.
+
+Fresh developer `issue0012_r02_recovery_deletion_boundaries_repair` is assigned
+only these two findings, preserving prior R01/R02/R07/R08 work. It must propose
+the ownership/retry approach before editing and use public recover/uninstall
+regressions with filesystem effects confined to guarded disposable fixtures.
+The repaired result requires a new fresh independent reviewer and then QA.
+
+Approved internal repair approach (not yet a completed implementation): require
+the existing Git receipt immediately before duplicate-candidate deletion, while
+retaining optional verification for compatible non-deleting legacy recovery.
+For uninstall retry, retain receipt v1 and all existing public journal/action
+schemas. Before a first owned release deletion, store a private entry-proof
+sidecar in the exact UUID-scoped external uninstall staging leaf. Its complete
+canonical inventory must hash to the unchanged prepare-time receipt; it is not
+a new ownership claim. A proof-backed `before` action may accept only missing
+owned entries and unchanged surviving entries. Pending actions still require
+full ownership evidence. New/changed/link/special survivors must refuse before
+retry mutation. Old already-partial actions without such proof must preserve
+and report insufficient evidence, never infer missing inventory or recapture
+ownership. Validate sidecar schema, identity, paths and aggregate and cover
+interrupted proof publication. Do not invoke Git against partial/missing `.git`.
+The fresh developer is implementing public recover/uninstall RED-to-GREEN
+regressions; the parent has not certified the implementation or its tests.
+
+Developer progress: the legacy duplicate-candidate public recovery regression
+went RED (one test, 1.386 seconds, intercepted removal and preserved snapshot)
+to GREEN (one test, 1.394 seconds). All 17 R01 regressions then passed in 2.364
+seconds, without skips/audit violations. The parent inspected the new mandatory
+receipt check and test. The deleting R01 positive fixture now supplies prior
+typed Git inventory proof and retains the candidate by rename at the removal
+seam; its Git metadata is a scoped fixture, not a native Git recovery proof.
+The partial-owned-Git-file retry regression reproduced the fingerprint mismatch
+(RED, 2.668 seconds), then passed (GREEN, 2.875 seconds). The original receipt
+bytes and post-interruption snapshot were retained. Existing retry-addition
+refusal and unchanged-release removal-seam checks passed (two tests, 5.437
+seconds). A metadata-seam proof-path reparse regression went RED to GREEN
+(one test, 2.728 seconds). These checks reported zero audit violations; they
+are developer evidence, not native link tests or independent QA. The complete
+proof-corruption, publication-interruption and compatibility suite is still in
+progress. The current type comparison retains the exact 26-diagnostic HEAD
+baseline, not a clean full release type gate.
+Four-file pre-edit text baseline location:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-boundaries-baseline-6a3d8cde23484df6bfcfc473aac5d631`.
+Raw hashes differ because each saved file has exactly one extra terminal LF
+byte (0x0A). The parent independently computed each file's SHA-256 excluding
+only that final byte; all four matched their preceding frozen hashes exactly.
+The original bytes are therefore recoverable by that precise in-memory rule;
+the saved files were not silently rewritten or presented as byte-identical.
+The following final checkpoint supersedes the in-progress developer status.
+
+### R02 deletion-boundary final developer freeze, 2026-09-06
+
+Developer `issue0012_r02_recovery_deletion_boundaries_repair` completed and
+stopped. The subsequent fresh review passed, recorded below; fresh QA has
+started. R02 and Issue 0012 remain incomplete pending their required gates.
+
+The final developer suites passed 72 executions / 72 distinct tests in
+110.919 seconds, without skips or audit violations:
+
+- Session `71571`: 32 R02 content cases and 17 R01 candidate cases passed
+  (49 total, 74.608 seconds).
+- Session `29464`: nine bytecode/startup class-owned tests, nine Bash recovery
+  tests / 15 scenarios, and five read-only packaging tests passed (23 total,
+  36.311 seconds). Inherited duplicate content tests were deliberately excluded
+  from this second run, not counted twice or treated as skips.
+
+Coverage includes both original review failures, unchanged owned duplicate
+recovery using real Git, changed/new surviving Git data refusal, missing `.git`
+without Git invocation, pending versus interrupted action handling, intact and
+partial proof-less old actions, strict/corrupt proof data, and interruption
+before/after proof publication. Proof/staging link and reparse cases use
+metadata seams; they are not native link/junction evidence. Production recursive
+removals were intercepted. Only exact validated disposable fixture teardown
+used recursive removal; partial-removal probes changed explicitly validated
+fixture files or retained the Git directory by rename within the same leaf.
+
+Both changed test files passed scoped Ruff. The verifier and content test passed
+strict mypy. Bootstrap-wide diagnostics remain the exact HEAD baseline: two
+Ruff E501 findings and 26 transaction typing diagnostics, no additions/removals.
+Five Bash syntax checks, five PowerShell AST checks, five in-memory Python
+compilations and scoped whitespace checks passed. Existing diagnostics remain
+release-gate debt, not a waived or clean full gate.
+
+Evidence and repeat commands:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-boundaries-evidence-20260906.json`,
+SHA-256 `5A2FCD4ED4554C18D48D796935832D8CF694CB5A5A7B14F65556AE013BAF968D`.
+Guard helper:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-boundaries-guard-20260906.py`,
+SHA-256 `697D47A5015213F524831198E03E5A27CEF39AC7EF07EE29E910097BB6C6167D`.
+Inspect the guard and its imported predecessor before reusing either test lane.
+The parent verified both helper/evidence hashes and all seven source/test
+hashes directly; it has not substituted that check for fresh review or QA.
+
+| Changed file in this stage | Frozen SHA-256 |
+| --- | --- |
+| `install/bootstrap/verify.py` | `AC1B3B580432BE4ED99624A90D373E4166146A2DB092F55E658FBA9FB872FEB3` |
+| `install/bootstrap/transaction.py` | `1A9443836A742C67A4B3354A49BCCBAC84C9EC91D58C0EE226A202E83C738EC7` |
+| `tests/test_portable_release_content_safety.py` | `491928311BB00F871B7C43EDECB4D2BAD1B2B5037F75AE8643AB44D6B6620AEA` |
+| `tests/test_portable_transaction_candidate_safety.py` | `C61CB5E25C04FDB607C128256F0EE05599E3664EA0059232C63460D30E05370D` |
+
+The two dispatch files and bytecode test retain their preceding frozen hashes.
+The preceding four-file text baseline plus its exact one-LF reconstruction
+rule remains the stage comparison point; HEAD `4a44144` is the broader combined
+repair baseline. No repository documentation or issue marker was changed by
+the developer, no commit was made, and no native installer/rollback, real worker
+or authenticated gate ran. R03 and other recorded open findings are not fixed
+or certified by this developer checkpoint.
+
+### R02 deletion-boundary independent review PASS, 2026-09-06
+
+Fresh reviewer: `issue0012_r02_deletion_boundaries_fresh_review`. Scoped result:
+**PASS**, no blocking defects found in the frozen R02 repair. This does not
+complete Issue 0012 or replace fresh QA and native release evidence.
+
+The reviewer inspected the exact four-file stage diff and combined R02
+production changes, public recovery/uninstall paths, proof publication and
+revalidation, and preserved dispatch changes. Twenty exact schema/preserved-code
+AST definitions matched HEAD. All seven frozen hashes and HEAD stayed unchanged;
+removing only the baseline files' extra final LF reconstructed all four original
+frozen byte hashes. R07/R08 files stayed unchanged versus HEAD.
+
+Independent execution: 56 tests / 56 distinct passed, zero skips/audit violations.
+The 49 existing focused cases took 74.318 seconds; seven newly authored probes
+took 18.220 seconds. The probes covered proof fsync failure, deletion-checkpoint
+replacement interruptions before/after replace, missing owned Git subtrees,
+link/reparse/FIFO surviving-entry refusal, missing `.git` without proof refusal,
+and real-Git non-deleting legacy recovery preserving operator notes. Five Python
+sources compiled in memory and scoped whitespace checks passed.
+
+Retained helper:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-fresh-review-probes-7c6f1ec3.py`,
+SHA-256 `7D12FA9EB81E60CFC1EB112C28D47330C4AFF4C14F0BAF928A842DE2A91C39DE`.
+The parent read this complete helper and the complete boundaries guard and
+verified the helper hash. An initial extraction-delimiter SyntaxError happened
+before tests/imported fixtures; it was corrected before the successful run.
+
+Production recursive removals were intercepted; only exact validated C fixtures
+were torn down. Link/special cases used metadata simulations. No installer,
+uninstaller, full wrapper, rollback, real worker, authenticated or native console
+gate ran. Dispatch behavior was inspected, not executed by this reviewer.
+Ruff/mypy baseline debt was not independently rerun or waived in this review.
+R03-R06/R09-R11, R12's user decision, historical fixture integration/QA and
+retained-release reactivation remain open or unverified as previously recorded.
+
+Fresh QA agent `issue0012_r02_final_fresh_qa` is now assigned this frozen slice.
+It must independently inspect the test/guard scope, validate the complete R02
+behavior and preserved startup paths, and report actual gates and residuals.
+No completion marker is promoted before QA passes; native installer/platform
+and the remaining issue acceptance gates stay open regardless of scoped QA.
+
 ### R11 additional Git-scope review
 
 Fresh read-only reviewer: `issue0012_git_scope_review`. Result: scoped FAIL,
@@ -154,6 +448,47 @@ review. The worktree-selector probe does not establish fresh-install cleanup
 reachability; the reviewer also found upstream clone rejection of an existing
 `GIT_WORK_TREE`. Destructive outcomes and native Linux behavior remain unproved.
 This finding is not an explanation of the original F: checkout disappearance.
+
+### R12 parent diagnosis: default wiki writes inside immutable releases
+
+Status: source-only reproduction; pending fresh independent validation and a
+user storage-location decision. This is not part of the active R02 developer's
+two-blocker assignment and is not an independent review/QA PASS or a diagnosis
+of the missing F: checkout.
+
+Verified current call path: `src/devloop/cli.py:1019,1022` defaults to the
+bundle-relative wiki with wiki updates enabled. At lines 876-881 a real
+post-run task resolves that path against `bundle.root`, initializes the wiki,
+and writes compiler context. `templates.py:21` derives that root from the
+executing module location. `self_improvement_wiki.py:12,26,46` keeps paths inside
+that bundle, creates wiki files, and creates `.compiler-runs/*-context.md`.
+The compiler-runs directory is ignored by `.gitignore:32`, but ignored content
+is intentionally included by the new release inventory.
+
+The parent ran the inspected BundleContext/wiki functions with a representative
+side-by-side release path under a nonexistent C: fixture prefix and an audit
+hook that refuses every filesystem mutation and child process before execution.
+Two repetitions intercepted four mkdir attempts, all inside the immutable
+release. No directory, cache, or context file was created. The actual extracted
+inventory function rejects the corresponding sample compiler-runs inventory
+with `release contains unexpected untracked content`; that inventory input is
+supplied data, not a real-Git fixture or full workflow result.
+
+Read-only probe retained for independent reproduction:
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-v3-wiki-readonly-d8fecfb825c048728a049d679ba33bca.py`.
+It exited zero and reported no mutations or child launches. CLI source SHA-256:
+`d0ad572b3d122c371d18c85c7d1ba3e19d7d77fc6b384ca9ac8f7f1c6904bac4`;
+wiki source SHA-256:
+`22088c625e52b1c6221783393184e87f4e018d342169f18c27e0a5c7965d353c`.
+
+A non-blocking question asks whether installed copies should keep writable
+wiki data in per-user storage while development checkouts retain the existing
+bundle-relative behavior. Do not silently relocate data, disable the default
+wiki feature, or exempt arbitrary wiki/context files from ownership checks.
+After that decision, require a fresh developer, reviewer, and QA sequence,
+including normal post-run writes followed by release verification and retained
+wiki data across update/rollback. Full CLI/installer execution was not run by
+this diagnostic probe.
 
 ### R01 evidence
 

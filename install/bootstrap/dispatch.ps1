@@ -68,9 +68,24 @@ if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
     throw "Dev Loop bootstrap command is missing from the current release: $target"
 }
 if ($Command -in @('update', 'uninstall')) {
-    & pwsh -NoProfile -ExecutionPolicy Bypass -File $target -InstallDir $InstallRoot @RemainingArgs
+    $childArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $target, '-InstallDir', $InstallRoot) + $RemainingArgs
 }
 else {
-    & pwsh -NoProfile -ExecutionPolicy Bypass -File $target @RemainingArgs
+    $childArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $target) + $RemainingArgs
 }
-exit $LASTEXITCODE
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new('pwsh')
+$startInfo.UseShellExecute = $false
+$startInfo.WorkingDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+foreach ($argument in $childArguments) { $startInfo.ArgumentList.Add([string]$argument) }
+# Set policy only in the child environment; immutable older wrappers need it too.
+$startInfo.Environment['PYTHONDONTWRITEBYTECODE'] = '1'
+# No stream redirection or detached process: inherit the foreground console and wait.
+$process = [System.Diagnostics.Process]::Start($startInfo)
+try {
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+}
+finally {
+    $process.Dispose()
+}
+exit $exitCode

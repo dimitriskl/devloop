@@ -14,6 +14,7 @@ import unittest
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -115,6 +116,10 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         shutil.rmtree(self.root, onerror=writable_remove)
 
     def git(self, *arguments: str) -> str:
+        options = list(arguments[:3]) if arguments[:1] == ("--no-optional-locks",) else []
+        if options:
+            self.assertEqual(options, ["--no-optional-locks", "-c", "diff.autoRefreshIndex=false"])
+            arguments = arguments[3:]
         allowed = {
             ("init", "--quiet"),
             ("add", "--", ".gitignore", "portable-release.json", "payload.bin", "install"),
@@ -125,6 +130,10 @@ class ReleaseContentSafetyTests(unittest.TestCase):
             ("ls-files", "--stage"),
             ("ls-files", "--others", "--exclude-standard"),
             ("ls-files", "--others", "--directory", "-z"),
+            ("update-ref", "refs/heads/operator", self.commit if hasattr(self, "commit") else ""),
+            ("show-ref", "--verify", "refs/heads/operator"),
+            ("worktree", "add", "--quiet", "--detach", "--no-checkout",
+             str(self.root / "operator-worktree"), self.commit if hasattr(self, "commit") else ""),
         }
         self.assertIn(arguments, allowed, "unreviewed Git command blocked")
         self.validate_root()
@@ -135,7 +144,7 @@ class ReleaseContentSafetyTests(unittest.TestCase):
              "-c", f"init.templateDir={self.empty_directory}",
              "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false",
              "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false",
-             "-C", str(self.release), *arguments],
+             "-C", str(self.release), *options, *arguments],
             env=self.git_environment, cwd=self.root, capture_output=True,
             text=True, encoding="utf-8", check=False, timeout=15,
         )
@@ -147,8 +156,15 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         self, arguments: list[str], **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
         self.assertEqual(arguments[:3], ["git", "-C", str(self.release)])
-        self.assertIn(arguments[3], {"rev-parse", "diff", "ls-files"})
-        return subprocess.CompletedProcess(arguments, 0, stdout=self.git(*arguments[3:]), stderr="")
+        self.assertEqual(arguments[3], "--no-optional-locks")
+        self.assertIn(arguments[6], {"rev-parse", "diff", "ls-files"})
+        before = (self.release / ".git" / "index").read_bytes()
+        output = self.git(*arguments[3:])
+        self.assertEqual(
+            hashlib.sha256((self.release / ".git" / "index").read_bytes()).hexdigest(),
+            hashlib.sha256(before).hexdigest(), arguments,
+        )
+        return subprocess.CompletedProcess(arguments, 0, stdout=output, stderr="")
 
     def write_manifest(self) -> None:
         index = "\n".join(sorted(self.git("ls-files", "--stage").splitlines()))
@@ -252,6 +268,633 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         finally:
             self.assertEqual(self.snapshot(), before)
             self.assertFalse((self.root / f".bundle.uninstall-{TRANSACTION_ID}").exists())
+
+    def test_git_operator_notes_block_uninstall_before_any_mutation(self) -> None:
+        self.write_layout()
+        self.write_lock("uninstall")
+        (self.release / ".git" / "operator-notes").write_bytes(b"operator data\x00\xff")
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+            self.assertFalse((self.root / f".bundle.uninstall-{TRANSACTION_ID}").exists())
+
+    def stage_candidate(self) -> None:
+        self.write_layout()
+        self.write_lock("install")
+        (self.bootstrap / "current.json").unlink()
+        (self.bootstrap / f"release-{self.commit}.json").unlink()
+        self.release.rename(self.candidate)
+        self.release = self.candidate
+
+    def prepare_owned_release(self) -> None:
+        self.stage_candidate()
+        prepared = transaction.prepare(self.install, self.candidate, self.commit, TRANSACTION_ID)
+        self.release = prepared
+        transaction.commit(self.install, TRANSACTION_ID)
+
+    def test_pre_activation_git_ownership_allows_unchanged_release_removal(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        before_release = {
+            path.relative_to(self.release).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in self.release.rglob("*")
+        }
+
+        class RemovalReached(Exception):
+            pass
+
+        def capture_removal(path: Path, **kwargs: object) -> None:
+            self.assertEqual(path, self.release)
+            raise RemovalReached
+
+        # Stop at the destructive system seam: no release/installer is executed or removed.
+        with mock.patch.object(shutil, "rmtree", side_effect=capture_removal):
+            with self.assertRaises(RemovalReached):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertEqual({
+            path.relative_to(self.release).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in self.release.rglob("*")
+        }, before_release)
+
+    def test_owned_git_admin_additions_block_verification_and_uninstall(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        for relative in ("operator-notes", "refs/heads/operator", "worktrees/operator/gitdir"):
+            with self.subTest(relative=relative):
+                target = self.release / ".git" / relative
+                created = []
+                parent = target.parent
+                while not parent.exists():
+                    created.append(parent)
+                    parent = parent.parent
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((self.commit + "\n").encode())
+                before = self.snapshot()
+                try:
+                    with self.reject_mutations():
+                        with self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                            verify.verify(self.install)
+                        with self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                            transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                finally:
+                    self.assertEqual(self.snapshot(), before)
+                    target.unlink()
+                    for directory in created:
+                        directory.rmdir()
+
+    def test_normal_git_reads_preserve_owned_admin_bytes_with_optional_locks_enabled(self) -> None:
+        self.git_environment.pop("GIT_OPTIONAL_LOCKS")
+        self.prepare_owned_release()
+        payload = self.release / "payload.bin"
+        status = payload.stat()
+        os.utime(payload, ns=(status.st_atime_ns, status.st_mtime_ns + 2_000_000_000))
+        before = self.snapshot()
+        with self.reject_mutations():
+            for _ in range(3):
+                self.assertEqual(verify.verify(self.install), self.release)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_real_operator_branch_and_linked_worktree_survive_uninstall_refusal(self) -> None:
+        self.prepare_owned_release()
+        self.git("update-ref", "refs/heads/operator", self.commit)
+        self.assertEqual(
+            self.git("show-ref", "--verify", "refs/heads/operator").strip(),
+            f"{self.commit} refs/heads/operator",
+        )
+        worktree = self.root / "operator-worktree"
+        self.git("worktree", "add", "--quiet", "--detach", "--no-checkout",
+                 str(worktree), self.commit)
+        self.assertTrue((worktree / ".git").is_file())
+        self.assertTrue((self.release / ".git" / "worktrees" / worktree.name / "gitdir").is_file())
+        self.write_lock("uninstall")
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_git_ownership_receipt_requires_an_exact_integer_schema_version(self) -> None:
+        self.prepare_owned_release()
+        receipt = self.bootstrap / f"git-ownership-{self.commit}.json"
+        value = json.loads(receipt.read_text())
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                receipt.write_text(json.dumps({**value, "version": version}))
+                before = self.snapshot()
+                try:
+                    with self.reject_mutations(), self.assertRaisesRegex(
+                        RuntimeError, "Git ownership evidence has an unsupported schema",
+                    ):
+                        verify.verify(self.install)
+                finally:
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_empty_git_admin_directory_and_modified_config_are_not_owned(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        config = self.release / ".git" / "config"
+        original = config.read_bytes()
+        empty = self.release / ".git" / "operator-empty"
+        for kind in ("empty-directory", "modified-config"):
+            with self.subTest(kind=kind):
+                if kind == "empty-directory":
+                    empty.mkdir()
+                else:
+                    config.write_bytes(original + b"\n# operator-owned setting\n")
+                before = self.snapshot()
+                try:
+                    with self.reject_mutations(), self.assertRaisesRegex(
+                        RuntimeError, "Git ownership",
+                    ):
+                        transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                finally:
+                    self.assertEqual(self.snapshot(), before)
+                    if kind == "empty-directory":
+                        empty.rmdir()
+                    else:
+                        config.write_bytes(original)
+
+    def test_git_admin_root_reparse_point_is_rejected_before_uninstall_mutation(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        before = self.snapshot()
+        original_lstat = Path.lstat
+
+        def reparse_lstat(path: Path) -> os.stat_result | SimpleNamespace:
+            status = original_lstat(path)
+            if path == self.release / ".git":
+                return SimpleNamespace(
+                    st_mode=status.st_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                )
+            return status
+
+        try:
+            with mock.patch.object(Path, "lstat", autospec=True, side_effect=reparse_lstat):
+                with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                    transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_retry_rejects_new_git_data_before_any_further_mutation(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("removal intercepted")):
+            with self.assertRaisesRegex(RuntimeError, "removal intercepted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        (self.release / ".git" / "operator-notes").write_bytes(b"added after interrupted preflight")
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_retry_continues_after_only_owned_git_file_was_removed(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        receipt = self.bootstrap / f"git-ownership-{self.commit}.json"
+        original_receipt = receipt.read_bytes()
+        removed = self.release / ".git" / "HEAD"
+
+        def partial_removal(path: Path, **kwargs: object) -> None:
+            self.assertEqual(path, self.release)
+            self.validate_root()
+            self.assertTrue(removed.resolve(strict=True).is_relative_to(self.root))
+            removed.unlink()
+            raise OSError("interrupted after owned HEAD removal")
+
+        with mock.patch.object(shutil, "rmtree", side_effect=partial_removal):
+            with self.assertRaisesRegex(OSError, "interrupted after owned HEAD removal"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertFalse(removed.exists())
+        before_retry = self.snapshot()
+
+        class RemovalReached(Exception):
+            pass
+
+        def capture_retry(path: Path, **kwargs: object) -> None:
+            self.assertEqual(path, self.release)
+            raise RemovalReached
+
+        with mock.patch.object(shutil, "rmtree", side_effect=capture_retry):
+            with self.assertRaises(RemovalReached):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertEqual(receipt.read_bytes(), original_receipt)
+        self.assertEqual(self.snapshot(), before_retry)
+
+    def test_partial_uninstall_retry_preserves_new_and_changed_git_survivors(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        removed = self.release / ".git" / "HEAD"
+
+        def partial_removal(path: Path, **kwargs: object) -> None:
+            self.assertEqual(path, self.release)
+            self.validate_root()
+            self.assertTrue(removed.resolve(strict=True).is_relative_to(self.root))
+            removed.unlink()
+            raise OSError("owned HEAD removed")
+
+        with mock.patch.object(shutil, "rmtree", side_effect=partial_removal):
+            with self.assertRaisesRegex(OSError, "owned HEAD removed"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        config = self.release / ".git" / "config"
+        config_bytes = config.read_bytes()
+        for kind in ("new-file", "new-directory", "changed-file", "changed-kind"):
+            with self.subTest(kind=kind):
+                added = self.release / ".git" / "operator-data"
+                if kind == "new-file":
+                    added.write_bytes(b"new operator-owned data")
+                elif kind == "new-directory":
+                    added.mkdir()
+                elif kind == "changed-file":
+                    config.write_bytes(config_bytes + b"\n# operator changes\n")
+                else:
+                    self.validate_root()
+                    self.assertTrue(config.resolve(strict=True).is_relative_to(self.root))
+                    config.unlink()
+                    config.mkdir()
+                before = self.snapshot()
+                try:
+                    with self.reject_mutations(), self.assertRaisesRegex(
+                        RuntimeError, "Git ownership survivors changed",
+                    ):
+                        transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                finally:
+                    self.assertEqual(self.snapshot(), before)
+                    self.validate_root()
+                    if kind == "new-file":
+                        added.unlink()
+                    elif kind == "new-directory":
+                        added.rmdir()
+                    elif kind == "changed-file":
+                        config.write_bytes(config_bytes)
+                    else:
+                        config.rmdir()
+                        config.write_bytes(config_bytes)
+
+    def test_proof_backed_retry_accepts_missing_git_without_running_git(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("removal intercepted")):
+            with self.assertRaisesRegex(RuntimeError, "removal intercepted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        git_root = self.release / ".git"
+        self.validate_root()
+        self.assertTrue(git_root.resolve(strict=True).is_relative_to(self.root))
+        retained_git = self.root / "retained-git-fixture"
+        git_root.rename(retained_git)
+        before = self.snapshot()
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Git must not run")):
+            with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("retry reached")):
+                with self.assertRaisesRegex(RuntimeError, "retry reached"):
+                    transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_pending_release_action_cannot_use_partial_git_proof(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("removal intercepted")):
+            with self.assertRaisesRegex(RuntimeError, "removal intercepted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        staging = self.root / f".bundle.uninstall-{TRANSACTION_ID}"
+        journal_path = staging / "journal.json"
+        journal = json.loads(journal_path.read_text())
+        release_action = next(action for action in journal["actions"]
+                              if action["kind"] == "remove_release")
+        release_action["state"] = "pending"
+        journal_path.write_text(json.dumps(journal))
+        removed = self.release / ".git" / "HEAD"
+        self.validate_root()
+        self.assertTrue(removed.resolve(strict=True).is_relative_to(self.root))
+        removed.unlink()
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(
+                RuntimeError, "Git ownership survivors changed",
+            ):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_old_uninstall_without_entry_proof_requires_exact_original_git_inventory(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("removal intercepted")):
+            with self.assertRaisesRegex(RuntimeError, "removal intercepted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        proof = (
+            self.root / f".bundle.uninstall-{TRANSACTION_ID}" / f"git-entries-{self.commit}.json"
+        )
+        self.validate_root()
+        self.assertTrue(proof.resolve(strict=True).is_relative_to(self.root))
+        proof.unlink()
+        receipt = self.bootstrap / f"git-ownership-{self.commit}.json"
+        receipt_bytes = receipt.read_bytes()
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("intact retry reached")):
+            with self.assertRaisesRegex(RuntimeError, "intact retry reached"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertTrue(proof.is_file())
+        proof.unlink()
+        removed = self.release / ".git" / "HEAD"
+        self.assertTrue(removed.resolve(strict=True).is_relative_to(self.root))
+        removed.unlink()
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(
+                RuntimeError, "proof missing; preserve and restore owned data",
+            ):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(receipt.read_bytes(), receipt_bytes)
+
+    def test_interrupted_git_proof_publication_retries_from_original_ownership(self) -> None:
+        self.assert_interrupted_git_proof_retry(after_publication=False)
+
+    def test_published_git_proof_retries_before_release_action_checkpoint(self) -> None:
+        self.assert_interrupted_git_proof_retry(after_publication=True)
+
+    def assert_interrupted_git_proof_retry(self, *, after_publication: bool) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        receipt = self.bootstrap / f"git-ownership-{self.commit}.json"
+        receipt_bytes = receipt.read_bytes()
+        proof = (
+            self.root / f".bundle.uninstall-{TRANSACTION_ID}" / f"git-entries-{self.commit}.json"
+        )
+        original_replace = os.replace
+
+        def interrupt_proof(source: Path, destination: Path) -> None:
+            if Path(destination) == proof:
+                if after_publication:
+                    original_replace(source, destination)
+                raise OSError("proof publication interrupted")
+            original_replace(source, destination)
+
+        with mock.patch.object(os, "replace", side_effect=interrupt_proof):
+            with self.assertRaisesRegex(OSError, "proof publication interrupted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertEqual(proof.exists(), after_publication)
+        journal = json.loads((proof.parent / "journal.json").read_text())
+        self.assertTrue(all(action["state"] == "pending" for action in journal["actions"]))
+        before_release = {path.relative_to(self.release): path.read_bytes()
+                          for path in self.release.rglob("*") if path.is_file()}
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("retry reached")):
+            with self.assertRaisesRegex(RuntimeError, "retry reached"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        self.assertTrue(proof.is_file())
+        self.assertEqual(receipt.read_bytes(), receipt_bytes)
+        self.assertEqual({path.relative_to(self.release): path.read_bytes()
+                          for path in self.release.rglob("*") if path.is_file()}, before_release)
+
+    def test_uninstall_retry_rejects_reparse_entry_proof_before_mutation(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("removal intercepted")):
+            with self.assertRaisesRegex(RuntimeError, "removal intercepted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        proof = (
+            self.root / f".bundle.uninstall-{TRANSACTION_ID}" / f"git-entries-{self.commit}.json"
+        )
+        self.assertTrue(proof.is_file())
+        before = self.snapshot()
+        original_lstat = Path.lstat
+
+        original_exists = Path.exists
+        for target, dangling in ((proof, False), (proof.parent, False), (self.root, False),
+                                 (proof, True)):
+            with self.subTest(target=target.name, dangling=dangling):
+                def reparse_lstat(
+                    path: Path, *, expected: Path = target, is_dangling: bool = dangling,
+                ) -> os.stat_result | SimpleNamespace:
+                    status = original_lstat(path)
+                    if path == expected:
+                        return SimpleNamespace(
+                            st_mode=stat.S_IFLNK if is_dangling else status.st_mode,
+                            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                        )
+                    return status
+
+                def entry_exists(
+                    path: Path, *, expected: Path = target, is_dangling: bool = dangling,
+                ) -> bool:
+                    return False if path == expected and is_dangling else original_exists(path)
+
+                try:
+                    with mock.patch.object(Path, "lstat", autospec=True, side_effect=reparse_lstat):
+                        with mock.patch.object(
+                            Path, "exists", autospec=True, side_effect=entry_exists,
+                        ):
+                            with self.reject_mutations(), self.assertRaisesRegex(
+                                RuntimeError, "Git ownership",
+                            ):
+                                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                finally:
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_uninstall_retry_rejects_corrupt_entry_proof_without_recapturing(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("uninstall")
+        with mock.patch.object(shutil, "rmtree", side_effect=RuntimeError("removal intercepted")):
+            with self.assertRaisesRegex(RuntimeError, "removal intercepted"):
+                transaction.uninstall_layout(self.install, TRANSACTION_ID)
+        proof = (
+            self.root / f".bundle.uninstall-{TRANSACTION_ID}" / f"git-entries-{self.commit}.json"
+        )
+        original = json.loads(proof.read_text())
+        entries = original["entries"]
+        variants: tuple[dict[str, object], ...] = (
+            {"version": True}, {"version": 1.0}, {"extra": "unowned"},
+            {"transaction_id": "44444444-4444-4444-8444-444444444444"},
+            {"install_root": str(self.root)}, {"commit": "a" * 40},
+            {"git_fingerprint": "A" * 64}, {"entries": {}},
+            {"entries": entries + [entries[0]]}, {"entries": list(reversed(entries))},
+            {"entries": [["../HEAD", "file", "a" * 64]]},
+            {"entries": [["HEAD", "file", True]]},
+            {"entries": [["HEAD", "file", "A" * 64]]},
+            {"entries": [["HEAD", "directory", "not-empty"]]},
+            {"entries": [["HEAD", "symlink", ""]]},
+            {"entries": [["missing-parent/HEAD", "file", "a" * 64]]},
+            {"entries": entries[1:]},
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                proof.write_text(json.dumps({**original, **variant}))
+                before = self.snapshot()
+                try:
+                    with self.reject_mutations(), self.assertRaisesRegex(
+                        RuntimeError, "Git ownership",
+                    ):
+                        transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                finally:
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_journaled_recovery_does_not_recapture_modified_git_ownership(self) -> None:
+        self.stage_candidate()
+        real_replace = os.replace
+
+        def interrupt_journal(source: Path, destination: Path) -> None:
+            real_replace(source, destination)
+            if Path(destination).name == "install-transaction.json":
+                raise RuntimeError("journal publication intercepted")
+
+        with mock.patch.object(os, "replace", side_effect=interrupt_journal):
+            with self.assertRaisesRegex(RuntimeError, "journal publication intercepted"):
+                transaction.prepare(self.install, self.candidate, self.commit, TRANSACTION_ID)
+        (self.candidate / ".git" / "operator-notes").write_bytes(b"after durable journal")
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                transaction.recover(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_legacy_duplicate_recovery_preserves_unproven_git_admin_before_mutation(self) -> None:
+        self.write_lock("install")
+        canonical = self.release
+        shutil.copytree(canonical, self.candidate)
+        (self.candidate / ".git" / "operator-notes").write_bytes(b"operator data must survive")
+        (self.bootstrap / "install-transaction.json").write_text(json.dumps({
+            "version": 2,
+            "transaction_id": TRANSACTION_ID,
+            "install_root": str(self.install),
+            "candidate_path": str(self.candidate),
+            **self.pointer,
+            "previous_pointer": None,
+            "previous_previous_pointer": None,
+            "phase": "prepared",
+        }))
+        (self.bootstrap / f"candidate-{TRANSACTION_ID}.json").write_text(json.dumps({
+            "version": 1, "transaction_id": TRANSACTION_ID,
+            "candidate_name": self.candidate.name, "commit": self.commit,
+        }))
+        before = self.snapshot()
+
+        def routed_git(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.release = Path(arguments[2])
+            self.assertIn(self.release, (self.candidate, canonical))
+            return self.readonly_git(arguments, **kwargs)
+
+        try:
+            with mock.patch.object(subprocess, "run", side_effect=routed_git):
+                with self.reject_mutations(), self.assertRaisesRegex(
+                    RuntimeError, "Git ownership evidence is missing",
+                ):
+                    transaction.recover(self.install, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_duplicate_recovery_accepts_original_prepare_time_git_ownership(self) -> None:
+        self.prepare_owned_release()
+        self.write_lock("install")
+        canonical = self.release
+        shutil.copytree(canonical, self.candidate)
+        (self.bootstrap / "install-transaction.json").write_text(json.dumps({
+            "version": 2, "transaction_id": TRANSACTION_ID,
+            "install_root": str(self.install), "candidate_path": str(self.candidate),
+            **self.pointer, "previous_pointer": None, "previous_previous_pointer": None,
+            "phase": "prepared",
+        }))
+        (self.bootstrap / f"candidate-{TRANSACTION_ID}.json").write_text(json.dumps({
+            "version": 1, "transaction_id": TRANSACTION_ID,
+            "candidate_name": self.candidate.name, "commit": self.commit,
+        }))
+        before = self.snapshot()
+
+        def routed_git(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.release = Path(arguments[2])
+            self.assertIn(self.release, (self.candidate, canonical))
+            return self.readonly_git(arguments, **kwargs)
+
+        class RemovalReached(Exception):
+            pass
+
+        def capture_removal(path: Path, **kwargs: object) -> None:
+            self.assertEqual(path, self.candidate)
+            raise RemovalReached
+
+        with mock.patch.object(subprocess, "run", side_effect=routed_git):
+            with self.reject_mutations():
+                with mock.patch.object(shutil, "rmtree", side_effect=capture_removal):
+                    with self.assertRaises(RemovalReached):
+                        transaction.recover(self.install, TRANSACTION_ID)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_receipt_survives_crash_before_journal_and_is_not_replaced_on_retry(self) -> None:
+        self.stage_candidate()
+        real_replace = os.replace
+
+        def interrupt_after_receipt(source: Path, destination: Path) -> None:
+            real_replace(source, destination)
+            if Path(destination).name == f"git-ownership-{self.commit}.json":
+                raise RuntimeError("receipt publication intercepted")
+
+        with mock.patch.object(os, "replace", side_effect=interrupt_after_receipt):
+            with self.assertRaisesRegex(RuntimeError, "receipt publication intercepted"):
+                transaction.prepare(self.install, self.candidate, self.commit, TRANSACTION_ID)
+        self.assertFalse((self.bootstrap / "install-transaction.json").exists())
+        (self.candidate / ".git" / "operator-notes").write_bytes(b"after durable receipt")
+        before = self.snapshot()
+        try:
+            with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+                transaction.prepare(self.install, self.candidate, self.commit, TRANSACTION_ID)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_unchanged_receipt_survives_journaled_recovery_and_commit(self) -> None:
+        self.stage_candidate()
+        real_replace = os.replace
+
+        def interrupt_journal(source: Path, destination: Path) -> None:
+            real_replace(source, destination)
+            if Path(destination).name == "install-transaction.json":
+                raise RuntimeError("journal publication intercepted")
+
+        with mock.patch.object(os, "replace", side_effect=interrupt_journal):
+            with self.assertRaisesRegex(RuntimeError, "journal publication intercepted"):
+                transaction.prepare(self.install, self.candidate, self.commit, TRANSACTION_ID)
+        receipt = self.bootstrap / f"git-ownership-{self.commit}.json"
+        before = receipt.read_bytes()
+        original_readonly_git = self.readonly_git
+
+        def moved_git(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            # Only adapt the external Git seam to the reviewed atomic candidate move.
+            self.release = Path(arguments[2])
+            self.assertIn(self.release, (self.candidate, self.install / "releases" / self.commit))
+            return original_readonly_git(arguments, **kwargs)
+
+        with mock.patch.object(subprocess, "run", side_effect=moved_git):
+            action, release = transaction.recover(self.install, TRANSACTION_ID)
+        self.assertEqual((action, release), ("NEEDS_ADOPTION", self.release))
+        transaction.commit(self.install, TRANSACTION_ID)
+        self.assertEqual(receipt.read_bytes(), before)
+        self.assertFalse((self.bootstrap / "install-transaction.json").exists())
+        self.assertEqual(verify.verify(self.install), self.release)
+
+    def test_legacy_manifests_remain_runnable_but_uninstall_cannot_invent_ownership(self) -> None:
+        self.write_layout()
+        self.write_lock("uninstall")
+        original_manifest = (self.bootstrap / f"release-{self.commit}.json").read_bytes()
+        original_pointer = (self.bootstrap / "current.json").read_bytes()
+        for version in (1, 2):
+            with self.subTest(version=version):
+                if version == 1:
+                    legacy = json.dumps({"version": 1, **self.pointer})
+                    (self.bootstrap / f"release-{self.commit}.json").write_text(legacy)
+                    (self.bootstrap / "current.json").write_text(legacy)
+                else:
+                    (self.bootstrap / f"release-{self.commit}.json").write_bytes(original_manifest)
+                    (self.bootstrap / "current.json").write_bytes(original_pointer)
+                before = self.snapshot()
+                with self.reject_mutations():
+                    self.assertEqual(verify.verify(self.install), self.release)
+                    with self.assertRaisesRegex(RuntimeError, "Git ownership evidence is missing"):
+                        transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                self.assertEqual(self.snapshot(), before)
 
     def test_ignored_state_blocks_prepare_before_any_mutation(self) -> None:
         self.write_layout()

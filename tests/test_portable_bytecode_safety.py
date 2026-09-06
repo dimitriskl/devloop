@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -22,6 +23,93 @@ GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
 BASH = str(GIT_BASH) if os.name == "nt" and GIT_BASH.is_file() else shutil.which("bash")
 
 
+# Exact Git blobs from recovered historical checkpoint a69baa8, not current wrappers.
+# These are inert source fixtures; tests execute only extracted invocation statements.
+HISTORICAL_WRAPPERS = {
+    "bin/devloop-plan.ps1": (
+        "765b90e70a0c12d5bd3d2d6cacf0976f2c6cbd1a",
+        "W0NtZGxldEJpbmRpbmcoKV0KcGFyYW0oCiAgICBbQWxpYXMoJ2gnKV0KICAgIFtzd2l0Y2hdICRIZWxwLAoKICAg"
+        "IFtQYXJhbWV0ZXIoVmFsdWVGcm9tUmVtYWluaW5nQXJndW1lbnRzID0gJHRydWUpXQogICAgW3N0cmluZ1tdXSAk"
+        "UmVtYWluaW5nQXJncwopCgokRXJyb3JBY3Rpb25QcmVmZXJlbmNlID0gJ1N0b3AnCgokYnVuZGxlUm9vdCA9IFNw"
+        "bGl0LVBhdGggLVBhcmVudCAkUFNTY3JpcHRSb290CiRweXRob24gPSBKb2luLVBhdGggJGJ1bmRsZVJvb3QgJy52"
+        "ZW52XFNjcmlwdHNccHl0aG9uLmV4ZScKaWYgKC1ub3QgKFRlc3QtUGF0aCAtTGl0ZXJhbFBhdGggJHB5dGhvbiAt"
+        "UGF0aFR5cGUgTGVhZikpIHsKICAgICRkZXZlbG9wbWVudFNldHVwID0gSm9pbi1QYXRoICRidW5kbGVSb290ICdp"
+        "bnN0YWxsXHNldHVwLWRldmVsb3BtZW50LnBzMScKICAgIGlmICgtbm90IChUZXN0LVBhdGggLUxpdGVyYWxQYXRo"
+        "ICRkZXZlbG9wbWVudFNldHVwIC1QYXRoVHlwZSBMZWFmKSkgewogICAgICAgIHRocm93ICJEZXYgTG9vcCBydW50"
+        "aW1lIGFuZCBib290c3RyYXAgc2NyaXB0IGFyZSBtaXNzaW5nIGZyb20gJGJ1bmRsZVJvb3QiCiAgICB9CiAgICBX"
+        "cml0ZS1Ib3N0ICdEZXYgTG9vcCBydW50aW1lIG5vdCBmb3VuZDsgcHJlcGFyaW5nIHRoZSBjaGVja291dC1sb2Nh"
+        "bCBydW50aW1lLicKICAgICYgJGRldmVsb3BtZW50U2V0dXAKfQppZiAoLW5vdCAoVGVzdC1QYXRoIC1MaXRlcmFs"
+        "UGF0aCAkcHl0aG9uIC1QYXRoVHlwZSBMZWFmKSkgewogICAgdGhyb3cgJ0RldiBMb29wIGNvdWxkIG5vdCBwcmVw"
+        "YXJlIGl0cyBjaGVja291dC1sb2NhbCBydW50aW1lLicKfQoKJHB5dGhvblBhdGggPSBKb2luLVBhdGggJGJ1bmRs"
+        "ZVJvb3QgJ3NyYycKJGVudjpQWVRIT05QQVRIID0gaWYgKFtzdHJpbmddOjpJc051bGxPcldoaXRlU3BhY2UoJGVu"
+        "djpQWVRIT05QQVRIKSkgewogICAgJHB5dGhvblBhdGgKfQplbHNlIHsKICAgICIkcHl0aG9uUGF0aCQoW0lPLlBh"
+        "dGhdOjpQYXRoU2VwYXJhdG9yKSRlbnY6UFlUSE9OUEFUSCIKfQokZW52OkRFVkxPT1BfVUlfTU9ERSA9IGlmICgK"
+        "ICAgIC1ub3QgW0NvbnNvbGVdOjpJc0lucHV0UmVkaXJlY3RlZCAtYW5kCiAgICAtbm90IFtDb25zb2xlXTo6SXNP"
+        "dXRwdXRSZWRpcmVjdGVkCikgewogICAgJ2FwcGxpY2F0aW9uJwp9CmVsc2UgewogICAgJ3BsYWluJwp9CgppZiAo"
+        "JEhlbHApIHsKICAgICYgJHB5dGhvbiAtbSBkZXZsb29wLmludGVyYWN0aXZlX3J1bm5lciAtLWhlbHAKICAgIGV4"
+        "aXQgJExBU1RFWElUQ09ERQp9CgomICRweXRob24gLW0gZGV2bG9vcC5pbnRlcmFjdGl2ZV9ydW5uZXIgQFJlbWFp"
+        "bmluZ0FyZ3MKZXhpdCAkTEFTVEVYSVRDT0RFCg=="
+    ),
+    "bin/devloop-plan.sh": (
+        "8714413c20e0e724f8f5abb4ba618b9a371d1e7d",
+        "IyEvdXNyL2Jpbi9lbnYgYmFzaApzZXQgLWV1byBwaXBlZmFpbAoKU0NSSVBUX0RJUj0iJChjZCAiJChkaXJuYW1l"
+        "ICIke0JBU0hfU09VUkNFWzBdfSIpIiAmJiBwd2QpIgpCVU5ETEVfUk9PVD0iJChjZCAiJFNDUklQVF9ESVIvLi4i"
+        "ICYmIHB3ZCkiCgpQWVRIT05fQklOPSIkQlVORExFX1JPT1QvLnZlbnYvYmluL3B5dGhvbiIKaWYgWyAhIC14ICIk"
+        "UFlUSE9OX0JJTiIgXTsgdGhlbgogIERFVkVMT1BNRU5UX1NFVFVQPSIkQlVORExFX1JPT1QvaW5zdGFsbC9zZXR1"
+        "cC1kZXZlbG9wbWVudC5zaCIKICBpZiBbICEgLWYgIiRERVZFTE9QTUVOVF9TRVRVUCIgXTsgdGhlbgogICAgcHJp"
+        "bnRmICdEZXYgTG9vcCBydW50aW1lIGFuZCBib290c3RyYXAgc2NyaXB0IGFyZSBtaXNzaW5nIGZyb20gJXNcbicg"
+        "IiRCVU5ETEVfUk9PVCIgPiYyCiAgICBleGl0IDEKICBmaQogIHByaW50ZiAnRGV2IExvb3AgcnVudGltZSBub3Qg"
+        "Zm91bmQ7IHByZXBhcmluZyB0aGUgY2hlY2tvdXQtbG9jYWwgcnVudGltZS5cbicKICBiYXNoICIkREVWRUxPUE1F"
+        "TlRfU0VUVVAiCmZpCmlmIFsgISAteCAiJFBZVEhPTl9CSU4iIF07IHRoZW4KICBwcmludGYgJ0RldiBMb29wIGNv"
+        "dWxkIG5vdCBwcmVwYXJlIGl0cyBjaGVja291dC1sb2NhbCBydW50aW1lLlxuJyA+JjIKICBleGl0IDEKZmkKZXhw"
+        "b3J0IFBZVEhPTlBBVEg9IiRCVU5ETEVfUk9PVC9zcmMke1BZVEhPTlBBVEg6KzokUFlUSE9OUEFUSH0iCmlmIFtb"
+        "IC10IDAgJiYgLXQgMSBdXTsgdGhlbgogIGV4cG9ydCBERVZMT09QX1VJX01PREU9YXBwbGljYXRpb24KZWxzZQog"
+        "IGV4cG9ydCBERVZMT09QX1VJX01PREU9cGxhaW4KZmkKCmV4ZWMgIiRQWVRIT05fQklOIiAtbSBkZXZsb29wLmlu"
+        "dGVyYWN0aXZlX3J1bm5lciAiJEAiCg=="
+    ),
+    "bin/devloop.ps1": (
+        "30c99504e7ad551b98100e7cb700bb20b516a52e",
+        "W0NtZGxldEJpbmRpbmcoKV0KcGFyYW0oCiAgICBbQWxpYXMoJ2gnKV0KICAgIFtzd2l0Y2hdICRIZWxwLAoKICAg"
+        "IFtQYXJhbWV0ZXIoVmFsdWVGcm9tUmVtYWluaW5nQXJndW1lbnRzID0gJHRydWUpXQogICAgW3N0cmluZ1tdXSAk"
+        "UmVtYWluaW5nQXJncwopCgokRXJyb3JBY3Rpb25QcmVmZXJlbmNlID0gJ1N0b3AnCgokYnVuZGxlUm9vdCA9IFNw"
+        "bGl0LVBhdGggLVBhcmVudCAkUFNTY3JpcHRSb290CiRweXRob24gPSBKb2luLVBhdGggJGJ1bmRsZVJvb3QgJy52"
+        "ZW52XFNjcmlwdHNccHl0aG9uLmV4ZScKaWYgKC1ub3QgKFRlc3QtUGF0aCAtTGl0ZXJhbFBhdGggJHB5dGhvbiAt"
+        "UGF0aFR5cGUgTGVhZikpIHsKICAgICRkZXZlbG9wbWVudFNldHVwID0gSm9pbi1QYXRoICRidW5kbGVSb290ICdp"
+        "bnN0YWxsXHNldHVwLWRldmVsb3BtZW50LnBzMScKICAgIGlmICgtbm90IChUZXN0LVBhdGggLUxpdGVyYWxQYXRo"
+        "ICRkZXZlbG9wbWVudFNldHVwIC1QYXRoVHlwZSBMZWFmKSkgewogICAgICAgIHRocm93ICJEZXYgTG9vcCBydW50"
+        "aW1lIGFuZCBib290c3RyYXAgc2NyaXB0IGFyZSBtaXNzaW5nIGZyb20gJGJ1bmRsZVJvb3QiCiAgICB9CiAgICBX"
+        "cml0ZS1Ib3N0ICdEZXYgTG9vcCBydW50aW1lIG5vdCBmb3VuZDsgcHJlcGFyaW5nIHRoZSBjaGVja291dC1sb2Nh"
+        "bCBydW50aW1lLicKICAgICYgJGRldmVsb3BtZW50U2V0dXAKfQppZiAoLW5vdCAoVGVzdC1QYXRoIC1MaXRlcmFs"
+        "UGF0aCAkcHl0aG9uIC1QYXRoVHlwZSBMZWFmKSkgewogICAgdGhyb3cgJ0RldiBMb29wIGNvdWxkIG5vdCBwcmVw"
+        "YXJlIGl0cyBjaGVja291dC1sb2NhbCBydW50aW1lLicKfQokcHl0aG9uUGF0aCA9IEpvaW4tUGF0aCAkYnVuZGxl"
+        "Um9vdCAnc3JjJwokZW52OlBZVEhPTlBBVEggPSBpZiAoW3N0cmluZ106OklzTnVsbE9yV2hpdGVTcGFjZSgkZW52"
+        "OlBZVEhPTlBBVEgpKSB7CiAgICAkcHl0aG9uUGF0aAp9CmVsc2UgewogICAgIiRweXRob25QYXRoJChbSU8uUGF0"
+        "aF06OlBhdGhTZXBhcmF0b3IpJGVudjpQWVRIT05QQVRIIgp9CiRlbnY6REVWTE9PUF9VSV9NT0RFID0gaWYgKAog"
+        "ICAgLW5vdCBbQ29uc29sZV06OklzSW5wdXRSZWRpcmVjdGVkIC1hbmQKICAgIC1ub3QgW0NvbnNvbGVdOjpJc091"
+        "dHB1dFJlZGlyZWN0ZWQKKSB7CiAgICAnYXBwbGljYXRpb24nCn0KZWxzZSB7CiAgICAncGxhaW4nCn0KCmlmICgk"
+        "SGVscCkgewogICAgJiAkcHl0aG9uIC1tIGRldmxvb3AgLS1oZWxwCiAgICBleGl0ICRMQVNURVhJVENPREUKfQoK"
+        "JiAkcHl0aG9uIC1tIGRldmxvb3AgQFJlbWFpbmluZ0FyZ3MKZXhpdCAkTEFTVEVYSVRDT0RFCg=="
+    ),
+    "bin/devloop.sh": (
+        "3c5095007e75ad662fb1afd08d02d7faba3def77",
+        "IyEvdXNyL2Jpbi9lbnYgYmFzaApzZXQgLWV1byBwaXBlZmFpbAoKU0NSSVBUX0RJUj0iJChjZCAiJChkaXJuYW1l"
+        "ICIke0JBU0hfU09VUkNFWzBdfSIpIiAmJiBwd2QpIgpCVU5ETEVfUk9PVD0iJChjZCAiJFNDUklQVF9ESVIvLi4i"
+        "ICYmIHB3ZCkiCgpQWVRIT05fQklOPSIkQlVORExFX1JPT1QvLnZlbnYvYmluL3B5dGhvbiIKaWYgWyAhIC14ICIk"
+        "UFlUSE9OX0JJTiIgXTsgdGhlbgogIERFVkVMT1BNRU5UX1NFVFVQPSIkQlVORExFX1JPT1QvaW5zdGFsbC9zZXR1"
+        "cC1kZXZlbG9wbWVudC5zaCIKICBpZiBbICEgLWYgIiRERVZFTE9QTUVOVF9TRVRVUCIgXTsgdGhlbgogICAgcHJp"
+        "bnRmICdEZXYgTG9vcCBydW50aW1lIGFuZCBib290c3RyYXAgc2NyaXB0IGFyZSBtaXNzaW5nIGZyb20gJXNcbicg"
+        "IiRCVU5ETEVfUk9PVCIgPiYyCiAgICBleGl0IDEKICBmaQogIHByaW50ZiAnRGV2IExvb3AgcnVudGltZSBub3Qg"
+        "Zm91bmQ7IHByZXBhcmluZyB0aGUgY2hlY2tvdXQtbG9jYWwgcnVudGltZS5cbicKICBiYXNoICIkREVWRUxPUE1F"
+        "TlRfU0VUVVAiCmZpCmlmIFsgISAteCAiJFBZVEhPTl9CSU4iIF07IHRoZW4KICBwcmludGYgJ0RldiBMb29wIGNv"
+        "dWxkIG5vdCBwcmVwYXJlIGl0cyBjaGVja291dC1sb2NhbCBydW50aW1lLlxuJyA+JjIKICBleGl0IDEKZmkKZXhw"
+        "b3J0IFBZVEhPTlBBVEg9IiRCVU5ETEVfUk9PVC9zcmMke1BZVEhPTlBBVEg6KzokUFlUSE9OUEFUSH0iCmlmIFtb"
+        "IC10IDAgJiYgLXQgMSBdXTsgdGhlbgogIGV4cG9ydCBERVZMT09QX1VJX01PREU9YXBwbGljYXRpb24KZWxzZQog"
+        "IGV4cG9ydCBERVZMT09QX1VJX01PREU9cGxhaW4KZmkKCmV4ZWMgIiRQWVRIT05fQklOIiAtbSBkZXZsb29wICIk"
+        "QCIKCgo="
+    ),
+}
+
+
 def _function(source: str, first_line: str) -> str:
     lines = source.splitlines()
     start = lines.index(first_line)
@@ -40,6 +128,13 @@ class ReleaseBytecodeSafetyTests(content_safety.ReleaseContentSafetyTests):
             package.mkdir()
             for name in ("__init__.py", "version.py"):
                 (package / name).write_bytes((ROOT / "src" / "devloop" / name).read_bytes())
+            for relative, (blob, encoded) in HISTORICAL_WRAPPERS.items():
+                content = base64.b64decode(encoded, validate=True)
+                header = f"blob {len(content)}\0".encode()
+                self.assertEqual(hashlib.sha1(header + content).hexdigest(), blob)
+                target = self.candidate / "install" / "bootstrap" / "legacy" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
         return super().git(*arguments)
 
     def shell_arguments(self, language: str, source: str) -> list[str]:
@@ -114,7 +209,10 @@ exec() { "$@"; }
             return list(json.loads(result.stdout.strip()))
         return result.stdout.rstrip("\0").split("\0")
 
-    def import_release_code(self, arguments: list[str], module: str = "transaction") -> None:
+    def import_release_code(
+        self, arguments: list[str], module: str = "transaction", *,
+        bytecode_policy: str | None = None,
+    ) -> None:
         # Reuse exactly the interpreter options emitted by the shipped call;
         # replace its mutating script/module body with a source-import-only probe.
         options = []
@@ -127,6 +225,8 @@ exec() { "$@"; }
             key: value for key, value in os.environ.items()
             if not key.upper().startswith("PYTHON")
         }
+        if bytecode_policy is not None:
+            environment["PYTHONDONTWRITEBYTECODE"] = bytecode_policy
         self.validate_root()
         code_root = self.release / "install" / "bootstrap"
         script = r"""
@@ -174,6 +274,154 @@ print('source-imported')
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "source-imported")
+
+    def capture_retained_dispatch(self, language: str, command_name: str) -> dict[str, Any]:
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key.upper() not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH"}
+            and not key.startswith("BASH_FUNC_")
+        }
+        environment["PYTHONDONTWRITEBYTECODE"] = "0"
+        arguments = ["", "two words", "--plain", 'quote"value', "unicode-ü"]
+        suffix = "ps1" if language == "powershell" else "sh"
+        source = (ROOT / "install" / "bootstrap" / f"dispatch.{suffix}").read_text()
+        target = str(self.release / "install" / "bootstrap" / "legacy" / "bin"
+                     / f"{command_name}.{suffix}")
+        if language == "bash":
+            assert BASH is not None
+            call = next(line for line in source.splitlines() if 'exec bash "$TARGET"' in line)
+            # The shell process seam captures dispatch; no wrapper is sourced or run.
+            script = r"""
+set -euo pipefail
+PATH=''
+readonly PATH
+TARGET=$PROBE_TARGET
+set -- '' 'two words' '--plain' 'quote"value' 'unicode-ü'
+bash() { printf '%s\0' "$PYTHONDONTWRITEBYTECODE" "$PWD" "$@"; }
+exec() { "$@"; }
+""" + call + '\nprintf "%s\\0" "$PYTHONDONTWRITEBYTECODE" "$PWD"\n'
+            environment["PROBE_TARGET"] = target
+            result = self.real_run(
+                [BASH, "--noprofile", "--norc", "-s"], input=script,
+                cwd=self.root, env=environment, text=True, encoding="utf-8",
+                capture_output=True, check=False, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = result.stdout.rstrip("\0").split("\0")
+            self.assertEqual(values[2:-2], [target, *arguments])
+            self.assertEqual(values[-2], "0")
+            self.assertEqual(values[1], values[-1])
+            return {"bytecode_policy": values[0]}
+        assert POWERSHELL is not None
+        tail = source[source.rindex("if ($Command -in @('update', 'uninstall'))"):]
+        start = "[System.Diagnostics.Process]::Start($startInfo)"
+        self.assertLessEqual(tail.count(start), 1)
+        tail = tail.replace(start, "(Capture-Process $startInfo)")
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$env:PATH = ''
+Set-Location -LiteralPath $env:PROBE_CALLER_CWD
+$target = $env:PROBE_TARGET
+$Command = $env:PROBE_COMMAND
+$RemainingArgs = @('', 'two words', '--plain', 'quote"value', 'unicode-ü')
+$beforeEnvironment = [Environment]::GetEnvironmentVariables()
+function Capture-Process($info) {
+    $childEnvironment = @{}
+    foreach ($entry in $info.Environment.GetEnumerator()) {
+        $childEnvironment[$entry.Key] = $entry.Value
+    }
+    $capture = [ordered]@{
+        bytecode_policy = $info.Environment['PYTHONDONTWRITEBYTECODE']
+        arguments = @($info.ArgumentList)
+        cwd = $info.WorkingDirectory
+        caller_cwd = (Get-Location).ProviderPath
+        dotnet_cwd = [Environment]::CurrentDirectory
+        before_environment = $beforeEnvironment
+        after_environment = [Environment]::GetEnvironmentVariables()
+        child_environment = $childEnvironment
+        shell_execute = $info.UseShellExecute
+        redirect_input = $info.RedirectStandardInput
+        redirect_output = $info.RedirectStandardOutput
+        redirect_error = $info.RedirectStandardError
+    }
+    [Console]::WriteLine(($capture | ConvertTo-Json -Depth 6 -Compress))
+    $process = [pscustomobject]@{ ExitCode = 23 }
+    $process | Add-Member ScriptMethod WaitForExit { }
+    $process | Add-Member ScriptMethod Dispose { }
+    return $process
+}
+function pwsh {
+    $info = [System.Diagnostics.ProcessStartInfo]::new('pwsh')
+    $info.WorkingDirectory = (Get-Location).ProviderPath
+    foreach ($argument in $args) { $info.ArgumentList.Add($argument) }
+    $null = Capture-Process $info
+    $global:LASTEXITCODE = 23
+}
+""" + tail
+        caller = self.root / "empty-git-support"
+        environment.update({
+            "PROBE_TARGET": target, "PROBE_COMMAND": command_name,
+            "PROBE_CALLER_CWD": str(caller),
+        })
+        result = self.real_run(
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+             base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+            cwd=self.root, env=environment, text=True, encoding="utf-8",
+            capture_output=True, check=False, timeout=15,
+        )
+        self.assertEqual(result.returncode, 23, result.stderr)
+        value = json.loads(result.stdout.strip())
+        self.assertEqual(value["arguments"], [
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", target, *arguments,
+        ])
+        self.assertEqual(Path(value["cwd"]), caller)
+        self.assertEqual(value["cwd"], value["caller_cwd"])
+        self.assertNotEqual(value["cwd"], value["dotnet_cwd"])
+        self.assertTrue(value["before_environment"] == value["after_environment"],
+                        "caller environment changed")
+        expected_child = {**value["before_environment"],
+                          "PYTHONDONTWRITEBYTECODE": value["bytecode_policy"]}
+        self.assertTrue(value["child_environment"] == expected_child,
+                        "unexpected child environment difference")
+        for field in ("shell_execute", "redirect_input", "redirect_output", "redirect_error"):
+            self.assertFalse(value[field], field)
+        return dict(value)
+
+    def test_retained_historical_bash_wrapper_cold_start_preserves_release(self) -> None:
+        for name in ("devloop", "devloop-plan"):
+            with self.subTest(wrapper=name):
+                captured = self.capture_retained_dispatch("bash", name)
+                old = self.release / "install" / "bootstrap" / "legacy" / "bin" / f"{name}.sh"
+                call = next(line for line in old.read_text().splitlines() if " -m devloop" in line)
+                self.assertNotIn(" -B ", call)
+                arguments = self.shell_arguments("bash", call)
+                self.assertFalse(list(self.release.rglob("*.pyc")), "fixture must be cold")
+                before = self.snapshot()
+                self.import_release_code(
+                    arguments, "devloop", bytecode_policy=captured["bytecode_policy"],
+                )
+                self.assertEqual(verify.verify(self.install), self.release)
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(captured["bytecode_policy"], "1")
+
+    def test_retained_historical_powershell_wrapper_cold_start_preserves_release(self) -> None:
+        for name in ("devloop", "devloop-plan"):
+            with self.subTest(wrapper=name):
+                captured = self.capture_retained_dispatch("powershell", name)
+                old = self.release / "install" / "bootstrap" / "legacy" / "bin" / f"{name}.ps1"
+                calls = [line for line in old.read_text().splitlines() if " -m devloop" in line]
+                self.assertEqual(len(calls), 2)
+                for call in calls:
+                    self.assertNotIn(" -B ", call)
+                    arguments = self.shell_arguments("powershell", call)
+                    self.assertFalse(list(self.release.rglob("*.pyc")), "fixture must be cold")
+                    before = self.snapshot()
+                    self.import_release_code(
+                        arguments, "devloop", bytecode_policy=captured["bytecode_policy"],
+                    )
+                    self.assertEqual(verify.verify(self.install), self.release)
+                    self.assertEqual(self.snapshot(), before)
+                self.assertEqual(captured["bytecode_policy"], "1")
 
     def test_candidate_bootstrap_loading_leaves_release_verifiable(self) -> None:
         source = (ROOT / "install" / "devloop.ps1").read_text(encoding="utf-8")

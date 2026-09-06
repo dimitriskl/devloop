@@ -59,3 +59,28 @@ Covers all parent PRD user stories, with final ownership of story 100.
 ## Implementation Notes
 
 Completed: [ ]
+
+Recovery gate inventory (2026-09-06, read-only source inspection; no gate run):
+
+- `tests/test_portable_v3_release.py` covers version/metadata, dependency pins,
+  documentation terms, passive state creation and static installer properties.
+  These assertions are not the integrated multi-session release demonstration.
+- `test_supervisor_queues_third_worker_and_starts_it_after_release` in
+  `tests/test_portable_session_concurrency.py` exercises the real supervisor and
+  catalog with three disposable directories and small supplied Python worker
+  programs. It checks two running/one queued and subsequent launch order, but
+  does not itself establish actual Git worktrees, the tab UI, or public wrappers.
+- The adjacent crash-capacity test uses a supplied worker that exits 17 and
+  checks that queued work completes while the crashed session is interrupted.
+  It is scoped evidence only after an independently inspected safe execution.
+- Layout tests in `tests/test_portable_ui.py` use the headless application pilot
+  at 79x23, 80x24 and 160x40. They cover bounded resize warnings and shell layout,
+  not native console input/interrupt behavior or the full three-session scenario.
+
+Keep those evidence scopes separate when assembling the final gate. Inspect
+the remaining tests and helpers, preserve actual Git/worktree and shipped
+wrapper coverage, and obtain the required native operator evidence. Do not run
+the complete suite merely by excluding the integration marker: installer tests
+are unmarked and some helpers use repository-local or real-root targets.
+Issue 0012, historical-fixture integration and the safe execution harness remain
+prerequisites. No acceptance or completion marker is promoted by this inventory.

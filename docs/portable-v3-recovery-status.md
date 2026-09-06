@@ -1,11 +1,15 @@
 # Portable v3 recovery and release status
 
-Updated: 2026-09-05. This is a resumable work record, not release approval.
+Updated: 2026-09-06. This is a resumable work record, not release approval.
 
 ## Verified recovery checkpoint
 
 - Recovered source checkout: `E:\devloop-recovery-20260905`.
-- Recovery checkpoint: `a69baa8`; working tree was clean before this record.
+- Original recovery checkpoint: `a69baa8`.
+- Current committed repair checkpoint: `4a44144`. The earlier 17-file R02
+  checkpoint is committed; the latest seven-file Git-ownership/legacy-startup
+  repair and these recovery records are uncommitted. A commit is not
+  independent review or release approval.
 - Original `F:\devloop` contains only `.ruff_cache`; do not write there.
 - The cause of the original checkout disappearance remains unproven.
 - Issues 0001-0011 retain their earlier completion records. The recovered tree
@@ -13,6 +17,28 @@ Updated: 2026-09-05. This is a resumable work record, not release approval.
 - Issues 0012 and 0013 remain incomplete.
 
 ## Current gates
+
+Current stage (2026-09-06): fresh independent reviewer
+`issue0012_r02_deletion_boundaries_fresh_review` returned scoped PASS on the
+frozen R02 repair. It independently passed 56 distinct tests (49 existing and
+seven new probes), without skips/audit violations, and verified all seven
+frozen hashes and the exact prior baseline. Developer evidence remains 72
+distinct passing tests. Neither result certifies Issue 0012 or native release
+behavior. Fresh QA agent `issue0012_r02_final_fresh_qa` has now started; R02
+remains unchecked pending that result. Exact evidence, baselines, commands and
+hashes are in the repair checklist. These stages supersede historical
+no-review/no-developer and agent
+blocker statements below. Historical-fixture QA remains unstarted:
+`issue0012_historical_fixture_fresh_source_qa` and the latest
+`issue0012_historical_fixture_source_qa_retry` creation attempts failed with
+`agent thread limit reached`. This does not block the live R02 review stage.
+
+Separate R12 follow-up: a parent read-only source-path/write-interception probe
+confirmed the default post-run wiki writer targets the immutable release tree.
+No files were written by the probe and no full workflow ran. Fresh independent
+validation and a user decision on installed wiki storage remain pending; see
+the repair checklist. This does not expand the active R02 developer assignment
+or waive the existing default wiki behavior.
 
 - [x] Issue 0012: fresh independent review completed; FAIL with ten P1 findings
   in [the recovery review](./portable-v3-issue0012-recovery-review.md).
@@ -29,33 +55,38 @@ QA (nine tests / 15 in-memory scenarios plus five additional probes). See the
 linked review record for exact scopes and hashes. This closes three scoped
 repair findings, not Issue 0012 or any native installer release gate.
 
-## Git checkpoint blocker and next action
+## Git checkpoint status and next action
 
-All repairs and this work record are saved in the recovered E: checkout, but
-remain uncommitted. A normal, non-escalated attempt to selectively stage the
-reviewed R01 files failed with:
+The earlier repair is committed as `4a44144`, observed on 2026-09-06. Its
+inventory includes earlier repair code, regression tests and recovery records.
+The newer seven-file Git-ownership/legacy-startup delta is uncommitted and has
+a separate frozen hash table in the repair checklist. The earlier 17 hashes
+describe the previous checkpoint, not every current file. No commit was
+created by the agent during this resumed turn.
+
+Earlier, a normal non-escalated attempt to selectively stage the reviewed R01
+files failed with:
 
 ```text
 fatal: Unable to create 'E:/devloop-recovery-20260905/.git/index.lock': Permission denied
 ```
 
-The index remains empty (`git diff --cached --name-only` returned no paths).
-HEAD remains recovery checkpoint `a69baa8`. No escalation or index-file
-workaround was attempted. The active session still names `F:\devloop` as its
-writable workspace. Resume from the recovered E: checkout with Git-write
-access, verify the recorded final hashes and current diff, and selectively
-commit the reviewed repairs and work records. Do not stage unrelated concurrent
-changes. The blocked Git step does not suspend other already-authorized source
-repairs: continue those through the approved file-edit path and keep their
-implementation/review/QA states explicit until the commit can be made.
+That is a historical agent-access failure, not proof of the current Git-write
+permission. No escalation or index-file workaround was attempted, and agent
+write access has not been re-tested on this resumed turn. The active session
+still names `F:\devloop` as its writable workspace. Use the recovered E:
+checkout for continuation and verify actual access before future commits.
+Do not stage unrelated changes or infer review completion from the new commit.
 
-Next development: R02-R06 and R09-R11 (eight blocking review findings), then
-materialize the verified historical-bootstrap overlay and repair the test
-harness. Complete fresh review/QA for each repair, clean up baseline lint
-findings, and continue the full Issue 0012/0013 gate sequence. Keep both issue
-completion markers unchecked until their complete acceptance evidence exists.
+Next stages: finish fresh QA of the reviewed R02 repair; then R03-R06 and
+R09-R11. R12 requires its pending storage-location decision and a separate
+fresh implementation/review/QA sequence. Materialize and independently validate
+the reviewed historical-bootstrap overlay and repair the test harness. Resolve
+baseline lint/type findings and complete the full Issue 0012/0013 gate sequence.
+Keep both issue completion markers unchecked until their complete acceptance
+evidence exists.
 
-Current R02 checkpoint (2026-09-05): after the first independent review rejected
+Earlier R02 checkpoint (2026-09-05): after the first independent review rejected
 the initial 25-test repair for a bytecode/startup regression, a fresh developer
 completed and froze the startup rework. Its 46 focused developer tests, two-file
 Ruff/strict-mypy checks, five Bash syntax checks, five PowerShell AST checks and
@@ -74,6 +105,45 @@ new final-review agent requests still failed. Do not substitute an old agent
 context or parent-only QA for the user's required fresh-agent stage sequence.
 No final R02 review or independent QA has started, and no additional issue or
 repair completion marker was promoted.
+
+Resumed audit, 2026-09-06, turn 1: the new committed repair checkpoint and both
+baseline directories were verified, but a fresh final-review request still
+failed with the same `agent thread limit reached` response. The resumed goal
+starts a new blocked audit; this single resumed failure is not a new three-turn
+blocked determination. Final R02 review and QA remain unstarted.
+
+Resumed audit follow-up, 2026-09-06: the intervening user-requested status
+turn was no development progress, not a verified wait; the agent list showed
+only completed child agents. In the following goal continuation, a new request
+for `issue0012_r02_review_resume_sep06` again failed with
+`agent thread limit reached`. A fresh agent-list query again confirmed every
+child terminal. HEAD remains `4a44144`, all 17 frozen repair hashes match, both
+C: review baseline directories exist, and Issues 0012/0013 remain unchecked.
+The same fresh-stage blocker has persisted through the resumed checkpoint,
+status-only turn, and this continuation. There is no live review or QA handle
+to wait on. Continuation requires an external capacity/workspace change;
+do not reuse a completed agent or substitute parent-only review/QA. No code,
+test, or release acceptance progress is claimed from these status checks.
+
+Second resumed run, 2026-09-06, audit turn 1: the goal was externally resumed
+after the preceding blocked determination. Root creation of
+`issue0012_r02_review_resumed_fresh` again failed with `agent thread limit reached`.
+A coordination-only follow-up to the completed R01 reviewer attempted exactly
+one child creation with `fork_turns="none"`; it returned the same failure and
+finished without reviewing, testing, or editing anything. Neither route created
+a fresh reviewer. HEAD and all 17 repair hashes remain unchanged, and both C:
+review baselines exist. This is the first turn of this new resumed audit, not
+another completed three-turn blocked audit.
+
+The parent also retried materializing the already independently reviewed
+historical fixture, without reimplementing it or executing historical code.
+It verified the saved patch's recorded SHA-256, its exact three Add File targets,
+and plain existing destination ancestors. Applying that unchanged patch again
+failed with `Failed to create parent directories` for
+`tests/fixtures/portable_bootstrap_604/sources.json`. No shell-based directory
+creation or permission workaround was attempted. The fixture is still absent;
+fresh fixture QA and compatibility integration remain pending. The prior
+review PASS remains a review of proposed data, not installed fixture evidence.
 
 Resume with fresh-agent capacity and the recovered E: checkout selected as the
 workspace (the old session still targets F:). First assign a new independent
@@ -205,3 +275,14 @@ exact replay above. No fixture defect was found. This PASS does not change the
 actual missing-manifest RED. Fresh source-only QA, materialization, and
 integration into the existing compatibility harness remain pending. Do not
 execute the historical source as part of integrity verification.
+
+Additional source-inspection lead for the later compatibility stage
+(2026-09-06; not an executed installer failure): the existing historical test
+updates to `candidate`, rolls back, then updates from the retained old runner
+to that same `candidate` commit again. Preserve that final positive assertion.
+Both current release drivers skip activation only when the requested commit is
+the current commit. `prepare()` otherwise refuses an already-existing canonical
+release before creating a new journal. Verify the retained-release reactivation
+path explicitly when repairing the historical harness; a simple same-current
+commit reinstall does not exercise it. This is not a new certified finding,
+does not expand the active R02 repair, and was not tested through an installer.

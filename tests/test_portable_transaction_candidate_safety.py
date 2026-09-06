@@ -257,6 +257,8 @@ class CandidateSafetyTests(unittest.TestCase):
         def git_response(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess:
             self.assertEqual(arguments[:2], ["git", "-C"])
             self.assertIn(Path(arguments[2]), (self.candidate, release))
+            self.assertEqual(arguments[3], "--no-optional-locks")
+            self.assertEqual(arguments[4:6], ["-c", "diff.autoRefreshIndex=false"])
             responses = {
                 ("rev-parse", "HEAD"): COMMIT,
                 ("diff", "--quiet", "--"): "",
@@ -265,7 +267,7 @@ class CandidateSafetyTests(unittest.TestCase):
                 ("ls-files", "--stage"): index,
             }
             return subprocess.CompletedProcess(
-                arguments, 0, stdout=responses[tuple(arguments[3:])], stderr=""
+                arguments, 0, stdout=responses[tuple(arguments[6:])], stderr=""
             )
 
         self.run.side_effect = git_response
@@ -317,16 +319,39 @@ class CandidateSafetyTests(unittest.TestCase):
 
     def test_prepared_journal_recovers_with_candidate_and_canonical_release(self) -> None:
         release = self.seed_recoverable_journal("prepared")
+        git_root = self.candidate / ".git"
+        git_root.mkdir()
+        head = (COMMIT + "\n").encode()
+        (git_root / "HEAD").write_bytes(head)
+        inventory = [["HEAD", "file", hashlib.sha256(head).hexdigest()]]
+        encoded = json.dumps(inventory, ensure_ascii=True, separators=(",", ":")).encode()
+        self.write_json(self.bootstrap / f"git-ownership-{COMMIT}.json", {
+            "version": 1, "commit": COMMIT,
+            "git_fingerprint": hashlib.sha256(encoded).hexdigest().upper(),
+        })
         shutil.copytree(self.candidate, release)
         release_bytes = {
             path.relative_to(release): path.read_bytes()
             for path in release.rglob("*") if path.is_file()
         }
         source_bytes = (self.source / "source.bin").read_bytes()
-        self.assertEqual(
-            transaction.recover(self.install, TRANSACTION_ID), ("NEEDS_ADOPTION", release)
-        )
+        preserved = self.root / "preserved-duplicate-candidate"
+
+        def retain_candidate(path: Path, **kwargs: object) -> None:
+            self.assertEqual(path, self.candidate)
+            self.assertEqual(path.resolve(strict=True).parent, self.root)
+            path.rename(preserved)
+
+        with mock.patch.object(shutil, "rmtree", side_effect=retain_candidate):
+            self.assertEqual(
+                transaction.recover(self.install, TRANSACTION_ID), ("NEEDS_ADOPTION", release)
+            )
         self.assertFalse(self.candidate.exists())
+        self.assertEqual(
+            {path.relative_to(preserved): path.read_bytes()
+             for path in preserved.rglob("*") if path.is_file()},
+            release_bytes,
+        )
         self.assertEqual(
             {path.relative_to(release): path.read_bytes()
              for path in release.rglob("*") if path.is_file()},

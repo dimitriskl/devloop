@@ -16,16 +16,25 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from verify import (
+    GIT_ENTRY_DIRECTORY,
+    GIT_ENTRY_FILE,
+    GIT_OWNERSHIP_SCHEMA,
     MANIFEST_SCHEMA,
     POINTER_FIELDS,
     POINTER_SCHEMA,
     TRANSACTION_SCHEMA,
     _directory_fingerprint,
     _git,
+    _git_directory_entries,
+    _git_directory_fingerprint,
+    _git_entries_fingerprint,
+    _git_ownership_path,
     _plain,
     _plain_ancestors,
+    _read_git_ownership,
     _tracked_fingerprint,
     _validate_release_content,
+    _verify_git_ownership,
     read_pointer_state,
     verify,
     verify_pointer,
@@ -71,6 +80,14 @@ JOURNAL_FIELDS = POINTER_FIELDS | {
     "previous_previous_pointer",
 }
 OWNERSHIP_FIELDS = {"version", "transaction_id", "candidate_name", "commit"}
+GIT_REMOVAL_PROOF_SCHEMA = 1
+GIT_REMOVAL_PROOF_FIELDS = {
+    "version", "transaction_id", "install_root", "commit", "git_fingerprint", "entries",
+}
+GIT_REMOVAL_PROOF_PREFIX = "git-entries-"
+GIT_REMOVAL_PROOF_MISSING = (
+    "Git ownership removal proof missing; preserve and restore owned data"
+)
 LAYOUT_FIELDS = {"version", "assets", "legacy_backups"}
 PENDING_LAYOUT_FIELDS = LAYOUT_FIELDS | {"backups_ready", "published"}
 BOOTSTRAP_PROTOCOL = 2
@@ -703,6 +720,19 @@ def prepare(install: Path, candidate: Path, commit: str, transaction_id: str) ->
         if state.previous is not None:
             verify_pointer(install, state.previous, "previous")
         previous, previous_previous = state.current, state.previous
+    git_ownership = {
+        "version": GIT_OWNERSHIP_SCHEMA,
+        "commit": commit,
+        "git_fingerprint": _git_directory_fingerprint(candidate),
+    }
+    git_ownership_path = _git_ownership_path(install, commit)
+    _plain_ancestors(git_ownership_path, install)
+    if git_ownership_path.exists():
+        # A crash before the first journal write may leave this receipt. Never
+        # replace earlier ownership evidence with today's candidate contents.
+        _verify_git_ownership(install, candidate, required=True, commit=commit)
+    else:
+        _atomic_json(git_ownership_path, git_ownership)
     journal = {
         "version": TRANSACTION_SCHEMA,
         "transaction_id": transaction_id,
@@ -764,6 +794,9 @@ def recover(install: Path, transaction_id: str) -> tuple[str, Path | None]:
     release = install / str(journal["release_path"])
     phase = str(journal["phase"])
     candidate = Path(str(journal["candidate_path"]))
+    for location in (candidate, release):
+        if location.exists():
+            _verify_git_ownership(install, location, commit=str(journal["commit"]))
     if phase == "journaled":
         if not candidate.is_dir():
             raise RuntimeError("journaled transaction has no candidate")
@@ -802,6 +835,9 @@ def recover(install: Path, transaction_id: str) -> tuple[str, Path | None]:
         if candidate.exists() and not release.exists():
             candidate.rename(release)
         elif candidate.exists() and release.exists():
+            _verify_git_ownership(
+                install, candidate, required=True, commit=str(journal["commit"])
+            )
             shutil.rmtree(candidate, onerror=_remove_read_only)
         _validate_journal_release(install, journal)
         _write_journal(install, journal, "release_ready")
@@ -937,9 +973,11 @@ def _uninstall_plan(install: Path) -> UninstallPlan:
         if not release.is_dir() or COMMIT_PATTERN.fullmatch(release.name) is None:
             raise RuntimeError(f"unmanaged release path blocks uninstall: {release}")
         verify_release(install, release.name)
+        _verify_git_ownership(install, release, required=True)
         release_names.add(release.name)
         releases.append(release)
         manifests.append(bootstrap / f"release-{release.name}.json")
+        manifests.append(_git_ownership_path(install, release.name))
     manifest_names: set[str] = set()
     for path in bootstrap.glob("release-*.json"):
         _plain_ancestors(path, install)
@@ -1164,6 +1202,11 @@ def _read_uninstall_journal(
             target = Path(str(action.get("path"))).absolute()
             if target == install or not target.is_relative_to(install):
                 raise RuntimeError("uninstall journal action escapes the install root")
+            if kind == "remove_release" and action.get("state") != "after" and target.exists():
+                if target.parent != install / "releases":
+                    raise RuntimeError("Git ownership release path is not canonical")
+                _plain_ancestors(target, install)
+                _git_removal_proof(install, target, transaction_id, str(action.get("state")))
         elif kind == "restore_legacy":
             source = Path(str(action.get("source"))).absolute()
             target = Path(str(action.get("target"))).absolute()
@@ -1187,11 +1230,116 @@ def _read_uninstall_journal(
     return path, value
 
 
-def _execute_uninstall_action(action: dict[str, object]) -> None:
+def _git_removal_proof(
+    install: Path, release: Path, transaction_id: str, state: str,
+) -> tuple[Path, dict[str, object]]:
+    if (
+        TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is None
+        or release.parent != install / "releases"
+        or COMMIT_PATTERN.fullmatch(release.name) is None
+        or state not in {"pending", "before"}
+    ):
+        raise RuntimeError("Git ownership removal identity or state is invalid")
+    _plain_ancestors(release, install)
+    receipt = _read_git_ownership(install, release.name, required=True)
+    assert receipt is not None
+    path = _uninstall_staging(install, transaction_id) / (
+        f"{GIT_REMOVAL_PROOF_PREFIX}{release.name}.json"
+    )
+    _plain_ancestors(path, install.parent)
+    identity = {
+        "version": GIT_REMOVAL_PROOF_SCHEMA,
+        "transaction_id": transaction_id, "install_root": str(install),
+        "commit": release.name, "git_fingerprint": receipt["git_fingerprint"],
+    }
+    for location in (path, path.parent, install.parent):
+        try:
+            status = location.lstat()
+        except FileNotFoundError:
+            if location == path:
+                continue
+            raise
+        plain_kind = stat.S_ISREG if location == path else stat.S_ISDIR
+        if not plain_kind(status.st_mode) or (
+            getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RuntimeError("Git ownership removal proof requires a plain path and ancestry")
+    if path.parent.resolve(strict=True) != path.parent:
+        raise RuntimeError("Git ownership removal proof staging path is not canonical")
+    if path.exists():
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(value, dict) or set(value) != GIT_REMOVAL_PROOF_FIELDS
+            or type(value.get("version")) is not int
+            or any(value[key] != expected for key, expected in identity.items())
+        ):
+            raise RuntimeError("Git ownership removal proof has an invalid schema or identity")
+        entries = _parse_git_removal_entries(value["entries"])
+        if _git_entries_fingerprint(entries) != receipt["git_fingerprint"]:
+            raise RuntimeError("Git ownership removal proof does not match original ownership")
+        try:
+            (release / ".git").lstat()
+        except FileNotFoundError:
+            current: list[tuple[str, str, str]] = []
+        else:
+            current = _git_directory_entries(release)
+        if not set(current).issubset(entries) or (state == "pending" and current != entries):
+            raise RuntimeError("Git ownership survivors changed; release must be preserved")
+        return path, value
+    # Reconstruct an entry proof only from the exact original prepare-time hash.
+    # A partial old attempt without this proof cannot establish omitted entries.
+    try:
+        entries = _git_directory_entries(release)
+    except FileNotFoundError as error:
+        raise RuntimeError(GIT_REMOVAL_PROOF_MISSING) from error
+    if _git_entries_fingerprint(entries) != receipt["git_fingerprint"]:
+        raise RuntimeError(GIT_REMOVAL_PROOF_MISSING)
+    return path, {**identity, "entries": entries}
+
+
+def _parse_git_removal_entries(value: object) -> list[tuple[str, str, str]]:
+    if not isinstance(value, list):
+        raise RuntimeError("Git ownership removal proof entries must be a list")
+    entries: list[tuple[str, str, str]] = []
+    seen: dict[str, str] = {}
+    for entry in value:
+        if not isinstance(entry, list) or len(entry) != 3 or not all(
+            isinstance(field, str) for field in entry
+        ):
+            raise RuntimeError("Git ownership removal proof entry is invalid")
+        relative, kind, digest = entry
+        relative_path = PurePosixPath(relative)
+        if (
+            not relative or "\\" in relative or relative_path.is_absolute()
+            or relative != relative_path.as_posix() or ".." in relative_path.parts
+            or relative == "." or relative in seen
+            or kind not in {GIT_ENTRY_FILE, GIT_ENTRY_DIRECTORY}
+            or (kind == GIT_ENTRY_DIRECTORY and digest != "")
+            or (kind == GIT_ENTRY_FILE and re.fullmatch(r"[0-9a-f]{64}", digest) is None)
+        ):
+            raise RuntimeError("Git ownership removal proof entry is not canonical")
+        seen[relative] = kind
+        entries.append((relative, kind, digest))
+    if entries != sorted(entries) or any(
+        seen.get(parent.as_posix()) != GIT_ENTRY_DIRECTORY
+        for relative in seen for parent in PurePosixPath(relative).parents
+        if parent != PurePosixPath(".")
+    ):
+        raise RuntimeError("Git ownership removal proof inventory is not canonical")
+    return entries
+
+
+def _execute_uninstall_action(action: dict[str, object], transaction_id: str) -> None:
     kind = action["kind"]
     if kind == "remove_release":
         path = Path(str(action["path"]))
         if path.exists():
+            _plain_ancestors(path, path.parent.parent)
+            proof_path, _ = _git_removal_proof(
+                path.parent.parent, path, transaction_id, str(action["state"])
+            )
+            if not proof_path.is_file():
+                raise RuntimeError("Git ownership removal proof must be durable before deletion")
             shutil.rmtree(path, onerror=_remove_read_only)
     elif kind in {"remove_manifest", "remove_pointer", "remove_asset", "remove_metadata"}:
         path = Path(str(action["path"]))
@@ -1280,11 +1428,19 @@ def uninstall(
                 pass
             os._exit(95)
         action_id = str(raw_action["id"])
+        if raw_action["kind"] == "remove_release":
+            release = Path(str(raw_action["path"]))
+            if release.exists():
+                proof_path, proof = _git_removal_proof(
+                    install, release, transaction_id, str(raw_action["state"])
+                )
+                if not proof_path.exists():
+                    _atomic_json(proof_path, proof)
         raw_action["state"] = "before"
         _write_uninstall_journal(journal_path, journal)
         _uninstall_interrupt(action_id, "before")
         try:
-            _execute_uninstall_action(raw_action)
+            _execute_uninstall_action(raw_action, transaction_id)
         except OSError as error:
             if raw_action["kind"] != "cleanup_capability":
                 raise
