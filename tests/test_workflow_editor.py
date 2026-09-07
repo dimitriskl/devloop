@@ -2830,7 +2830,8 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         self.assertEqual(verifier.calls, [])
         menu = recorder.menu("Model · Claude Code")
         offered = dict(menu.options)
-        self.assertIn("claude-opus-5", offered["1"])
+        self.assertIn("claude-fable-5-1", offered["1"])
+        self.assertIn("claude-opus-5", offered["2"])
         self.assertTrue(
             any("(alias)" in label for label in offered.values()),
             offered,
@@ -2888,7 +2889,7 @@ class WorkflowEditorFlowTests(unittest.TestCase):
         component_catalog = default_portable_component_catalog()
         refusal = "Invalid model name: made-up-model"
         verifier = _RecordingVerifier(refusals={"claude-opus-5": refusal})
-        recorder = _MenuRecorder({"Model · Claude Code": "1"})
+        recorder = _MenuRecorder({"Model · Claude Code": "2"})
         with tempfile.TemporaryDirectory() as raw:
             configuration_path = _claude_backed_default(raw, component_catalog)
             output: list[str] = []

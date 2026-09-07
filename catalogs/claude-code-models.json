@@ -4,6 +4,11 @@
   "accepts_free_text_model": true,
   "models": [
     {
+      "model_id": "claude-fable-5-1",
+      "display_name": "Claude Fable 5.1",
+      "description": "Most capable; the hardest reasoning and longest-horizon agentic work, priced above Opus."
+    },
+    {
       "model_id": "claude-opus-5",
       "display_name": "Claude Opus 5",
       "description": "Deepest reasoning; long-horizon agentic and coding work."

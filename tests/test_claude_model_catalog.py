@@ -114,6 +114,19 @@ class BundledClaudeCatalogTests(unittest.TestCase):
             with self.subTest(model=model.model_id):
                 self.assertTrue(model.model_id.startswith("claude-"))
 
+    def test_the_bundled_catalog_lists_fable_first_among_the_pinned_models(self) -> None:
+        """Most capable first: Claude Fable 5.1 leads Opus, Sonnet, and Haiku."""
+        catalog = load_bundled_model_catalog(BUNDLED_CATALOG, fetched_at=FETCHED_AT)
+
+        pinned = [model.model_id for model in catalog.models if not model.is_alias]
+
+        self.assertEqual(pinned[0], "claude-fable-5-1")
+        self.assertIn("claude-opus-5", pinned)
+        fable = catalog.selectable_model("claude-fable-5-1")
+        self.assertEqual(fable.display_name, "Claude Fable 5.1")
+        self.assertFalse(fable.is_alias)
+        self.assertEqual(fable.reasoning_efforts, catalog.reasoning_efforts)
+
     def test_every_entry_advertises_only_provider_supported_efforts(self) -> None:
         catalog = load_bundled_model_catalog(BUNDLED_CATALOG, fetched_at=FETCHED_AT)
 

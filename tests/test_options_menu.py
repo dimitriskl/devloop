@@ -13,6 +13,7 @@ from test_workflow_editor import (
     _RecordingVerifier,
 )
 
+from devloop.cli_ui import format_menu_entry
 from devloop.model_catalog import CatalogDiscoveryError, ModelCatalog
 from devloop.portable_execution_backend import ExecutionBackendId
 from devloop.portable_workflow import (
@@ -203,7 +204,7 @@ class OptionsMenuClaudeTests(unittest.TestCase):
             path = Path(raw) / "devloop-plan.json"
             output: list[str] = []
             # roles, Analysis, Claude Code, Claude Sonnet 5, high, back, Save, Exit
-            editor = FakeEditor(["1", "1", "2", "2", "3", "0", "2", "0"])
+            editor = FakeEditor(["1", "1", "2", "3", "3", "0", "2", "0"])
 
             result = run_options_menu_editor(
                 path,
@@ -232,7 +233,8 @@ class OptionsMenuClaudeTests(unittest.TestCase):
             [(ExecutionBackendId.CLAUDE_CODE, "claude-sonnet-5")],
         )
         self.assertIn("Model for Analysis — Claude Code", rendered)
-        self.assertIn("2. Claude Sonnet 5 — claude-sonnet-5", rendered)
+        self.assertIn("1. Claude Fable 5.1 — claude-fable-5-1", rendered)
+        self.assertIn("3. Claude Sonnet 5 — claude-sonnet-5", rendered)
         self.assertRegex(rendered, r"1\. Analysis\s+claude-sonnet-5 / high\s+Claude Code")
 
     def test_refused_claude_model_is_reported_and_the_step_stays_unchanged(
@@ -244,7 +246,7 @@ class OptionsMenuClaudeTests(unittest.TestCase):
             output: list[str] = []
             # roles, Analysis, Claude Code, Sonnet, high -> refused, then 0 back
             # through model, backend, roles, top
-            editor = FakeEditor(["1", "1", "2", "2", "3", "0", "0", "0", "0"])
+            editor = FakeEditor(["1", "1", "2", "3", "3", "0", "0", "0", "0"])
 
             result = run_options_menu_editor(
                 path,
@@ -273,7 +275,7 @@ class OptionsMenuClaudeTests(unittest.TestCase):
             path = Path(raw) / "devloop-plan.json"
             output: list[str] = []
             # roles, Analysis, Claude Code, Opus (latest) alias, high, back, Save, Exit
-            editor = FakeEditor(["1", "1", "2", "4", "3", "0", "2", "0"])
+            editor = FakeEditor(["1", "1", "2", "5", "3", "0", "2", "0"])
 
             result = run_options_menu_editor(
                 path,
@@ -409,7 +411,7 @@ class OptionsMenuRecoveryTests(unittest.TestCase):
 
 
 class OptionsMenuApplicationModeTests(unittest.TestCase):
-    def test_application_menus_carry_numbers_in_labels_and_zero_as_cancel(self) -> None:
+    def test_application_menus_carry_bare_labels_and_zero_as_cancel(self) -> None:
         menus: list[SelectionMenu] = []
         answers = iter(["1", "0", "0"])
 
@@ -433,13 +435,45 @@ class OptionsMenuApplicationModeTests(unittest.TestCase):
         self.assertEqual(top.title, "Dev Loop Options")
         self.assertEqual(
             top.options,
-            (("1", "1. Models per role"), ("2", "2. Save"), ("0", "0. Exit")),
+            (("1", "Models per role"), ("2", "Save"), ("0", "Exit")),
         )
         self.assertEqual(top.cancel_key, "0")
         self.assertEqual(roles.title, "Models per role")
         self.assertEqual([key for key, _ in roles.options], ["1", "2", "3", "4", "5", "0"])
-        self.assertTrue(roles.options[0][1].startswith("1. Analysis"))
-        self.assertEqual(roles.options[-1], ("0", "0. Back"))
+        self.assertTrue(roles.options[0][1].startswith("Analysis"))
+        self.assertEqual(roles.options[-1], ("0", "Back"))
+
+    def test_application_menu_labels_carry_no_number_of_their_own(self) -> None:
+        """The application renderer prefixes each key, so a numbered label doubles it.
+
+        Regression: the Models per role screen once showed `1. 1. Analysis …`
+        because the label repeated the key that `format_menu_entry` already prints.
+        """
+        menus: list[SelectionMenu] = []
+        answers = iter(["1", "0", "0"])
+
+        def select(menu: SelectionMenu) -> str:
+            menus.append(menu)
+            return next(answers)
+
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "devloop-plan.json"
+            run_options_menu_editor(
+                path,
+                read_line=FakeEditor([]).read_line,
+                write=lambda _line: None,
+                terminal_width=120,
+                select_option=select,
+            )
+
+        self.assertEqual(len(menus), 3)
+        for menu in menus:
+            for key, label in menu.options:
+                with self.subTest(menu=menu.title, key=key):
+                    self.assertNotRegex(label, r"^\d+\. ")
+                    self.assertNotRegex(format_menu_entry(key, label), r"\d+\. \d+\. ")
+        self.assertEqual(format_menu_entry("1", menus[0].options[0][1]), "  1. Models per role")
+        self.assertRegex(format_menu_entry("1", menus[1].options[0][1]), r"^  1\. Analysis\s")
 
 
 def _default_with_fast_on(path: Path) -> None:

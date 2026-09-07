@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Dev Loop Options screens no longer show each number twice (`1. 1. Analysis`)
+  in the arrow-key menu. The labels carried their own number while the menu
+  renderer already prints the key; labels are now bare and plain mode still
+  prints the numbered list.
+- The bundled Claude Code Model Catalog now offers Claude Fable 5.1
+  (`claude-fable-5-1`) as its first pinned entry, ahead of Opus 5, Sonnet 5, and
+  Haiku 4.5.
 - `devloop options` (also `devloop /options`) opens Dev Loop Options directly
   from the `devloop` command, without a PRD or a run. Until now the numbered
   Models per role menu was reachable from `devloop` only through the

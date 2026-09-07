@@ -1482,18 +1482,20 @@ class _WorkflowEditorSession:
     ) -> int | None:
         """One numbered screen: the chosen one-based position, or None for 0.
 
-        Both surfaces show the same numbers. The application menu carries them
-        in its labels and accepts a typed digit; plain mode prints the list and
-        reads the digit. Anything else re-prompts, so a stray key cannot pick.
+        Both surfaces show the same numbers, each from the option key. The
+        application menu renders `key. label` itself and accepts a typed digit,
+        so its labels stay bare or the number would appear twice; plain mode
+        prints the numbered list here and reads the digit. Anything else
+        re-prompts, so a stray key cannot pick.
         """
         options = (
-            *((str(index), f"{index}. {row}") for index, row in enumerate(rows, start=1)),
-            ("0", f"0. {back_label}"),
+            *((str(index), row) for index, row in enumerate(rows, start=1)),
+            ("0", back_label),
         )
         width = max(1, self._terminal_width)
         rendered = "\n".join(
             _fit_to_width(line, width)
-            for line in (title, *description, *(label for _key, label in options))
+            for line in (title, *description, *(f"{key}. {label}" for key, label in options))
         )
         while True:
             raw = self._choose_menu(
