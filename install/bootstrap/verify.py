@@ -39,6 +39,14 @@ GIT_OWNERSHIP_FIELDS = {"version", "commit", "git_fingerprint"}
 GIT_OWNERSHIP_SCHEMA = 1
 GIT_ENTRY_FILE = "file"
 GIT_ENTRY_DIRECTORY = "directory"
+# Repository-local selectors reported by Git's rev-parse --local-env-vars.
+# Config injection variables can introduce selectors without naming them directly.
+GIT_LOCAL_ENVIRONMENT = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
+    "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR", "GIT_ATTR_SOURCE",
+})
 
 
 @dataclass(frozen=True)
@@ -83,15 +91,63 @@ def _directory_fingerprint(root: Path) -> str:
     return hashlib.sha256("\n".join(entries).encode()).hexdigest().upper()
 
 
-def _git(root: Path, *args: str) -> str:
+def _git_environment() -> dict[str, str]:
+    return {
+        key: value for key, value in os.environ.items()
+        if key.upper() not in GIT_LOCAL_ENVIRONMENT
+        and not key.upper().startswith("GIT_CONFIG")
+    }
+
+
+def _run_git(root: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(root), "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=_git_environment(),
     )
     if result.returncode:
         detail = result.stderr.strip() or f"exit {result.returncode}"
         raise RuntimeError(f"git {' '.join(args)} validation failed: {detail}")
     return result.stdout
+
+
+def _validate_git_scope(root: Path) -> None:
+    root = root.absolute()
+    _plain_ancestors(root / ".git", Path(root.anchor))
+    if not (root / ".git").is_dir():
+        raise RuntimeError("Git scope requires a private .git directory")
+    paths = _run_git(
+        root, "rev-parse", "--path-format=absolute", "--show-toplevel",
+        "--absolute-git-dir", "--git-common-dir", "--git-path", "index",
+    ).splitlines()
+    expected = (root, root / ".git", root / ".git", root / ".git" / "index")
+    if len(paths) != len(expected):
+        raise RuntimeError("Git scope did not report all repository paths")
+    for value, owned in zip(paths, expected, strict=True):
+        actual = Path(value)
+        if not actual.is_absolute() or actual.resolve() != owned:
+            raise RuntimeError("Git scope escapes the private checkout")
+        _plain_ancestors(owned, root)
+
+
+def _git(root: Path, *args: str) -> str:
+    _validate_git_scope(root)
+    return _run_git(root, *args)
+
+
+def validate_bootstrap_source(root: Path) -> None:
+    """Check the staged checkout and every installer-owned bootstrap input."""
+    _git(root, "diff", "--quiet", "--")
+    _git(root, "diff", "--cached", "--quiet", "--")
+    _validate_release_content(root)
+    # Import only after checking the downloaded tracked tree; -B is required by callers.
+    from transaction import ASSETS
+
+    for relative in ("transaction.py", "verify.py", *(source for source, _ in ASSETS)):
+        path = root / "install" / "bootstrap" / relative
+        _plain_ancestors(path, root)
+        if not path.is_file():
+            raise RuntimeError(f"bootstrap source asset is missing: {relative}")
+        _git(root, "ls-files", "--error-unmatch", "--", path.relative_to(root).as_posix())
 
 
 def _tracked_fingerprint(root: Path) -> str:
@@ -311,7 +367,9 @@ def select_update_driver(install_root: Path) -> Path:
     current_manifest = _json(
         install_root / "bootstrap" / f"release-{state.current['commit']}.json"
     )
-    if not (set(current_manifest) == LEGACY_POINTER_FIELDS and current_manifest.get("version") == 1):
+    if not (
+        set(current_manifest) == LEGACY_POINTER_FIELDS and current_manifest.get("version") == 1
+    ):
         return current
     if state.previous is None:
         raise RuntimeError("no release driver supports the stable bootstrap protocol")
@@ -327,6 +385,9 @@ def select_update_driver(install_root: Path) -> Path:
 if __name__ == "__main__":
     try:
         root = Path(sys.argv[1]).resolve(strict=True)
+        if len(sys.argv) > 2 and sys.argv[2] == "--bootstrap-source":
+            validate_bootstrap_source(root)
+            raise SystemExit(0)
         if len(sys.argv) > 2 and sys.argv[2] == "--update-driver":
             release = select_update_driver(root)
         else:

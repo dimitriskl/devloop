@@ -91,7 +91,7 @@ def build_identity(
     if status:
         raise ValueError("Verification evidence requires a clean tracked implementation.")
     probe_hash = hashlib.sha256(
-        f"{BACKEND_PROBE_VERSION}\0{WORKSPACE_PROBE_VERSION}".encode("utf-8")
+        f"{BACKEND_PROBE_VERSION}\0{WORKSPACE_PROBE_VERSION}".encode()
     ).hexdigest()
     artifact_hashes = tuple(
         f"{item.name}:{hashlib.sha256(item.read_bytes()).hexdigest()}"

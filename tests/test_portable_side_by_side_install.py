@@ -5,14 +5,26 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 import uuid
 from pathlib import Path
 
-from devloop.portable_session_catalog import PortableSessionCatalog
+from portable_test_support import (
+    OperatorInstallTestCase,
+    copy_current_source,
+    create_source_repository,
+    fixture_environment,
+    require_fixture_path,
+)
+from portable_test_support import (
+    git as _git,
+)
+from portable_test_support import (
+    workspace_directory as _workspace_temporary_directory,
+)
 
+from devloop.portable_session_catalog import PortableSessionCatalog
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install" / "devloop.ps1"
@@ -20,7 +32,7 @@ GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
 
 
 @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is required")
-class PortableSideBySideInstallTests(unittest.TestCase):
+class PortableSideBySideInstallTests(OperatorInstallTestCase):
     def test_versioned_bootstrap_lock_rejects_live_owner_and_wrong_transaction(self) -> None:
         with _workspace_temporary_directory() as directory:
             root = Path(directory)
@@ -40,6 +52,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            self.addCleanup(_stop_holder, holder)
             assert holder.stdout is not None
             transaction_id = holder.stdout.readline().strip()
             self.assertRegex(transaction_id, r"^[0-9a-f-]{36}$")
@@ -404,28 +417,14 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertEqual(migrated["previous"], current)
             self.assertFalse((install_root / "bootstrap" / "previous.json").exists())
 
-    def test_exact_604_bootstrap_updates_to_v2_then_old_release_rolls_back_and_updates(
+    def test_604_overlay_with_current_support_updates_v2_rolls_back_and_reuses_candidate(
         self,
     ) -> None:
         with _workspace_temporary_directory() as directory:
             root = Path(directory)
-            old_remote = root / "release-604"
-            cloned = subprocess.run(
-                ["git", "clone", "--quiet", "--shared", "--no-checkout", str(ROOT), str(old_remote)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(cloned.returncode, 0, cloned.stderr)
-            old_snapshot = "6048556f0f279cb54f4d1afa00f764227049eb8f"
-            _git(old_remote, "checkout", "--detach", old_snapshot)
-            _git(old_remote, "config", "user.email", "devloop@example.invalid")
-            _git(old_remote, "config", "user.name", "Dev Loop Tests")
-            (old_remote / "src" / "textual.py").write_text(
-                '__version__ = "8.2.8"\n', encoding="utf-8"
-            )
-            _git(old_remote, "add", "src/textual.py")
-            _git(old_remote, "commit", "-m", "604 runtime fixture")
+            # Only the frozen 18 bootstrap files are historical. Everything else is
+            # explicitly inventoried current-checkout support and a Textual version stub.
+            old_remote = create_source_repository(root, historical=True)
             old_commit = _git(old_remote, "rev-parse", "HEAD")
             remote = _release_repository(root)
             candidate_commit = _git(remote, "rev-parse", "candidate^{commit}")
@@ -456,6 +455,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             )
             self.assertEqual(updated.returncode, 0, updated.stderr or updated.stdout)
             self.assertEqual(_pointer(install_root)["commit"], candidate_commit)
+            retained_candidate = dict(_pointer(install_root))
             migrated_layout = json.loads(
                 (install_root / "bootstrap" / "layout.json").read_text(encoding="utf-8")
             )
@@ -474,6 +474,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
                 rolled_back.returncode, 0, rolled_back.stderr or rolled_back.stdout
             )
             self.assertEqual(_pointer(install_root)["commit"], old_commit)
+            self.assertTrue((install_root / retained_candidate["release_path"]).is_dir())
 
             updated_from_old_release = _run_installer(
                 stable_driver, install_root, remote, "candidate", environment
@@ -484,17 +485,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
                 updated_from_old_release.stderr or updated_from_old_release.stdout,
             )
             self.assertEqual(_pointer(install_root)["commit"], candidate_commit)
-
-    def test_release_driver_contains_no_pointer_manifest_or_journal_codec(self) -> None:
-        windows = (ROOT / "install" / "devloop.ps1").read_text(encoding="utf-8")
-        posix = (ROOT / "install" / "devloop.sh").read_text(encoding="utf-8")
-        for driver in (windows, posix):
-            self.assertNotIn("Write-DurableJson", driver)
-            self.assertNotIn("previous_pointer", driver)
-            self.assertNotIn("tracked_fingerprint", driver)
-            self.assertNotIn("release-<commit>", driver)
-            self.assertIn("--protocol", driver)
-            self.assertIn("bootstrap/transaction.py", driver.replace("\\", "/"))
+            self.assertEqual(_pointer(install_root), retained_candidate)
 
     @unittest.skipUnless(GIT_BASH.is_file(), "Git Bash is required")
     def test_posix_fresh_install_and_installed_update_use_the_same_layout(self) -> None:
@@ -643,13 +634,11 @@ class PortableSideBySideInstallTests(unittest.TestCase):
     def test_legacy_dirty_checkout_is_preserved_and_managed_entrypoints_are_restorable(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "legacy"
-            subprocess.run(
-                ["git", "clone", str(remote), str(install_root)], check=True, capture_output=True
-            )
+            _git(remote, "clone", "--no-local", "--", str(remote), str(install_root))
             tracked = install_root / "release-marker"
             tracked.write_bytes(b"operator tracked edit\r\n\x00\xff")
             custom_launcher = install_root / "bin" / "devloop.ps1"
@@ -706,7 +695,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             "switched",
             "committed",
         ):
-            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(phase=phase), _workspace_temporary_directory() as directory:
                 root = Path(directory)
                 remote = _release_repository(root)
                 install_root = root / "bundle"
@@ -762,7 +751,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
                 self.assertFalse(tuple((install_root / "bootstrap").glob("candidate-*.json")))
 
     def test_corrupt_current_pointer_fails_closed_without_touching_victim(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -841,7 +830,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             )
 
     def test_capability_failure_is_postcommit_and_nonfatal(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -866,7 +855,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             )
 
     def test_uninstall_commits_core_before_nonfatal_capability_cleanup(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             capability_source = ROOT / "skills" / "codex" / "implement" / "SKILL.md"
@@ -925,7 +914,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertIn("capability cleanup warning", uninstall.stderr)
 
     def test_power_loss_after_core_uninstall_leaves_external_cleanup_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             capability_source = ROOT / "skills" / "codex" / "implement" / "SKILL.md"
@@ -980,7 +969,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertTrue(tuple(root.glob(".bundle.uninstall-*")))
 
     def test_failed_adoption_keeps_old_pointer_and_retry_records_one_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1031,7 +1020,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertEqual(len(catalog.list_adoption_receipts()), 1)
 
     def test_tampered_journal_candidate_path_is_retained_without_victim_access(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1132,8 +1121,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
         with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = root / "bootstrap-fixture"
-            shutil.copytree(ROOT / "install" / "bootstrap", remote / "install" / "bootstrap")
-            shutil.copy2(ROOT / "portable-release.json", remote / "portable-release.json")
+            copy_current_source(remote, ("install/bootstrap", "portable-release.json"))
             _git(remote, "init")
             _git(remote, "config", "user.email", "devloop@example.invalid")
             _git(remote, "config", "user.name", "Dev Loop Tests")
@@ -1254,7 +1242,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
                     self.assertFalse((install_root / "bootstrap" / "layout.pending.json").exists())
 
     def test_failed_prepared_validation_retains_candidate_and_journal(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1276,7 +1264,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertTrue(Path(journal["candidate_path"]).is_dir())
 
     def test_bootstrap_and_transaction_compatibility_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1336,7 +1324,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertEqual(_pointer(install_root), old_pointer)
 
     def test_uninstall_rejects_tampered_retained_release_before_deleting_any(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1382,7 +1370,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             )
 
     def test_uninstall_rejects_layout_escape_before_deleting_any_release(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1425,7 +1413,7 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             )
 
     def test_rollback_exchanges_current_and_previous_in_one_pointer_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "bundle"
@@ -1460,15 +1448,11 @@ class PortableSideBySideInstallTests(unittest.TestCase):
             self.assertFalse((install_root / "bootstrap" / "previous.json").exists())
 
     def test_interrupted_legacy_backup_is_not_overwritten_on_retry(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with _workspace_temporary_directory() as directory:
             root = Path(directory)
             remote = _release_repository(root)
             install_root = root / "legacy"
-            subprocess.run(
-                ["git", "clone", str(remote), str(install_root)],
-                check=True,
-                capture_output=True,
-            )
+            _git(remote, "clone", "--no-local", "--", str(remote), str(install_root))
             launcher = install_root / "bin" / "devloop.ps1"
             launcher.write_bytes(b"original operator launcher\r\n\x00")
             environment = _environment(root)
@@ -1488,6 +1472,25 @@ class PortableSideBySideInstallTests(unittest.TestCase):
                 (install_root / "bootstrap" / "legacy-assets" / "bin" / "devloop.ps1").read_bytes(),
                 b"original operator launcher\r\n\x00",
             )
+
+
+class PortableReleaseDriverSourceTests(unittest.TestCase):
+    def test_release_driver_contains_no_pointer_manifest_or_journal_codec(self) -> None:
+        windows = (ROOT / "install" / "devloop.ps1").read_text(encoding="utf-8")
+        posix = (ROOT / "install" / "devloop.sh").read_text(encoding="utf-8")
+        for driver in (windows, posix):
+            self.assertNotIn("Write-DurableJson", driver)
+            self.assertNotIn("previous_pointer", driver)
+            self.assertNotIn("tracked_fingerprint", driver)
+            self.assertNotIn("release-<commit>", driver)
+            self.assertIn("--protocol", driver)
+            self.assertIn("bootstrap/transaction.py", driver.replace("\\", "/"))
+
+
+def _stop_holder(holder: subprocess.Popen[str]) -> None:
+    if holder.poll() is None:
+        holder.terminate()
+    holder.communicate(timeout=10)
 
 
 def _pointer(install_root: Path) -> dict[str, object]:
@@ -1541,12 +1544,6 @@ def _run_transaction_uninstall(
     )
 
 
-def _workspace_temporary_directory() -> tempfile.TemporaryDirectory[str]:
-    temporary_root = ROOT / "tmp"
-    temporary_root.mkdir(exist_ok=True)
-    return tempfile.TemporaryDirectory(dir=temporary_root)
-
-
 def _run_installer(
     script: Path,
     install_root: Path,
@@ -1558,6 +1555,8 @@ def _run_installer(
     rollback: bool = False,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess[str]:
+    require_fixture_path(install_root)
+    require_fixture_path(remote)
     arguments = [
         "pwsh",
         "-NoProfile",
@@ -1596,6 +1595,8 @@ def _run_posix_installer(
     *,
     rollback: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    require_fixture_path(install_root)
+    require_fixture_path(remote)
     arguments = [
         str(GIT_BASH),
         _git_bash_path(script),
@@ -1623,13 +1624,7 @@ def _run_posix_installer(
 
 
 def _release_repository(root: Path) -> Path:
-    remote = root / "remote"
-    remote.mkdir()
-    for name in ("src", "bin", "install"):
-        shutil.copytree(ROOT / name, remote / name)
-    for name in (".gitignore", "portable-release.json", "requirements-portable.lock"):
-        shutil.copy2(ROOT / name, remote / name)
-    (remote / "src" / "textual.py").write_text('__version__ = "8.2.8"\n', encoding="utf-8")
+    remote = create_source_repository(root)
     (remote / "release-marker").write_text("previous\n", encoding="utf-8")
     _git(remote, "init")
     _git(remote, "config", "user.email", "devloop@example.invalid")
@@ -1664,34 +1659,10 @@ def _release_repository(root: Path) -> Path:
 
 
 def _environment(root: Path) -> dict[str, str]:
-    tools = root / "tools"
-    tools.mkdir()
-    (tools / "python.cmd").write_text(f'@echo off\r\n"{sys.executable}" %*\r\n', encoding="ascii")
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "PATH": f"{tools}{os.pathsep}{environment['PATH']}",
-            "DEVLOOP_TESTING": "1",
-            "LOCALAPPDATA": str(root / "state"),
-            "APPDATA": str(root / "configuration"),
-        }
-    )
-    return environment
+    return fixture_environment(root)
 
 
 def _git_bash_path(path: Path) -> str:
     drive = path.drive.rstrip(":").lower()
     suffix = path.as_posix()[len(path.drive) :]
     return f"/{drive}{suffix}"
-
-
-def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode:
-        raise AssertionError(result.stderr)
-    return result.stdout.strip()

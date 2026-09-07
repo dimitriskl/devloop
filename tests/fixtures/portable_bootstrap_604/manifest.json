@@ -1,0 +1,1239 @@
+{
+  "fixture_format": 1,
+  "scope": "historical-bootstrap-overlay",
+  "historical_commit": "6048556f0f279cb54f4d1afa00f764227049eb8f",
+  "historical_commit_available": false,
+  "full_historical_tree": false,
+  "base_commit": "5d1d13ad6e20c0f587752d3b03267dbe15355afe",
+  "final_staging_timestamp": "2026-09-04T18:22:49.111Z",
+  "amend_completed_timestamp": "2026-09-04T18:23:08.091Z",
+  "source_encoding": "utf-8",
+  "source_newlines": "LF",
+  "source_storage": "sources.json values, decoded then encoded as UTF-8 without newline translation",
+  "non_bootstrap_test_support": "Current checkout; not part of this historical fixture.",
+  "author_log": {
+    "filename": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+    "sha256": "8ecf99638ea3ca839a43d82de43224a7b02646e6f99fc8eb957a0ad646598002",
+    "formatting_lines": [
+      520,
+      521
+    ],
+    "blob_anchor_line": 974,
+    "staging_lines": [
+      1060,
+      1061,
+      1064,
+      1065
+    ],
+    "commit_lines": [
+      1068,
+      1069,
+      1072,
+      1073
+    ]
+  },
+  "patch_events": {
+    "filename": "patch-events.json",
+    "sha256": "d48e38ea16c830281e7e6898eac676343587edc09b336b2c095893c550b9b15f",
+    "applied_file_records": 142,
+    "replay_failures": 0
+  },
+  "formatting": [
+    {
+      "path": "install/bootstrap/verify.py",
+      "timestamp": "2026-09-04T17:36:32.923Z",
+      "tool": "ruff 0.14.1",
+      "operation": "check --fix --select I",
+      "source_lines": [
+        520,
+        521
+      ],
+      "before_git_blob_sha1": "9b5b8d29eadf25306cf38b6b2af4df4d9c1f5e98",
+      "after_git_blob_sha1": "35992b26b7dc24d17f50341e3ea5cf5633645eeb",
+      "change": "Remove one blank line in the import block."
+    },
+    {
+      "path": "install/bootstrap/transaction.py",
+      "timestamp": "2026-09-04T17:36:32.923Z",
+      "tool": "ruff 0.14.1",
+      "operation": "check --fix --select I",
+      "source_lines": [
+        520,
+        521
+      ],
+      "before_git_blob_sha1": "7e628d9f52409eb5f241f798056a54257e353592",
+      "after_git_blob_sha1": "b96270121481a273acaca744858e1740b72a51a4",
+      "change": "Remove one blank line in the import block."
+    }
+  ],
+  "excluded_later_formatting": [
+    "2026-09-04T19:15:45Z",
+    "2026-09-04T20:05:51Z"
+  ],
+  "historical_blob_anchors": {
+    "install/bootstrap/install/devloop.ps1": {
+      "recorded_git_blob_prefix": "ff54387",
+      "reconstructed_git_blob_sha1": "ff543870efc07a30a1533f4be75325f353ec5634",
+      "recorded_mode": "100644",
+      "source_line": 974
+    },
+    "install/bootstrap/transaction.py": {
+      "recorded_git_blob_prefix": "796ebec",
+      "reconstructed_git_blob_sha1": "796ebecf10db980f37b822832506d2bd82ba06f7",
+      "recorded_mode": "100644",
+      "source_line": 974
+    },
+    "install/devloop.ps1": {
+      "recorded_git_blob_prefix": "dfe87df",
+      "reconstructed_git_blob_sha1": "dfe87df637d93808d5082879cb8da074fcf06204",
+      "recorded_mode": "100644",
+      "source_line": 974
+    },
+    "install/devloop.sh": {
+      "recorded_git_blob_prefix": "021dd03",
+      "reconstructed_git_blob_sha1": "021dd03262d8e36bdffcb3b29b51621dca5c5ffd",
+      "recorded_mode": "100755",
+      "source_line": 974
+    }
+  },
+  "files": {
+    "install/bootstrap/bin/devloop-plan.ps1": {
+      "bytes": 305,
+      "sha256": "2afbc4da122e5c50262884ba4aa27d62eeaf517f3a15d3d9c432a8630e8f1188",
+      "git_blob_sha1": "dc4ce81bb1cf16c469befed0f6e2c651140eaa6a",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/bin/devloop-plan.ps1",
+          "timestamp": "2026-09-04T16:59:44.735Z",
+          "call_id": "exec-dc1bf462-5ff6-44e6-8280-d1eb3a8621cb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/bin/devloop-plan.ps1",
+          "timestamp": "2026-09-04T17:06:15.784Z",
+          "call_id": "exec-d7e903ea-7565-46c2-a8bd-86d8067fb23f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/bin/devloop-plan.ps1",
+          "timestamp": "2026-09-04T17:07:22.036Z",
+          "call_id": "exec-7d95afdc-dc45-407c-90ce-b744df0f8958",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/bin/devloop-plan.sh": {
+      "bytes": 171,
+      "sha256": "c78e8091753642fa93b01c7471e83eccb807b1a959fb0325bf3929bb34fa0154",
+      "git_blob_sha1": "9c71bfee0091eff23e17c62fb24e3ba8a18a5cf3",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/bin/devloop-plan.sh",
+          "timestamp": "2026-09-04T17:12:16.259Z",
+          "call_id": "exec-ac4d363f-5473-4834-b21d-418f67bf0727",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        }
+      ]
+    },
+    "install/bootstrap/bin/devloop.ps1": {
+      "bytes": 300,
+      "sha256": "a146df78906446e13b733223d9d9eb1b35f05c21acf4b72c51b93507671da6f4",
+      "git_blob_sha1": "911c13afbf36580d1fe39947939233d7c41557ad",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/bin/devloop.ps1",
+          "timestamp": "2026-09-04T16:59:44.735Z",
+          "call_id": "exec-dc1bf462-5ff6-44e6-8280-d1eb3a8621cb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/bin/devloop.ps1",
+          "timestamp": "2026-09-04T17:06:15.784Z",
+          "call_id": "exec-d7e903ea-7565-46c2-a8bd-86d8067fb23f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/bin/devloop.ps1",
+          "timestamp": "2026-09-04T17:07:22.036Z",
+          "call_id": "exec-7d95afdc-dc45-407c-90ce-b744df0f8958",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/bin/devloop.sh": {
+      "bytes": 166,
+      "sha256": "424d53c1ee999550cf289193c2f5b6807955d566a24d57457376b34cf8474eaf",
+      "git_blob_sha1": "190a24b17e0b93d8ff10c3e8014a3a311a18631d",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/bin/devloop.sh",
+          "timestamp": "2026-09-04T17:12:16.259Z",
+          "call_id": "exec-ac4d363f-5473-4834-b21d-418f67bf0727",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        }
+      ]
+    },
+    "install/bootstrap/dispatch.ps1": {
+      "bytes": 6456,
+      "sha256": "bfab0740b22a60047f821a27a955de12f0eb0e48c10b0edf91bc4a7e3c0041eb",
+      "git_blob_sha1": "a7eb4a35b9d89888f3ad5f61807720797314a870",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/dispatch.ps1",
+          "timestamp": "2026-09-04T16:59:44.735Z",
+          "call_id": "exec-dc1bf462-5ff6-44e6-8280-d1eb3a8621cb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/dispatch.ps1",
+          "timestamp": "2026-09-04T17:07:22.036Z",
+          "call_id": "exec-7d95afdc-dc45-407c-90ce-b744df0f8958",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/dispatch.ps1",
+          "timestamp": "2026-09-04T17:07:55.765Z",
+          "call_id": "exec-405dedd3-e9f6-4e99-92ce-9c3f5dfa317a",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/dispatch.ps1",
+          "timestamp": "2026-09-04T17:20:06.478Z",
+          "call_id": "exec-b733c56c-3d2e-4db2-9537-16e1f19970eb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/dispatch.ps1",
+          "timestamp": "2026-09-04T17:20:31.859Z",
+          "call_id": "exec-8621d80d-fbb7-4c27-a713-46cda996028f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/dispatch.ps1",
+          "timestamp": "2026-09-04T17:22:01.209Z",
+          "call_id": "exec-3868395f-328b-4d3d-b65b-ac65a30ab651",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/dispatch.sh": {
+      "bytes": 1226,
+      "sha256": "4d229bfa06d3db6d3bdf9b353c64c725056deb91572d39779f440f6ce5f9a647",
+      "git_blob_sha1": "df6a8cfc0e4a4a432f33cea7f9ac5392bd92b7c7",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/dispatch.sh",
+          "timestamp": "2026-09-04T17:12:16.259Z",
+          "call_id": "exec-ac4d363f-5473-4834-b21d-418f67bf0727",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/dispatch.sh",
+          "timestamp": "2026-09-04T17:27:00.423Z",
+          "call_id": "exec-a6b93042-9564-4540-9c03-4f069834e630",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/dispatch.sh",
+          "timestamp": "2026-09-04T17:46:02.373Z",
+          "call_id": "exec-bebd980c-e968-415f-ac16-4a78538cbccd",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/install/devloop.ps1": {
+      "bytes": 783,
+      "sha256": "f31e8a45790a52676175d36f156526a2c2883d8162ebdbdc5fa6ffcabc2b379f",
+      "git_blob_sha1": "ff543870efc07a30a1533f4be75325f353ec5634",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/install/devloop.ps1",
+          "timestamp": "2026-09-04T16:59:44.735Z",
+          "call_id": "exec-dc1bf462-5ff6-44e6-8280-d1eb3a8621cb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/install/devloop.ps1",
+          "timestamp": "2026-09-04T17:06:15.784Z",
+          "call_id": "exec-d7e903ea-7565-46c2-a8bd-86d8067fb23f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/install/devloop.ps1",
+          "timestamp": "2026-09-04T17:07:22.036Z",
+          "call_id": "exec-7d95afdc-dc45-407c-90ce-b744df0f8958",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/install/devloop.ps1",
+          "timestamp": "2026-09-04T18:07:13.186Z",
+          "call_id": "exec-4a2c22a5-b0f3-480d-91be-eadc949572f7",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/install/devloop.sh": {
+      "bytes": 165,
+      "sha256": "6bd9fd11b082ea227dc5cb3eec08ba7d8fd73af541365901bfda07e944237ac8",
+      "git_blob_sha1": "6a58da50c3f6bdd1c8165376336924d3ad2b13cd",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/install/devloop.sh",
+          "timestamp": "2026-09-04T17:12:16.259Z",
+          "call_id": "exec-ac4d363f-5473-4834-b21d-418f67bf0727",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        }
+      ]
+    },
+    "install/bootstrap/install/uninstall-devloop.ps1": {
+      "bytes": 708,
+      "sha256": "a47b5a312e5c23733b23df62913353deaa80cbf0d7fc15013b3932624e93fc16",
+      "git_blob_sha1": "869af8e16f44578f5478f8249f9a095b49418a31",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T16:59:44.735Z",
+          "call_id": "exec-dc1bf462-5ff6-44e6-8280-d1eb3a8621cb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T17:06:15.784Z",
+          "call_id": "exec-d7e903ea-7565-46c2-a8bd-86d8067fb23f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T17:07:22.036Z",
+          "call_id": "exec-7d95afdc-dc45-407c-90ce-b744df0f8958",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/install/uninstall-devloop.sh": {
+      "bytes": 168,
+      "sha256": "737d4e2ba56548cb4386a6296ace138cd02e0c786a61773c210419acb2969c59",
+      "git_blob_sha1": "5a8725044227366b6c6d2c31c7873517e186646a",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/install/uninstall-devloop.sh",
+          "timestamp": "2026-09-04T17:12:16.259Z",
+          "call_id": "exec-ac4d363f-5473-4834-b21d-418f67bf0727",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        }
+      ]
+    },
+    "install/bootstrap/transaction.py": {
+      "bytes": 14704,
+      "sha256": "a5a27fdcfa806d9c0c49b82ecc0ea0671380345a4e30809ffad3be5ac5707628",
+      "git_blob_sha1": "796ebecf10db980f37b822832506d2bd82ba06f7",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:23:27.189Z",
+          "call_id": "exec-a5d8c914-f4f1-4798-9bd6-e16ffccce886",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:23:59.008Z",
+          "call_id": "exec-877d594f-db94-4cdb-9ae2-ceb7dad00b0e",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:29:31.270Z",
+          "call_id": "exec-bf246cb1-0567-4893-866f-9b7a19e8509d",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:30:03.229Z",
+          "call_id": "exec-3ef5ec45-6218-4e8f-b83c-dcb95dd6cc67",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:36:57.993Z",
+          "call_id": "exec-d7433e29-618f-4818-9531-ae5bf4687914",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:39:17.177Z",
+          "call_id": "exec-b5b52c4e-52ac-4c62-844d-e005d95298d4",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T17:56:55.221Z",
+          "call_id": "exec-0b59a4c2-bc2f-44e0-9656-ac8dea2d0548",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/transaction.py",
+          "timestamp": "2026-09-04T18:07:13.186Z",
+          "call_id": "exec-4a2c22a5-b0f3-480d-91be-eadc949572f7",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/bootstrap/verify.py": {
+      "bytes": 4599,
+      "sha256": "44d0e9c9fd84128270c8c41cc8c682c4017060ceb02681216114cedd26cca9b0",
+      "git_blob_sha1": "a5410667a8027178b7a6d017507c21f84763e083",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "install/bootstrap/verify.py",
+          "timestamp": "2026-09-04T17:12:16.259Z",
+          "call_id": "exec-ac4d363f-5473-4834-b21d-418f67bf0727",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/bootstrap/verify.py",
+          "timestamp": "2026-09-04T17:21:06.790Z",
+          "call_id": "exec-7ad24bf2-fb97-4c12-a328-fa280b25de56",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/verify.py",
+          "timestamp": "2026-09-04T17:22:01.209Z",
+          "call_id": "exec-3868395f-328b-4d3d-b65b-ac65a30ab651",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/verify.py",
+          "timestamp": "2026-09-04T17:56:55.221Z",
+          "call_id": "exec-0b59a4c2-bc2f-44e0-9656-ac8dea2d0548",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/bootstrap/verify.py",
+          "timestamp": "2026-09-04T18:03:11.800Z",
+          "call_id": "exec-e65b4a13-5d1d-496a-b020-188f97543598",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/devloop.ps1": {
+      "bytes": 26961,
+      "sha256": "8436b25d6ef5015c641ab2c52e0c888fe67062547eb2d405262674c0a155075b",
+      "git_blob_sha1": "dfe87df637d93808d5082879cb8da074fcf06204",
+      "base_git_blob_sha1": "2a96bbf95b6adc640f38807940f8590d2d1c7eed",
+      "patch_records": [
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:14:52.802Z",
+          "call_id": "exec-7fc83beb-3781-4bb6-8dd5-a3f8a12890e6",
+          "source": "rollout-2026-09-03T14-14-14-01a066f9-fc3a-7763-a8d5-80141662def0.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:21:46.152Z",
+          "call_id": "exec-eb32dc96-b0ab-419f-b7e8-5f6909616a0a",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:23:31.135Z",
+          "call_id": "exec-9aba12e3-8611-4624-b961-8f15feab650f",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:23:55.411Z",
+          "call_id": "exec-9a8acc92-e20a-4fe5-bef4-913700a3928e",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:24:04.394Z",
+          "call_id": "exec-064f190c-fd4e-4410-9246-1f4823bade8e",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:24:14.502Z",
+          "call_id": "exec-06eab043-6b57-4273-82fc-c59cf0606b34",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:25:05.973Z",
+          "call_id": "exec-250f8229-0e40-44ff-b959-9c43a02476f5",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:27:06.734Z",
+          "call_id": "exec-b8c8d547-6b42-41ec-8d30-40c5a15e7582",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:27:41.063Z",
+          "call_id": "exec-caf0fef9-4a28-4503-a407-ca7c51d9459b",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:28:10.056Z",
+          "call_id": "exec-382193e6-c2ca-4a16-8eb0-f9e74d7f89ac",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:28:18.529Z",
+          "call_id": "exec-226a3950-6b30-4db7-8230-34606e679a4c",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:28:27.860Z",
+          "call_id": "exec-f67016ff-7a58-49ae-9346-c8e10d11750b",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:28:55.914Z",
+          "call_id": "exec-ef706fb2-10ea-478d-87fc-a446ca002d85",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:41:54.604Z",
+          "call_id": "exec-5ebd98ce-32be-4f27-91d8-4301549ec4e6",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:48:38.961Z",
+          "call_id": "exec-4b654387-3dca-44e0-b428-93e4c14c4d33",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T12:49:04.755Z",
+          "call_id": "exec-14a0cc79-5b74-45c9-b733-be0dd7ce26f0",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:03:54.665Z",
+          "call_id": "exec-8ced4055-89f4-4ae5-92e7-a768fee8db35",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:25:29.091Z",
+          "call_id": "exec-b2e14e50-75a7-4752-8bfc-92d9c31c8c5b",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:26:48.088Z",
+          "call_id": "exec-cbc36ed5-825f-4bcb-aaa2-0828b8d5c7f4",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:29:36.268Z",
+          "call_id": "exec-f76716a1-ebcc-4c5c-b830-4e4a88e4b2ce",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:29:48.051Z",
+          "call_id": "exec-28ff38db-e32d-4b35-9e24-0a2c9b9bda25",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:31:14.400Z",
+          "call_id": "exec-04e40124-8ddb-4d60-9965-4590fb583a5b",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:31:37.317Z",
+          "call_id": "exec-c749b247-4520-4c57-8032-b2778625c204",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:31:56.734Z",
+          "call_id": "exec-04b0eafa-edcf-4a11-8a34-82421a09589f",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:32:27.824Z",
+          "call_id": "exec-056c9a6a-6c23-4520-b453-35d8ae70ef44",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:39:11.265Z",
+          "call_id": "exec-249b3f4e-15dd-4e8c-bd5d-f79ed49e736b",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:40:40.749Z",
+          "call_id": "exec-30719351-da70-46c8-af55-727afec889e7",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T13:44:20.541Z",
+          "call_id": "exec-ec951a70-960b-4742-955a-9e71a374ae9c",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:34:45.523Z",
+          "call_id": "exec-a83148c1-2255-4c95-be49-10c4d2dadf17",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:35:30.823Z",
+          "call_id": "exec-f232b358-8cf4-4cd6-92e1-be5a33fa104f",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:35:47.445Z",
+          "call_id": "exec-90fd97a6-f40a-4713-97dc-45444d6f85bf",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:36:08.421Z",
+          "call_id": "exec-6bbed851-396f-409e-acbf-1ef5ff7955af",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:39:22.334Z",
+          "call_id": "exec-500f9ad5-203f-4b86-b8b0-d28e3f141548",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:39:43.142Z",
+          "call_id": "exec-56bcd608-04b9-4da3-ac52-f7e5fe6cf437",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:41:03.421Z",
+          "call_id": "exec-bf231780-943d-4ddc-969c-7dd3cb42ce8e",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:43:03.925Z",
+          "call_id": "exec-8f0b0a46-e689-457d-aa25-bd14f7644330",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:43:23.169Z",
+          "call_id": "exec-da0b4486-406e-498a-a62f-70092c7d2134",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:52:04.508Z",
+          "call_id": "exec-1be0d21c-f0e7-4469-b2f1-7cf9c0b73ffc",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T14:52:33.563Z",
+          "call_id": "exec-5891b1bc-ee4b-4aec-8079-f8f9cfe8d84a",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:37:33.450Z",
+          "call_id": "exec-1ef4480f-32e2-4a45-a5c0-5efa49748d99",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:40:18.302Z",
+          "call_id": "exec-8b85f64e-a624-47d9-8546-87b49e48b5e6",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:40:55.081Z",
+          "call_id": "exec-9b48a99f-978e-4ea3-a04d-078a33eefb6a",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:41:24.429Z",
+          "call_id": "exec-5ce6f120-aeb8-4e28-832f-f5c4b93d2ef6",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:41:33.788Z",
+          "call_id": "exec-24b3c2b6-5514-470e-a9a1-632fd6670e93",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:41:43.020Z",
+          "call_id": "exec-27b5f0a7-7611-4770-b680-cf8f75f74df7",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:42:31.898Z",
+          "call_id": "exec-6b87193c-9b55-441d-8ffa-a1c8d772f93f",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:42:58.579Z",
+          "call_id": "exec-4646ec58-8d57-48db-9bf8-6cc68f062c73",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:43:23.340Z",
+          "call_id": "exec-1b847e25-d0fb-4642-a62f-3f84453a5ac5",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:43:34.373Z",
+          "call_id": "exec-4c9f9745-37c0-49c8-a4f7-45c73de21d0f",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:44:11.097Z",
+          "call_id": "exec-ecf84251-dc18-43e3-ac55-33cb7eca6150",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T15:45:51.344Z",
+          "call_id": "exec-3be86f7a-f833-4ea7-a21f-21269bd7bd8a",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:02:11.050Z",
+          "call_id": "exec-5278e657-3e94-43ca-8778-7fa0ecac6384",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "delete"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:04:17.576Z",
+          "call_id": "exec-35ab60f3-5d2b-4225-bfac-6c6044359bc2",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:16:28.496Z",
+          "call_id": "exec-85131d44-7f5d-4e5d-9d58-4bd41950a4ee",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:17:40.905Z",
+          "call_id": "exec-f5704b27-f622-4a6b-9e70-4d207f06752b",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:20:06.478Z",
+          "call_id": "exec-b733c56c-3d2e-4db2-9537-16e1f19970eb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:20:31.859Z",
+          "call_id": "exec-8621d80d-fbb7-4c27-a713-46cda996028f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:22:01.209Z",
+          "call_id": "exec-3868395f-328b-4d3d-b65b-ac65a30ab651",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:23:59.008Z",
+          "call_id": "exec-877d594f-db94-4cdb-9ae2-ceb7dad00b0e",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:33:14.181Z",
+          "call_id": "exec-7d467751-88cf-4afe-9490-a71acfb5fcd4",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:56:55.221Z",
+          "call_id": "exec-0b59a4c2-bc2f-44e0-9656-ac8dea2d0548",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T17:58:26.235Z",
+          "call_id": "exec-e80753b1-482f-4037-a3d0-409ee40db7eb",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.ps1",
+          "timestamp": "2026-09-04T18:07:13.186Z",
+          "call_id": "exec-4a2c22a5-b0f3-480d-91be-eadc949572f7",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/devloop.sh": {
+      "bytes": 7105,
+      "sha256": "f2c281037fa07a728aae27bfaa5d598f905f4359c8ef438273ceceee8b3be8ae",
+      "git_blob_sha1": "021dd03262d8e36bdffcb3b29b51621dca5c5ffd",
+      "base_git_blob_sha1": "a34ceede4052e273e9f8f72a4ee8baec9fe79104",
+      "patch_records": [
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:14:52.802Z",
+          "call_id": "exec-7fc83beb-3781-4bb6-8dd5-a3f8a12890e6",
+          "source": "rollout-2026-09-03T14-14-14-01a066f9-fc3a-7763-a8d5-80141662def0.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:25:40.471Z",
+          "call_id": "exec-404654f9-dbb6-4b6a-a5b8-e8d608169658",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:29:33.525Z",
+          "call_id": "exec-359155dc-2685-46dc-918d-a3906cc840b4",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:29:48.856Z",
+          "call_id": "exec-2e3fce59-a95b-4dd4-a92f-07096545c03b",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:30:07.292Z",
+          "call_id": "exec-34a9a8e5-c366-4aba-9d36-c08b96af8175",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:30:27.825Z",
+          "call_id": "exec-eafde0d7-d24d-43a4-95e5-d933e84dcfee",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:31:55.963Z",
+          "call_id": "exec-5660a6bf-e015-4bd8-beaf-6df87f7f82af",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:32:03.468Z",
+          "call_id": "exec-30148a88-8ff0-480c-b6dc-ae34ac4a64aa",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:41:54.604Z",
+          "call_id": "exec-5ebd98ce-32be-4f27-91d8-4301549ec4e6",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:48:38.961Z",
+          "call_id": "exec-4b654387-3dca-44e0-b428-93e4c14c4d33",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T12:49:04.755Z",
+          "call_id": "exec-14a0cc79-5b74-45c9-b733-be0dd7ce26f0",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T13:03:54.665Z",
+          "call_id": "exec-8ced4055-89f4-4ae5-92e7-a768fee8db35",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T13:26:48.088Z",
+          "call_id": "exec-cbc36ed5-825f-4bcb-aaa2-0828b8d5c7f4",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T13:41:35.344Z",
+          "call_id": "exec-7127a842-5e1c-4c75-afce-381378ff195a",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T13:42:44.081Z",
+          "call_id": "exec-7d50ed08-3c90-4367-83c7-c90b11d82e35",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T13:43:06.541Z",
+          "call_id": "exec-d666bb21-948e-4036-ad82-e0d856b0fba5",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T13:44:20.541Z",
+          "call_id": "exec-ec951a70-960b-4742-955a-9e71a374ae9c",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:01:54.355Z",
+          "call_id": "exec-f550a53a-7c2e-4369-9211-be9fb0e76eba",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:25:43.606Z",
+          "call_id": "exec-281aebfe-2ff3-426a-960d-ad33e6233c2d",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:29:34.709Z",
+          "call_id": "exec-daf2bff2-b5b6-4764-a5b6-dfe1d0f490af",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:31:25.217Z",
+          "call_id": "exec-dc7285a2-07e4-469f-b353-56489d57c346",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:35:47.445Z",
+          "call_id": "exec-90fd97a6-f40a-4713-97dc-45444d6f85bf",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:41:03.421Z",
+          "call_id": "exec-bf231780-943d-4ddc-969c-7dd3cb42ce8e",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:47:47.844Z",
+          "call_id": "exec-ae42c631-05d0-445f-b8c0-a18b642fc2b4",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T14:48:43.310Z",
+          "call_id": "exec-4381942a-45ff-40f1-acd4-f75ce6b3ea73",
+          "source": "rollout-2026-09-03T11-39-17-01a0666c-2124-75c3-8fba-409512649168.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T17:23:59.008Z",
+          "call_id": "exec-877d594f-db94-4cdb-9ae2-ceb7dad00b0e",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "delete"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T17:24:44.370Z",
+          "call_id": "exec-b1e6b40e-4440-4b3f-a84d-7c310b6e639c",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T17:57:15.904Z",
+          "call_id": "exec-c4b296a3-2ef2-4fd6-8195-2a8dcd0dadc9",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/devloop.sh",
+          "timestamp": "2026-09-04T18:07:13.186Z",
+          "call_id": "exec-4a2c22a5-b0f3-480d-91be-eadc949572f7",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/uninstall-devloop.ps1": {
+      "bytes": 6657,
+      "sha256": "c51778a52832c0ea2b25e9a1a2de46539b3d212d4c4272b836cca1efedd609b5",
+      "git_blob_sha1": "7eb4327412a9f44d332a7282efb14622c0a6c25f",
+      "base_git_blob_sha1": "acc0e6b4a71b7ebd1a3768c1aebaad5378ba17b4",
+      "patch_records": [
+        {
+          "path": "install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T17:16:45.685Z",
+          "call_id": "exec-da752863-00d6-4c92-b357-8ccfb101fe17",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "delete"
+        },
+        {
+          "path": "install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T17:17:26.334Z",
+          "call_id": "exec-0f578554-f2a4-40d5-82a8-d59bc88f0eed",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T17:19:19.435Z",
+          "call_id": "exec-0eec8845-8116-4e19-93e4-00ef6b1a8f2f",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "install/uninstall-devloop.ps1",
+          "timestamp": "2026-09-04T17:57:15.904Z",
+          "call_id": "exec-c4b296a3-2ef2-4fd6-8195-2a8dcd0dadc9",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "install/uninstall-devloop.sh": {
+      "bytes": 2282,
+      "sha256": "7a53479f977bebc46c193751ac8396606a27b3e1389c46465b7100fec65589b1",
+      "git_blob_sha1": "85b79d08185b7ed6909c796eaf415c2c0b6e236e",
+      "base_git_blob_sha1": "9d16b0f292353dd0d8280c8bead1cc96a2ffbe54",
+      "patch_records": [
+        {
+          "path": "install/uninstall-devloop.sh",
+          "timestamp": "2026-09-04T17:29:31.270Z",
+          "call_id": "exec-bf246cb1-0567-4893-866f-9b7a19e8509d",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "delete"
+        },
+        {
+          "path": "install/uninstall-devloop.sh",
+          "timestamp": "2026-09-04T17:29:54.039Z",
+          "call_id": "exec-aecf6b88-d2c1-4f31-88a3-7d226f51e0c9",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "install/uninstall-devloop.sh",
+          "timestamp": "2026-09-04T17:46:02.373Z",
+          "call_id": "exec-bebd980c-e968-415f-ac16-4a78538cbccd",
+          "source": "rollout-2026-09-04T19-54-43-01a06d58-1286-7b42-8317-216d34059805.jsonl",
+          "operation": "update"
+        }
+      ]
+    },
+    "portable-release.json": {
+      "bytes": 115,
+      "sha256": "2744cf4cfe3edf1ccf167d82d1980f4edf06df9f0469675a6915bcf65e6af8fa",
+      "git_blob_sha1": "a3c2718007ab23460c21a16b885ca1f93cf9b21f",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "portable-release.json",
+          "timestamp": "2026-09-04T12:11:10.513Z",
+          "call_id": "exec-e9eabd7d-783f-48f7-8fd4-9509a279adae",
+          "source": "rollout-2026-09-03T14-14-14-01a066f9-fc3a-7763-a8d5-80141662def0.jsonl",
+          "operation": "add"
+        }
+      ]
+    },
+    "src/devloop/portable_release.py": {
+      "bytes": 4450,
+      "sha256": "a768419ecec6176fc2c4d26bc3a68f86cfed27246d4947f7f53cbab5ed01dc96",
+      "git_blob_sha1": "11d73b2a318f406e851d2ef89718ce2b021e7741",
+      "base_git_blob_sha1": null,
+      "patch_records": [
+        {
+          "path": "src/devloop/portable_release.py",
+          "timestamp": "2026-09-04T12:12:30.248Z",
+          "call_id": "exec-fe30a934-b94f-42ac-9323-9cf68bf5d79f",
+          "source": "rollout-2026-09-03T14-14-14-01a066f9-fc3a-7763-a8d5-80141662def0.jsonl",
+          "operation": "add"
+        },
+        {
+          "path": "src/devloop/portable_release.py",
+          "timestamp": "2026-09-04T12:14:52.802Z",
+          "call_id": "exec-7fc83beb-3781-4bb6-8dd5-a3f8a12890e6",
+          "source": "rollout-2026-09-03T14-14-14-01a066f9-fc3a-7763-a8d5-80141662def0.jsonl",
+          "operation": "update"
+        },
+        {
+          "path": "src/devloop/portable_release.py",
+          "timestamp": "2026-09-04T12:41:54.604Z",
+          "call_id": "exec-5ebd98ce-32be-4f27-91d8-4301549ec4e6",
+          "source": "rollout-2026-09-04T09-34-57-01a06b20-a697-7633-92ba-ddeefb00005c.jsonl",
+          "operation": "update"
+        }
+      ]
+    }
+  }
+}

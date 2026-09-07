@@ -17,8 +17,8 @@ import pytest
 
 import devloop.execution.app_server as app_server_module
 from devloop.execution.app_server import (
-    AppServerClient,
     AppServerCheckpointDeadline,
+    AppServerClient,
     AppServerError,
     AppServerHandshake,
     AppServerTurnResult,

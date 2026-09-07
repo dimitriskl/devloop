@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -12,8 +13,12 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path, PurePosixPath
+from typing import Any, Literal, TypedDict, cast, overload
 
 from verify import (
     GIT_ENTRY_DIRECTORY,
@@ -116,6 +121,18 @@ COMPATIBILITY_FIELDS = frozenset(
         "transaction_schema_max",
     }
 )
+UNINSTALL_EVIDENCE_NAME = "action-evidence.json"
+UNINSTALL_METADATA = frozenset({"layout.json", "install-transaction.json", "layout.pending.json"})
+CAPABILITY_PATHS = ("skills/codex", "agents/codex")
+UNINSTALL_ACTION_FIELDS = {
+    **dict.fromkeys(
+        ("remove_release", "remove_manifest", "remove_pointer", "remove_asset", "remove_metadata"),
+        frozenset({"id", "kind", "state", "path"}),
+    ),
+    "restore_legacy": frozenset({"id", "kind", "state", "source", "target"}),
+    "stage_capability": frozenset({"id", "kind", "state", "source", "staged", "destination"}),
+    "cleanup_capability": frozenset({"id", "kind", "state", "staged", "destination"}),
+}
 
 
 @dataclass(frozen=True)
@@ -125,55 +142,151 @@ class UninstallPlan:
     remove_assets: tuple[Path, ...]
     restore_assets: tuple[tuple[Path, Path], ...]
     metadata: tuple[Path, ...]
+    release_inventories: tuple[tuple[Path, dict[str, str | None]], ...] = ()
+
+
+class ProcessState(Enum):
+    ALIVE = "alive"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    state: ProcessState
+    start: str | None = None
+
+
+class Layout(TypedDict):
+    version: int
+    assets: dict[str, str]
+    legacy_backups: dict[str, str]
+
+
+class PendingLayout(Layout):
+    backups_ready: list[str]
+    published: list[str]
+    backup_staging: dict[str, str]
+
+
+class LegacyLayout(TypedDict):
+    version: int
+    assets: dict[str, str]
+    legacy_backups: list[str]
 
 
 def _lock_path(install: Path) -> Path:
     return install.parent / f".{install.name}.install-lock"
 
 
-def _process_start(pid: int) -> str | None:
+def _plain_full_ancestry(path: Path) -> None:
+    for location in (path, *path.parents):
+        try:
+            status = location.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(status.st_mode) or (
+            getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RuntimeError(f"reparse or symbolic link rejected: {location}")
+        if location != path and not stat.S_ISDIR(status.st_mode):
+            raise RuntimeError(f"ancestor is not a plain directory: {location}")
+
+
+def _inspect_process(pid: int) -> ProcessIdentity:
     if sys.platform == "win32":
         try:
             import ctypes
             from ctypes import wintypes
 
-            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+            kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
+            process = kernel32.OpenProcess(0x1000, False, pid)
             if not process:
-                return None
+                state = ProcessState.DEAD if ctypes.get_last_error() == 87 else ProcessState.UNKNOWN
+                return ProcessIdentity(state)
             creation = wintypes.FILETIME()
             exit_time = wintypes.FILETIME()
             kernel = wintypes.FILETIME()
             user = wintypes.FILETIME()
             try:
                 exit_code = wintypes.DWORD()
-                if not ctypes.windll.kernel32.GetExitCodeProcess(
+                if not kernel32.GetExitCodeProcess(
                     process, ctypes.byref(exit_code)
-                ) or exit_code.value != 259:
-                    return None
-                if not ctypes.windll.kernel32.GetProcessTimes(
+                ):
+                    return ProcessIdentity(ProcessState.UNKNOWN)
+                if exit_code.value != 259:
+                    return ProcessIdentity(ProcessState.DEAD)
+                if not kernel32.GetProcessTimes(
                     process,
                     ctypes.byref(creation),
                     ctypes.byref(exit_time),
                     ctypes.byref(kernel),
                     ctypes.byref(user),
                 ):
-                    return None
-                return str((creation.dwHighDateTime << 32) | creation.dwLowDateTime)
+                    return ProcessIdentity(ProcessState.UNKNOWN)
+                return ProcessIdentity(
+                    ProcessState.ALIVE,
+                    str((creation.dwHighDateTime << 32) | creation.dwLowDateTime),
+                )
             finally:
-                ctypes.windll.kernel32.CloseHandle(process)
+                kernel32.CloseHandle(process)
         except (AttributeError, OSError):
-            return None
+            return ProcessIdentity(ProcessState.UNKNOWN)
     proc_stat = Path(f"/proc/{pid}/stat")
     if proc_stat.is_file():
         try:
-            return proc_stat.read_text(encoding="utf-8").split()[21]
+            # The process name may itself contain spaces or parentheses.
+            fields = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            return ProcessIdentity(ProcessState.ALIVE, fields[19])
         except (OSError, IndexError):
-            return None
+            return ProcessIdentity(ProcessState.UNKNOWN)
     try:
         os.kill(pid, 0)
-    except OSError:
-        return None
-    return "alive"
+    except OSError as error:
+        state = ProcessState.DEAD if error.errno == errno.ESRCH else ProcessState.UNKNOWN
+        return ProcessIdentity(state)
+    return ProcessIdentity(ProcessState.ALIVE, "alive")
+
+
+def _process_start(pid: int) -> str | None:
+    return _inspect_process(pid).start
+
+
+@contextmanager
+def _lock_guard(install: Path) -> Iterator[None]:
+    # Keep the inode permanently: unlinking an advisory lock allows two owners
+    # to lock different inodes bearing the same path. OS locks die with the process.
+    path = install.parent / f".{install.name}.install-guard"
+    _plain_full_ancestry(path)
+    with path.open("a+b") as stream:
+        if stream.seek(0, os.SEEK_END) == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise RuntimeError("install lock is being changed concurrently") from error
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _owner_identity(requested_pid: int | None = None) -> tuple[int, str]:
@@ -186,6 +299,7 @@ def _owner_identity(requested_pid: int | None = None) -> tuple[int, str]:
 
 def _read_lock(install: Path) -> dict[str, object]:
     path = _lock_path(install)
+    _plain_full_ancestry(path / "owner.json")
     value = json.loads((path / "owner.json").read_text(encoding="utf-8"))
     if not isinstance(value, dict) or set(value) != LOCK_FIELDS or value.get("version") != 1:
         raise RuntimeError("install lock has an unsupported schema")
@@ -197,6 +311,13 @@ def _read_lock(install: Path) -> dict[str, object]:
         raise RuntimeError("install lock transaction identity is invalid")
     if value["operation"] not in {"install", "rollback", "uninstall"}:
         raise RuntimeError("install lock operation is invalid")
+    if (
+        type(value["owner_pid"]) is not int or value["owner_pid"] <= 0
+        or not isinstance(value["owner_start"], str) or not value["owner_start"]
+        or not isinstance(value["owner_host"], str) or not value["owner_host"]
+        or value["candidate_name"] != f".{install.name}.candidate-{transaction_id}"
+    ):
+        raise RuntimeError("install lock owner identity is invalid")
     return value
 
 
@@ -205,7 +326,13 @@ def _lock_owner_alive(lock: dict[str, object]) -> bool:
         return True
     pid = lock["owner_pid"]
     start = lock["owner_start"]
-    return isinstance(pid, int) and isinstance(start, str) and _process_start(pid) == start
+    assert isinstance(pid, int) and isinstance(start, str)
+    identity = _inspect_process(pid)
+    if identity.state is ProcessState.DEAD:
+        return False
+    if identity.state is ProcessState.UNKNOWN or identity.start == "alive":
+        return True
+    return identity.start == start
 
 
 def _assert_lock(install: Path, transaction_id: str, operation: str | None = None) -> None:
@@ -230,10 +357,34 @@ def _raw_journal_transaction_id(install: Path) -> str | None:
     return transaction_id
 
 
-def begin(install: Path, operation: str, owner_pid: int | None = None) -> str:
+def begin(
+    install: Path, operation: str, owner_pid: int | None = None,
+    *, recovery_transaction_id: str | None = None,
+) -> str:
     install = install.absolute()
+    with _lock_guard(install):
+        return _begin_locked(install, operation, owner_pid, recovery_transaction_id)
+
+
+def _remove_lock(install: Path, expected: dict[str, object]) -> None:
+    path = _lock_path(install)
+    if _read_lock(install) != expected or {p.name for p in path.iterdir()} != {"owner.json"}:
+        raise RuntimeError("install lock changed during reclamation")
+    (path / "owner.json").unlink()
+    path.rmdir()
+
+
+def _begin_locked(
+    install: Path, operation: str, owner_pid: int | None,
+    recovery_transaction_id: str | None,
+) -> str:
+    owner_pid, owner_start = _owner_identity(owner_pid)
     lock_path = _lock_path(install)
-    transaction_id = str(uuid.uuid4())
+    transaction_id = recovery_transaction_id or str(uuid.uuid4())
+    if recovery_transaction_id is not None:
+        if operation != "uninstall":
+            raise RuntimeError("only uninstall can resume an external recovery journal")
+        _read_uninstall_journal(install, recovery_transaction_id)
     if lock_path.exists():
         lock = _read_lock(install)
         if _lock_owner_alive(lock):
@@ -260,8 +411,7 @@ def begin(install: Path, operation: str, owner_pid: int | None = None) -> str:
             ):
                 _plain_ancestors(candidate, install.parent)
                 shutil.rmtree(candidate, onerror=_remove_read_only)
-        shutil.rmtree(lock_path, onerror=_remove_read_only)
-    owner_pid, owner_start = _owner_identity(owner_pid)
+        _remove_lock(install, lock)
     candidate_name = f".{install.name}.candidate-{transaction_id}"
     staging = install.parent / f".{install.name}.lock-staging-{uuid.uuid4().hex}"
     staging.mkdir()
@@ -293,7 +443,11 @@ def begin_legacy_migration(install: Path, owner_pid: int | None = None) -> str:
     install = install.absolute()
     transaction_id = begin(install, "install", owner_pid)
     try:
-        _verified_legacy_layout(install)
+        pending = install / "bootstrap" / "layout.pending.json"
+        if pending.exists():
+            _reconcile_committed_pending_layout(install)
+        else:
+            _verified_legacy_layout(install)
         if (install / "bootstrap" / "install-transaction.json").exists():
             raise RuntimeError("legacy installation transaction must be completed before migration")
     except Exception:
@@ -303,8 +457,9 @@ def begin_legacy_migration(install: Path, owner_pid: int | None = None) -> str:
 
 
 def _release_lock(install: Path, transaction_id: str) -> None:
-    _assert_lock(install, transaction_id)
-    shutil.rmtree(_lock_path(install), onerror=_remove_read_only)
+    with _lock_guard(install):
+        _assert_lock(install, transaction_id)
+        _remove_lock(install, _read_lock(install))
 
 
 def abort(install: Path, transaction_id: str) -> None:
@@ -319,7 +474,7 @@ def abort(install: Path, transaction_id: str) -> None:
     _release_lock(install, transaction_id)
 
 
-def _atomic_json(path: Path, value: dict[str, object]) -> None:
+def _atomic_json(path: Path, value: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _plain_ancestors(path.parent, path.parent)
     temporary = path.with_name(f"{path.name}.next-{uuid.uuid4().hex}")
@@ -348,9 +503,24 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
-def _remove_read_only(function: object, path: str, _: object) -> None:
+def _flush_file(path: Path) -> None:
+    # Windows FlushFileBuffers requires a write-capable handle; never truncate the file.
+    with path.open("r+b" if os.name == "nt" else "rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def _flush_directory(path: Path) -> None:
+    if os.name != "nt":
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _remove_read_only(function: Callable[[str], object], path: str, _: object) -> None:
     os.chmod(path, stat.S_IWRITE)
-    function(path)  # type: ignore[operator]
+    function(path)
 
 
 def _interrupt(phase: str, exit_code: int = 91) -> None:
@@ -419,9 +589,21 @@ def _validate_hash(value: object, description: str) -> str:
     return value
 
 
-def _validate_layout(value: object, *, pending: bool = False) -> dict[str, object]:
+@overload
+def _validate_layout(value: object, *, pending: Literal[True]) -> PendingLayout: ...
+
+
+@overload
+def _validate_layout(value: object, *, pending: Literal[False] = False) -> Layout: ...
+
+
+def _validate_layout(value: object, *, pending: bool = False) -> Layout | PendingLayout:
     fields = PENDING_LAYOUT_FIELDS if pending else LAYOUT_FIELDS
-    if not isinstance(value, dict) or set(value) != fields or value.get("version") != 2:
+    accepted_fields = (fields, fields | {"backup_staging"}) if pending else (fields,)
+    if (
+        not isinstance(value, dict) or set(value) not in accepted_fields
+        or value.get("version") != 2
+    ):
         raise RuntimeError("bootstrap layout has an unsupported schema")
     assets = value["assets"]
     backups = value["legacy_backups"]
@@ -436,6 +618,15 @@ def _validate_layout(value: object, *, pending: bool = False) -> dict[str, objec
         _safe_relative(relative)
         _validate_hash(digest, "legacy backup")
     if pending:
+        value = {"backup_staging": {}, **value}
+        staging = value["backup_staging"]
+        if not isinstance(staging, dict) or not set(staging).issubset(backups):
+            raise RuntimeError("bootstrap backup staging ownership is invalid")
+        for relative, name in staging.items():
+            if not isinstance(name, str) or re.fullmatch(
+                re.escape(PurePosixPath(relative).name) + r"\.backup-[0-9a-f]{32}", name,
+            ) is None:
+                raise RuntimeError("bootstrap backup staging path is invalid")
         for key in ("backups_ready", "published"):
             entries = value[key]
             if not isinstance(entries, list) or len(entries) != len(set(entries)):
@@ -446,10 +637,12 @@ def _validate_layout(value: object, *, pending: bool = False) -> dict[str, objec
             raise RuntimeError("bootstrap publication backup state is invalid")
         if not set(value["published"]).issubset(assets):
             raise RuntimeError("bootstrap publication asset state is invalid")
-    return value
+    if pending:
+        return cast(PendingLayout, value)
+    return cast(Layout, value)
 
 
-def _validate_legacy_layout(value: object) -> dict[str, object]:
+def _validate_legacy_layout(value: object) -> LegacyLayout:
     if not isinstance(value, dict) or set(value) != LAYOUT_FIELDS or value.get("version") != 1:
         raise RuntimeError("legacy bootstrap layout has an unsupported schema")
     assets = value["assets"]
@@ -467,18 +660,18 @@ def _validate_legacy_layout(value: object) -> dict[str, object]:
         _validate_hash(digest, "legacy bootstrap asset")
     for relative in backups:
         _safe_relative(relative)
-    return value
+    return cast(LegacyLayout, value)
 
 
-def _verified_legacy_layout(install: Path) -> dict[str, object]:
+def _verified_legacy_layout(install: Path) -> LegacyLayout:
     layout_path = install / "bootstrap" / "layout.json"
     layout = _validate_legacy_layout(json.loads(layout_path.read_text(encoding="utf-8")))
-    for relative, expected in layout["assets"].items():  # type: ignore[union-attr]
+    for relative, expected in layout["assets"].items():
         target = install / _safe_relative(relative)
         _plain_ancestors(target, install)
         if not target.is_file() or _sha256(target) != expected:
             raise RuntimeError(f"legacy stable bootstrap asset was modified: {relative}")
-    for relative in layout["legacy_backups"]:  # type: ignore[union-attr]
+    for relative in layout["legacy_backups"]:
         backup = install / "bootstrap" / "legacy-assets" / _safe_relative(relative)
         _plain_ancestors(backup, install)
         if not backup.is_file():
@@ -493,23 +686,126 @@ def _reconcile_committed_pending_layout(install: Path) -> None:
         return
     raw_layout = json.loads(layout_path.read_text(encoding="utf-8"))
     if isinstance(raw_layout, dict) and raw_layout.get("version") == 1:
-        _verified_legacy_layout(install)
-        _validate_layout(json.loads(pending_path.read_text(encoding="utf-8")), pending=True)
+        legacy = _validate_legacy_layout(raw_layout)
+        pending = _validate_layout(
+            json.loads(pending_path.read_text(encoding="utf-8")), pending=True,
+        )
+        _validate_pending_publication(install, pending, legacy)
         return
     layout = _validate_layout(raw_layout)
     pending = _validate_layout(
         json.loads(pending_path.read_text(encoding="utf-8")), pending=True
     )
-    committed = {key: pending[key] for key in LAYOUT_FIELDS}
+    committed = _committed_layout(pending)
     if committed != layout or set(pending["published"]) != ASSET_PATHS or set(
         pending["backups_ready"]
     ) != set(layout["legacy_backups"]):
         raise RuntimeError("pending bootstrap publication does not match committed layout")
-    for relative, expected in layout["assets"].items():  # type: ignore[union-attr]
+    for relative, expected in layout["assets"].items():
         target = install / _safe_relative(relative)
         if not target.is_file() or _sha256(target) != expected:
             raise RuntimeError(f"stable bootstrap asset was modified: {relative}")
     pending_path.unlink()
+
+
+def _committed_layout(pending: PendingLayout) -> Layout:
+    return {"version": pending["version"], "assets": pending["assets"],
+            "legacy_backups": pending["legacy_backups"]}
+
+
+def _validate_pending_publication(
+    install: Path, pending: PendingLayout, legacy: LegacyLayout | None,
+) -> None:
+    originals = legacy["assets"] if legacy is not None else pending["legacy_backups"]
+    if legacy is not None and set(pending["legacy_backups"]) != set(legacy["legacy_backups"]):
+        raise RuntimeError("bootstrap publication legacy backup set changed")
+    for relative, desired in pending["assets"].items():
+        target = install / relative
+        _plain_full_ancestry(target)
+        if not target.exists():
+            if relative in originals or relative in pending["published"]:
+                raise RuntimeError(f"bootstrap publication asset is missing: {relative}")
+            continue
+        if not target.is_file():
+            raise RuntimeError(f"bootstrap publication asset is not a file: {relative}")
+        digest = _sha256(target)
+        allowed = (
+            {desired} if relative in pending["published"] else {desired, originals.get(relative)}
+        )
+        if digest not in allowed:
+            raise RuntimeError(f"bootstrap publication asset was modified: {relative}")
+    for relative, expected in pending["legacy_backups"].items():
+        backup = install / "bootstrap" / "legacy-assets" / relative
+        _plain_full_ancestry(backup)
+        staged_name = pending["backup_staging"].get(relative)
+        if staged_name is not None:
+            staged = backup.with_name(staged_name)
+            _plain_full_ancestry(staged)
+            if staged.exists() and not staged.is_file():
+                raise RuntimeError(f"legacy backup staging is not a file: {relative}")
+        if backup.exists():
+            if not backup.is_file() or _sha256(backup) != expected:
+                raise RuntimeError(f"legacy backup was modified: {relative}")
+        elif legacy is not None or relative in pending["backups_ready"]:
+            raise RuntimeError(f"legacy backup is missing: {relative}")
+        else:
+            target = install / relative
+            if not target.is_file() or _sha256(target) != expected:
+                raise RuntimeError(f"original bootstrap asset is unavailable: {relative}")
+
+
+def _publish_legacy_backup(
+    target: Path, backup: Path, expected: str, relative: str,
+    pending_path: Path, pending: PendingLayout,
+) -> None:
+    if backup.exists():
+        if not backup.is_file() or _sha256(backup) != expected:
+            raise RuntimeError(f"legacy backup was modified: {relative}")
+        _flush_file(backup)
+        _flush_directory(backup.parent)
+        staged_name = pending["backup_staging"].get(relative)
+        if staged_name is not None:
+            staged = backup.with_name(staged_name)
+            _plain_full_ancestry(staged)
+            if staged.exists():
+                if not staged.is_file():
+                    raise RuntimeError(f"legacy backup staging is not a file: {relative}")
+                staged.unlink()
+                _flush_directory(backup.parent)
+        return
+    if not target.is_file() or _sha256(target) != expected:
+        raise RuntimeError(f"original bootstrap asset was modified: {relative}")
+    staged_name = pending["backup_staging"].get(relative)
+    if staged_name is None:
+        temporary = backup.with_name(f"{backup.name}.backup-{uuid.uuid4().hex}")
+        # Reserve before recording ownership. A crash before the checkpoint
+        # leaves an unowned empty file, which recovery never reuses or removes.
+        with temporary.open("xb") as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
+        pending["backup_staging"][relative] = temporary.name
+        _atomic_json(pending_path, pending)
+    else:
+        temporary = backup.with_name(staged_name)
+    _plain_full_ancestry(temporary)
+    shutil.copy2(target, temporary)
+    if _sha256(temporary) != expected or _sha256(target) != expected:
+        raise RuntimeError(f"original bootstrap asset changed during backup: {relative}")
+    _flush_file(temporary)
+    # Hard-link publication is atomic and exclusive on both supported platforms;
+    # unlike replace(), it cannot overwrite a concurrently created final backup.
+    try:
+        os.link(temporary, backup)
+    except FileExistsError:
+        raise
+    except OSError as error:
+        raise RuntimeError(
+            "filesystem cannot atomically publish legacy backup; "
+            "original and owned staging were preserved"
+        ) from error
+    _flush_directory(backup.parent)
+    temporary.unlink()
+    _flush_directory(backup.parent)
 
 
 def _initialize_bootstrap(install: Path, candidate: Path) -> None:
@@ -525,28 +821,44 @@ def _initialize_bootstrap(install: Path, candidate: Path) -> None:
             path.mkdir(parents=True, exist_ok=True)
     layout_path = install / "bootstrap" / "layout.json"
     pending_path = install / "bootstrap" / "layout.pending.json"
-    legacy_layout: dict[str, object] | None = None
+    pending: PendingLayout | None = None
+    if pending_path.exists():
+        _plain_ancestors(pending_path, Path(install.anchor))
+        pending = _validate_layout(
+            json.loads(pending_path.read_text(encoding="utf-8")), pending=True,
+        )
+        if pending["assets"] != desired:
+            raise RuntimeError("bootstrap publication candidate changed")
+    legacy_layout: LegacyLayout | None = None
     if layout_path.exists():
         raw_layout = json.loads(layout_path.read_text(encoding="utf-8"))
         if isinstance(raw_layout, dict) and raw_layout.get("version") == 1:
-            legacy_layout = _verified_legacy_layout(install)
+            legacy_layout = (
+                _validate_legacy_layout(raw_layout) if pending is not None
+                else _verified_legacy_layout(install)
+            )
             if (install / "bootstrap" / "install-transaction.json").exists():
-                raise RuntimeError("legacy installation transaction must be completed before migration")
+                raise RuntimeError(
+                    "legacy installation transaction must be completed before migration"
+                )
         else:
             layout = _validate_layout(raw_layout)
-            for relative, expected in layout["assets"].items():  # type: ignore[union-attr]
+            for relative, expected in layout["assets"].items():
                 target = install / _safe_relative(relative)
                 _plain_ancestors(target, install)
                 if not target.is_file() or _sha256(target) != expected:
                     raise RuntimeError(f"stable bootstrap asset was modified: {relative}")
             _reconcile_committed_pending_layout(install)
             return
-    if legacy_layout is not None:
+    if pending is not None:
+        _validate_pending_publication(install, pending, legacy_layout)
+        backups = pending["legacy_backups"]
+    elif legacy_layout is not None:
         backups = {
             relative: _sha256(
                 install / "bootstrap" / "legacy-assets" / _safe_relative(relative)
             )
-            for relative in legacy_layout["legacy_backups"]  # type: ignore[union-attr]
+            for relative in legacy_layout["legacy_backups"]
         }
     else:
         backups = {
@@ -554,41 +866,34 @@ def _initialize_bootstrap(install: Path, candidate: Path) -> None:
             for _, target in ASSETS
             if (install / target).is_file()
         }
-    if pending_path.exists():
-        pending = _validate_layout(
-            json.loads(pending_path.read_text(encoding="utf-8")), pending=True
-        )
-        if pending["assets"] != desired or pending["legacy_backups"] != backups:
-            raise RuntimeError("bootstrap publication candidate changed")
-    else:
+    if pending is None:
         pending = {
             "version": 2,
             "assets": desired,
             "legacy_backups": backups,
             "backups_ready": [],
             "published": [],
+            "backup_staging": {},
         }
         _atomic_json(pending_path, pending)
+    _validate_pending_publication(install, pending, legacy_layout)
     backup_root = install / "bootstrap" / "legacy-assets"
-    for relative, expected in pending["legacy_backups"].items():  # type: ignore[union-attr]
+    for relative, expected in pending["legacy_backups"].items():
         backup = backup_root / _safe_relative(relative)
         target = install / relative
         _plain_ancestors(target, install)
         _plain_ancestors(backup.parent, install)
-        if relative not in pending["backups_ready"]:  # type: ignore[operator]
+        if relative not in pending["backups_ready"]:
             backup.parent.mkdir(parents=True, exist_ok=True)
-            if backup.exists() and _sha256(backup) != expected:
-                raise RuntimeError(f"legacy backup was modified: {relative}")
-            if not backup.exists():
-                shutil.copy2(target, backup)
-            pending["backups_ready"].append(relative)  # type: ignore[union-attr]
+            _publish_legacy_backup(target, backup, expected, relative, pending_path, pending)
+            pending["backups_ready"].append(relative)
             _atomic_json(pending_path, pending)
             if os.environ.get("DEVLOOP_TEST_INTERRUPT_BOOTSTRAP_AFTER_BACKUP") == "1":
                 os._exit(93)
     for source_relative, target_relative in ASSETS:
         source = template / source_relative
         target = install / target_relative
-        if target_relative in pending["published"]:  # type: ignore[operator]
+        if target_relative in pending["published"]:
             if not target.is_file() or _sha256(target) != desired[target_relative]:
                 raise RuntimeError(f"published bootstrap asset was modified: {target_relative}")
             continue
@@ -598,15 +903,22 @@ def _initialize_bootstrap(install: Path, candidate: Path) -> None:
             shutil.copy2(source, temporary)
             if target.suffix in {".sh", ""}:
                 temporary.chmod(temporary.stat().st_mode | 0o111)
+            if _sha256(temporary) != desired[target_relative]:
+                raise RuntimeError(
+                    f"bootstrap source changed during publication: {target_relative}"
+                )
+            _flush_file(temporary)
             os.replace(temporary, target)
+        _flush_file(target)
+        _flush_directory(target.parent)
         if (
             os.environ.get("DEVLOOP_TESTING") == "1"
             and os.environ.get("DEVLOOP_TEST_INTERRUPT_BOOTSTRAP_AFTER_ASSET") == target_relative
         ):
             os._exit(94)
-        pending["published"].append(target_relative)  # type: ignore[union-attr]
+        pending["published"].append(target_relative)
         _atomic_json(pending_path, pending)
-    layout = {key: pending[key] for key in LAYOUT_FIELDS}
+    layout = _committed_layout(pending)
     _atomic_json(layout_path, layout)
     pending_path.unlink()
 
@@ -710,8 +1022,6 @@ def prepare(install: Path, candidate: Path, commit: str, transaction_id: str) ->
     if _journal(install) is not None:
         raise RuntimeError("an unfinished installation transaction requires recovery")
     release = install / "releases" / commit
-    if release.exists():
-        raise RuntimeError("canonical release already exists without a transaction")
     previous = previous_previous = None
     current_path = install / "bootstrap" / "current.json"
     if current_path.exists():
@@ -720,6 +1030,30 @@ def prepare(install: Path, candidate: Path, commit: str, transaction_id: str) ->
         if state.previous is not None:
             verify_pointer(install, state.previous, "previous")
         previous, previous_previous = state.current, state.previous
+    if release.exists():
+        verify_release(install, commit)
+        _verify_git_ownership(install, release, required=True, commit=commit)
+        retained = _release_evidence(release, commit)
+        if any(retained[field] != evidence[field] for field in ("commit", "tracked_fingerprint")):
+            raise RuntimeError("retained release does not match requested candidate")
+        # The candidate is still owned solely by the live install lock, exactly
+        # as in abort(). Discard it before publishing a journal for the retained
+        # release: its newly-built runtime need not match the retained runtime.
+        _validate_candidate_path(install, str(candidate), transaction_id)
+        if _release_evidence(candidate, commit) != evidence:
+            raise RuntimeError("candidate changed before retained release activation")
+        shutil.rmtree(candidate, onerror=_remove_read_only)
+        _atomic_json(_ownership_path(install, transaction_id), {
+            "version": 1, "transaction_id": transaction_id,
+            "candidate_name": candidate.name, "commit": commit,
+        })
+        _write_journal(install, {
+            "version": TRANSACTION_SCHEMA, "transaction_id": transaction_id,
+            "install_root": str(install), "candidate_path": str(candidate),
+            **retained, "previous_pointer": previous,
+            "previous_previous_pointer": previous_previous,
+        }, "release_ready")
+        return release
     git_ownership = {
         "version": GIT_OWNERSHIP_SCHEMA,
         "commit": commit,
@@ -847,7 +1181,10 @@ def recover(install: Path, transaction_id: str) -> tuple[str, Path | None]:
         return "NEEDS_ADOPTION" if phase == "release_ready" else "READY_TO_SWITCH", release
     if phase in {"switched", "committed"}:
         state = read_pointer_state(install)
-        if state.current["commit"] != journal["commit"]:
+        if (
+            state.current != _pointer_from_evidence(journal)
+            or state.previous != journal["previous_pointer"]
+        ):
             raise RuntimeError("switched journal disagrees with authoritative pointer state")
         verify(install)
         _finish_transaction(install, journal)
@@ -872,9 +1209,10 @@ def _assert_pointer_baseline(
     expected_current = journal["previous_pointer"]
     expected_previous = journal["previous_previous_pointer"]
     if expected_current is None:
-        if current_path.exists():
-            raise RuntimeError("authoritative pointer changed since transaction prepare")
-        return
+        if expected_previous is not None:
+            raise RuntimeError("fresh installation journal has an invalid previous pointer")
+        if not current_path.exists():
+            return
     state = read_pointer_state(install)
     if state.current == new_pointer and state.previous == expected_current:
         return
@@ -909,6 +1247,8 @@ def commit(install: Path, transaction_id: str) -> None:
         and os.environ.get("DEVLOOP_TESTING") == "1"
         and os.environ.get("DEVLOOP_TEST_MUTATE_CURRENT_AFTER_FINAL_CHECK") == "1"
     ):
+        if not isinstance(previous, dict):
+            raise RuntimeError("installation journal previous pointer is invalid")
         (install / str(previous["release_path"]) / "operator-race.bin").write_bytes(b"race\x00\xff")
     _atomic_json(
         current_path, {"version": POINTER_SCHEMA, "current": new_pointer, "previous": previous}
@@ -958,7 +1298,7 @@ def _uninstall_plan(install: Path) -> UninstallPlan:
     layout_path = bootstrap / "layout.json"
     _plain_ancestors(layout_path, install)
     layout = _validate_layout(json.loads(layout_path.read_text(encoding="utf-8")))
-    expected_verifier_hash = layout["assets"]["bootstrap/verify.py"]  # type: ignore[index]
+    expected_verifier_hash = layout["assets"]["bootstrap/verify.py"]
     if _sha256(verifier) != expected_verifier_hash:
         raise RuntimeError("mandatory release verifier was modified; nothing was removed")
     state = read_pointer_state(install)
@@ -966,14 +1306,18 @@ def _uninstall_plan(install: Path) -> UninstallPlan:
     if state.previous is not None:
         verify_pointer(install, state.previous, "previous")
     releases: list[Path] = []
+    release_inventories: list[tuple[Path, dict[str, str | None]]] = []
     manifests: list[Path] = []
     release_names: set[str] = set()
     for release in releases_root.iterdir():
         _plain_ancestors(release, install)
         if not release.is_dir() or COMMIT_PATTERN.fullmatch(release.name) is None:
             raise RuntimeError(f"unmanaged release path blocks uninstall: {release}")
+        inventory = _content_inventory(release)
         verify_release(install, release.name)
         _verify_git_ownership(install, release, required=True)
+        _check_inventory(release, inventory, partial=False)
+        release_inventories.append((release, inventory))
         release_names.add(release.name)
         releases.append(release)
         manifests.append(bootstrap / f"release-{release.name}.json")
@@ -990,7 +1334,7 @@ def _uninstall_plan(install: Path) -> UninstallPlan:
     backup_root = bootstrap / "legacy-assets"
     remove_assets: list[Path] = []
     restore_assets: list[tuple[Path, Path]] = []
-    for relative, expected in layout["assets"].items():  # type: ignore[union-attr]
+    for relative, expected in layout["assets"].items():
         target = install / _safe_relative(relative)
         _plain_ancestors(target.parent, install)
         if target.exists():
@@ -999,7 +1343,7 @@ def _uninstall_plan(install: Path) -> UninstallPlan:
                 raise RuntimeError(f"bootstrap asset is not a plain file: {relative}")
             if _sha256(target) == expected:
                 remove_assets.append(target)
-    for relative, expected in layout["legacy_backups"].items():  # type: ignore[union-attr]
+    for relative, expected in layout["legacy_backups"].items():
         backup = backup_root / _safe_relative(relative)
         target = install / relative
         _plain_ancestors(backup, install)
@@ -1019,6 +1363,7 @@ def _uninstall_plan(install: Path) -> UninstallPlan:
         tuple(remove_assets),
         tuple(restore_assets),
         tuple(metadata),
+        tuple(release_inventories),
     )
 
 
@@ -1121,6 +1466,206 @@ def _uninstall_plan_hash(actions: list[dict[str, object]]) -> str:
     return hashlib.sha256(encoded).hexdigest().upper()
 
 
+def _canonical_action_path(value: object, root: Path) -> Path:
+    if not isinstance(value, str):
+        raise RuntimeError("uninstall action path is not a string")
+    path = Path(value)
+    if not path.is_absolute() or str(path) != value or ".." in path.parts or path == root:
+        raise RuntimeError("uninstall action path is not canonical")
+    if not path.is_relative_to(root):
+        raise RuntimeError("uninstall action path is outside its owned root")
+    _plain_full_ancestry(path)
+    return path
+
+
+def _validate_action_paths(
+    install: Path, staging: Path, action: dict[str, Any], index: int,
+) -> None:
+    kind = action.get("kind")
+    if (
+        not isinstance(kind, str) or kind not in UNINSTALL_ACTION_FIELDS
+        or set(action) != UNINSTALL_ACTION_FIELDS[kind]
+        or action.get("id") != f"{index:03d}-{kind}"
+        or action.get("state") not in {"pending", "before", "after"}
+    ):
+        raise RuntimeError("uninstall journal action has an unsupported schema or identity")
+    if "path" in action:
+        target = _canonical_action_path(action["path"], install)
+        relative = target.relative_to(install).as_posix()
+        valid = {
+            "remove_release": re.fullmatch(r"releases/[0-9a-f]{40}", relative) is not None,
+            "remove_manifest": re.fullmatch(
+                r"bootstrap/(release|git-ownership)-[0-9a-f]{40}\.json", relative,
+            ) is not None,
+            "remove_pointer": relative in {"bootstrap/current.json", "bootstrap/previous.json"},
+            "remove_asset": relative in ASSET_PATHS,
+            "remove_metadata": relative in {f"bootstrap/{name}" for name in UNINSTALL_METADATA},
+        }
+        if not valid[kind]:
+            raise RuntimeError("uninstall action target is not in its canonical allowlist")
+    elif kind == "restore_legacy":
+        target = _canonical_action_path(action["target"], install)
+        relative = _safe_relative(target.relative_to(install).as_posix())
+        source = _canonical_action_path(action["source"], install)
+        if source != install / "bootstrap" / "legacy-assets" / relative:
+            raise RuntimeError("uninstall legacy restore action is not owned")
+    else:
+        staged = _canonical_action_path(action["staged"], staging)
+        relative = staged.relative_to(staging).as_posix()
+        if relative not in CAPABILITY_PATHS:
+            raise RuntimeError("uninstall capability staging path is not owned")
+        destination = Path(str(action["destination"]))
+        _canonical_action_path(action["destination"], Path(destination.anchor))
+        if kind == "stage_capability":
+            source = _canonical_action_path(action["source"], install)
+            if re.fullmatch(
+                rf"releases/[0-9a-f]{{40}}/{re.escape(relative)}",
+                source.relative_to(install).as_posix(),
+            ) is None:
+                raise RuntimeError("uninstall capability source is not owned")
+
+
+def _content_inventory(root: Path) -> dict[str, str | None]:
+    _plain_full_ancestry(root)
+    inventory: dict[str, str | None] = {}
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        status = path.lstat()
+        if stat.S_ISLNK(status.st_mode) or (
+            getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RuntimeError("uninstall content contains a reparse or symbolic link")
+        relative = path.relative_to(root).as_posix()
+        if stat.S_ISDIR(status.st_mode):
+            inventory[relative] = None
+            pending.extend(path.iterdir())
+        elif stat.S_ISREG(status.st_mode):
+            inventory[relative] = _sha256(path)
+        else:
+            raise RuntimeError("uninstall content contains a special filesystem entry")
+    return inventory
+
+
+def _check_inventory(path: Path, expected: object, *, partial: bool) -> None:
+    if not isinstance(expected, dict) or "." not in expected:
+        raise RuntimeError("uninstall original content evidence is missing")
+    for relative, digest in expected.items():
+        if (
+            not isinstance(relative, str) or "\\" in relative
+            or PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts
+            or PurePosixPath(relative).as_posix() != relative
+        ):
+            raise RuntimeError("uninstall original content evidence path is invalid")
+        if digest is not None:
+            _validate_hash(digest, "uninstall content")
+    actual = _content_inventory(path) if path.exists() else {}
+    if (not partial and actual != expected) or any(
+        relative not in expected or expected[relative] != digest
+        for relative, digest in actual.items()
+    ):
+        raise RuntimeError(f"uninstall content changed after preflight: {path}")
+
+
+def _publish_uninstall_evidence(
+    install: Path, staging: Path, journal: dict[str, Any],
+    *, release_inventories: Mapping[Path, dict[str, str | None]] | None = None,
+) -> None:
+    layout = _validate_layout(json.loads((install / "bootstrap/layout.json").read_text()))
+    records: dict[str, object] = {}
+    for index, action in enumerate(journal["actions"]):
+        _validate_action_paths(install, staging, action, index)
+        kind = action["kind"]
+        if kind == "remove_release":
+            release = Path(action["path"])
+            if release_inventories is None or release not in release_inventories:
+                raise RuntimeError("uninstall release has no ownership-bound preflight inventory")
+            original = release_inventories[release]
+            _check_inventory(release, original, partial=False)
+            records[action["id"]] = original
+        elif "path" in action:
+            records[action["id"]] = _content_inventory(Path(action["path"]))
+        elif kind == "restore_legacy":
+            records[action["id"]] = {
+                "source": _content_inventory(Path(action["source"])),
+                "target": _content_inventory(Path(action["target"])),
+            }
+        elif kind == "stage_capability":
+            records[action["id"]] = _content_inventory(Path(action["source"]))
+        else:
+            source_action = next(
+                item for item in journal["actions"]
+                if item["kind"] == "stage_capability" and item["staged"] == action["staged"]
+                and item["destination"] == action["destination"]
+            )
+            records[action["id"]] = records[source_action["id"]]
+    _atomic_json(staging / UNINSTALL_EVIDENCE_NAME, {
+        "version": 1, "transaction_id": journal["transaction_id"],
+        "install_root": str(install), "layout_hash": journal["layout_hash"],
+        "plan_hash": journal["plan_hash"], "layout": layout, "actions": records,
+    })
+
+
+def _uninstall_evidence(
+    install: Path, staging: Path, journal: dict[str, Any],
+) -> dict[str, Any]:
+    path = staging / UNINSTALL_EVIDENCE_NAME
+    _plain_full_ancestry(path)
+    if not path.is_file():
+        raise RuntimeError("uninstall original content evidence is missing; preserve owned data")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "transaction_id", "install_root", "layout_hash",
+                         "plan_hash", "layout", "actions"}
+        or value["version"] != 1
+        or any(value[field] != journal[field] for field in
+               ("transaction_id", "install_root", "layout_hash", "plan_hash"))
+        or not isinstance(value["actions"], dict)
+        or set(value["actions"]) != {item["id"] for item in journal["actions"]}
+    ):
+        raise RuntimeError("uninstall original content evidence does not match the journal")
+    _validate_layout(value["layout"])
+    return value
+
+
+def _validate_action_content(
+    install: Path, action: dict[str, Any], evidence: dict[str, Any],
+) -> None:
+    if action["state"] == "after":
+        return
+    expected = evidence["actions"][action["id"]]
+    kind = action["kind"]
+    if "path" in action:
+        path = Path(action["path"])
+        if kind == "remove_asset":
+            relative = path.relative_to(install).as_posix()
+            if expected != {".": evidence["layout"]["assets"][relative]}:
+                raise RuntimeError("uninstall asset evidence does not match the owned layout")
+        _check_inventory(path, expected, partial=action["state"] == "before")
+    elif kind == "restore_legacy":
+        source, target = Path(action["source"]), Path(action["target"])
+        relative = target.relative_to(install).as_posix()
+        expected_source = {".": evidence["layout"]["legacy_backups"].get(relative)}
+        expected_target = {".": evidence["layout"]["assets"][relative]}
+        if expected != {"source": expected_source, "target": expected_target}:
+            raise RuntimeError("uninstall legacy evidence does not match the owned layout")
+        if source.exists():
+            _check_inventory(source, expected_source, partial=False)
+            _check_inventory(target, expected_target, partial=action["state"] == "before")
+        elif action["state"] == "before":
+            _check_inventory(target, expected_source, partial=False)
+        else:
+            raise RuntimeError("uninstall legacy backup is missing")
+    elif kind == "stage_capability":
+        _check_inventory(Path(action["source"]), expected, partial=False)
+        staged = Path(action["staged"])
+        if staged.exists():
+            _check_inventory(staged, expected, partial=action["state"] == "before")
+    else:
+        _check_inventory(Path(action["staged"]), expected, partial=False)
+
+
 def _new_uninstall_journal(
     install: Path,
     transaction_id: str,
@@ -1131,10 +1676,26 @@ def _new_uninstall_journal(
     plan = _uninstall_plan(install)
     layout_path = install / "bootstrap" / "layout.json"
     layout_hash = _sha256(layout_path)
+    layout = _validate_layout(json.loads(layout_path.read_text(encoding="utf-8")))
+    recovery_sources = (
+        ("bootstrap/transaction.py", "transaction.py"),
+        ("bootstrap/verify.py", "verify.py"),
+        ("install/uninstall-devloop.ps1", "uninstall-devloop.ps1"),
+        ("install/uninstall-devloop.sh", "uninstall-devloop.sh"),
+    )
+    for relative, _ in recovery_sources:
+        source = install / relative
+        _plain_full_ancestry(source)
+        if not source.is_file() or _sha256(source) != layout["assets"][relative]:
+            raise RuntimeError(
+                f"uninstall recovery prerequisite is missing or modified: {relative}"
+            )
     staging = _uninstall_staging(install, transaction_id)
     staging.mkdir()
-    shutil.copy2(install / "bootstrap" / "transaction.py", staging / "transaction.py")
-    shutil.copy2(install / "bootstrap" / "verify.py", staging / "verify.py")
+    for relative, name in recovery_sources:
+        copied = staging / name
+        shutil.copy2(install / relative, copied)
+        _flush_file(copied)
     actions = _uninstall_actions(
         install,
         plan,
@@ -1153,14 +1714,80 @@ def _new_uninstall_journal(
         "actions": actions,
     }
     path = staging / "journal.json"
+    _publish_uninstall_evidence(
+        install, staging, journal, release_inventories=dict(plan.release_inventories),
+    )
     _write_uninstall_journal(path, journal)
     return path, journal
+
+
+def _validate_uninstall_retry_options(
+    install: Path, staging: Path, journal: dict[str, Any], *,
+    keep_capabilities: bool, skills_destination: Path | None,
+    agents_destination: Path | None, install_root: Path | None, bin_directory: Path | None,
+) -> None:
+    if install_root is not None and install_root.absolute() != install:
+        raise RuntimeError("uninstall retry install directory differs from the bound plan")
+    if bin_directory is not None:
+        raise RuntimeError("uninstall retry cannot change bin directory; use the bound plan")
+    capability_actions = [action for action in journal["actions"]
+                          if action["kind"] == "stage_capability"]
+    if keep_capabilities and capability_actions:
+        raise RuntimeError("uninstall retry preservation option conflicts with the bound plan")
+    for relative, requested in (
+        ("skills/codex", skills_destination), ("agents/codex", agents_destination),
+    ):
+        if requested is None:
+            continue
+        destinations = {action["destination"] for action in capability_actions
+                        if action["staged"] == str(staging / relative)}
+        if destinations != {str(requested.absolute())}:
+            raise RuntimeError("uninstall retry capability destination differs from the bound plan")
+
+
+def resume_uninstall(
+    staging: Path, owner_pid: int | None = None, *, keep_capabilities: bool = False,
+    skills_destination: Path | None = None, agents_destination: Path | None = None,
+    install_root: Path | None = None, bin_directory: Path | None = None,
+) -> None:
+    staging = staging.absolute()
+    _plain_full_ancestry(staging)
+    raw = json.loads((staging / "journal.json").read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise RuntimeError("uninstall recovery journal must be an object")
+    transaction_id = raw.get("transaction_id")
+    journal_install_root = raw.get("install_root")
+    if (
+        not isinstance(transaction_id, str)
+        or TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is None
+        or not isinstance(journal_install_root, str)
+    ):
+        raise RuntimeError("uninstall recovery identity is invalid")
+    install = Path(journal_install_root)
+    if not install.is_absolute() or str(install) != journal_install_root or (
+        staging != _uninstall_staging(install, transaction_id)
+    ):
+        raise RuntimeError("uninstall recovery location is not owned")
+    _, journal = _read_uninstall_journal(install, transaction_id)
+    _validate_uninstall_retry_options(
+        install, staging, journal, keep_capabilities=keep_capabilities,
+        skills_destination=skills_destination, agents_destination=agents_destination,
+        install_root=install_root, bin_directory=bin_directory,
+    )
+    acquired = begin(
+        install, "uninstall", owner_pid, recovery_transaction_id=transaction_id,
+    )
+    if acquired != transaction_id:
+        _release_lock(install, acquired)
+        raise RuntimeError("uninstall recovery lock does not identify this journal")
+    uninstall(install, transaction_id, None, None, True)
 
 
 def _read_uninstall_journal(
     install: Path, transaction_id: str
 ) -> tuple[Path, dict[str, object]]:
     path = _uninstall_staging(install, transaction_id) / "journal.json"
+    _plain_full_ancestry(path)
     value = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(value, dict)
@@ -1181,52 +1808,38 @@ def _read_uninstall_journal(
         raise RuntimeError("uninstall journal has an unsupported schema")
     _validate_hash(value["layout_hash"], "uninstall layout")
     _validate_hash(value["plan_hash"], "uninstall plan")
+    staging = path.parent
+    unfinished = False
+    started = False
+    for index, action in enumerate(value["actions"]):
+        if not isinstance(action, dict):
+            raise RuntimeError("uninstall journal action is invalid")
+        _validate_action_paths(install, staging, action, index)
+        if action["state"] == "after":
+            if unfinished:
+                raise RuntimeError("uninstall action checkpoints are out of order")
+        else:
+            if action["state"] == "before" and (unfinished or started):
+                raise RuntimeError("uninstall action checkpoints are out of order")
+            unfinished = True
+            started = started or action["state"] == "before"
+    if value.get("status") not in {"executing", "committed"}:
+        raise RuntimeError("uninstall journal status is unsupported")
+    if value["status"] == "committed" and unfinished:
+        raise RuntimeError("committed uninstall has unfinished actions")
     if _uninstall_plan_hash(value["actions"]) != value["plan_hash"]:
         raise RuntimeError("uninstall journal action plan changed after preflight")
     layout_path = install / "bootstrap" / "layout.json"
     if layout_path.exists() and _sha256(layout_path) != value["layout_hash"]:
         raise RuntimeError("uninstall layout changed after preflight")
-    staging = path.parent
-    _plain_ancestors(staging, install.parent)
+    evidence = _uninstall_evidence(install, staging, value)
     for action in value["actions"]:
-        if not isinstance(action, dict):
-            raise RuntimeError("uninstall journal action is invalid")
-        kind = action.get("kind")
-        if kind in {
-            "remove_release",
-            "remove_manifest",
-            "remove_pointer",
-            "remove_asset",
-            "remove_metadata",
-        }:
-            target = Path(str(action.get("path"))).absolute()
-            if target == install or not target.is_relative_to(install):
-                raise RuntimeError("uninstall journal action escapes the install root")
-            if kind == "remove_release" and action.get("state") != "after" and target.exists():
-                if target.parent != install / "releases":
-                    raise RuntimeError("Git ownership release path is not canonical")
-                _plain_ancestors(target, install)
-                _git_removal_proof(install, target, transaction_id, str(action.get("state")))
-        elif kind == "restore_legacy":
-            source = Path(str(action.get("source"))).absolute()
-            target = Path(str(action.get("target"))).absolute()
-            if not source.is_relative_to(
-                install / "bootstrap" / "legacy-assets"
-            ) or not target.is_relative_to(install):
-                raise RuntimeError("uninstall legacy restore action is not owned")
-        elif kind == "stage_capability":
-            source = Path(str(action.get("source"))).absolute()
-            staged = Path(str(action.get("staged"))).absolute()
-            if not source.is_relative_to(
-                install / "releases"
-            ) or not staged.is_relative_to(staging):
-                raise RuntimeError("uninstall capability stage action is not owned")
-        elif kind == "cleanup_capability":
-            staged = Path(str(action.get("staged"))).absolute()
-            if not staged.is_relative_to(staging):
-                raise RuntimeError("uninstall capability action is not owned")
-        else:
-            raise RuntimeError("uninstall journal action is unsupported")
+        if action["kind"] == "cleanup_capability" and any(
+            item["kind"] == "stage_capability" and item["staged"] == action["staged"]
+            and item["state"] != "after" for item in value["actions"]
+        ):
+            continue
+        _validate_action_content(install, action, evidence)
     return path, value
 
 
@@ -1356,9 +1969,8 @@ def _execute_uninstall_action(action: dict[str, object], transaction_id: str) ->
     elif kind == "stage_capability":
         source = Path(str(action["source"]))
         staged = Path(str(action["staged"]))
-        if not staged.exists():
-            staged.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source, staged)
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, staged, dirs_exist_ok=True)
     elif kind == "cleanup_capability":
         source = Path(str(action["staged"]))
         destination = Path(str(action["destination"]))
@@ -1366,6 +1978,7 @@ def _execute_uninstall_action(action: dict[str, object], transaction_id: str) ->
             if not item.is_file():
                 continue
             target = destination / item.relative_to(source)
+            _plain_ancestors(target, Path(target.anchor))
             if not target.is_file():
                 continue
             if _sha256(item) == _sha256(target):
@@ -1376,6 +1989,34 @@ def _execute_uninstall_action(action: dict[str, object], transaction_id: str) ->
                 raise OSError("injected capability cleanup failure")
     else:
         raise RuntimeError("uninstall journal action is unsupported")
+
+
+def _validate_uninstall_staging(
+    staging: Path, journal: dict[str, Any], evidence: dict[str, Any],
+) -> None:
+    allowed = {".", "journal.json", UNINSTALL_EVIDENCE_NAME}
+    for name, relative in (
+        ("transaction.py", "bootstrap/transaction.py"),
+        ("verify.py", "bootstrap/verify.py"),
+        ("uninstall-devloop.ps1", "install/uninstall-devloop.ps1"),
+        ("uninstall-devloop.sh", "install/uninstall-devloop.sh"),
+    ):
+        allowed.add(name)
+        _check_inventory(staging / name, {".": evidence["layout"]["assets"][relative]},
+                         partial=False)
+    for action in journal["actions"]:
+        if action["kind"] == "remove_release":
+            commit = Path(action["path"]).name
+            allowed.add(f"{GIT_REMOVAL_PROOF_PREFIX}{commit}.json")
+        elif action["kind"] == "stage_capability":
+            root = Path(action["staged"])
+            expected = evidence["actions"][action["id"]]
+            _check_inventory(root, expected, partial=False)
+            allowed.add(root.parent.relative_to(staging).as_posix())
+            allowed.update((root / relative).relative_to(staging).as_posix()
+                           for relative in expected)
+    if not set(_content_inventory(staging)).issubset(allowed):
+        raise RuntimeError("uninstall recovery staging contains unexpected data; preserve it")
 
 
 def uninstall_layout(install: Path, transaction_id: str) -> None:
@@ -1404,7 +2045,10 @@ def uninstall(
         )
     actions = journal["actions"]
     assert isinstance(actions, list)
-    for raw_action in actions:
+    evidence = _uninstall_evidence(install, staging, journal)
+    launcher = staging / ("uninstall-devloop.ps1" if os.name == "nt" else "uninstall-devloop.sh")
+    print(f'devloop-uninstall: recovery entrypoint: "{launcher}"', flush=True)
+    for index, raw_action in enumerate(actions):
         if not isinstance(raw_action, dict) or set(raw_action) - {
             "id",
             "kind",
@@ -1428,6 +2072,8 @@ def uninstall(
                 pass
             os._exit(95)
         action_id = str(raw_action["id"])
+        _validate_action_paths(install, staging, raw_action, index)
+        _validate_action_content(install, raw_action, evidence)
         if raw_action["kind"] == "remove_release":
             release = Path(str(raw_action["path"]))
             if release.exists():
@@ -1440,6 +2086,8 @@ def uninstall(
         _write_uninstall_journal(journal_path, journal)
         _uninstall_interrupt(action_id, "before")
         try:
+            _validate_action_paths(install, staging, raw_action, index)
+            _validate_action_content(install, raw_action, evidence)
             _execute_uninstall_action(raw_action, transaction_id)
         except OSError as error:
             if raw_action["kind"] != "cleanup_capability":
@@ -1466,6 +2114,7 @@ def uninstall(
             path.rmdir()
         except OSError:
             pass
+    _validate_uninstall_staging(staging, journal, evidence)
     _release_lock(install, transaction_id)
     shutil.rmtree(staging, onerror=_remove_read_only)
 
@@ -1505,6 +2154,15 @@ def main() -> int:
     uninstall_parser.add_argument("--skills-destination", type=Path)
     uninstall_parser.add_argument("--agents-destination", type=Path)
     uninstall_parser.add_argument("--keep-capabilities", action="store_true")
+    resume_parser = sub.add_parser("resume-uninstall")
+    resume_parser.add_argument("staging", type=Path)
+    resume_parser.add_argument("--owner-pid", type=int)
+    resume_parser.add_argument("--protocol", type=int, required=True)
+    resume_parser.add_argument("--keep-capabilities", action="store_true")
+    resume_parser.add_argument("--skills-destination", type=Path)
+    resume_parser.add_argument("--agents-destination", type=Path)
+    resume_parser.add_argument("--install-root", type=Path)
+    resume_parser.add_argument("--bin-directory", type=Path)
     args = parser.parse_args()
     if args.protocol != BOOTSTRAP_PROTOCOL:
         raise RuntimeError(
@@ -1534,6 +2192,12 @@ def main() -> int:
         )
     elif args.command == "abort":
         abort(args.install, args.transaction_id)
+    elif args.command == "resume-uninstall":
+        resume_uninstall(
+            args.staging, args.owner_pid, keep_capabilities=args.keep_capabilities,
+            skills_destination=args.skills_destination, agents_destination=args.agents_destination,
+            install_root=args.install_root, bin_directory=args.bin_directory,
+        )
     else:
         rollback(args.install, args.transaction_id)
     return 0

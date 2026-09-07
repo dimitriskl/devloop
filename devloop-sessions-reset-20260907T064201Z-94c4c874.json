@@ -1,0 +1,16 @@
+{
+  "result": "success",
+  "catalog": "C:\\Users\\Dimitris\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\LocalCache\\Local\\DevLoop\\state\\portable-sessions.sqlite3",
+  "removed_session_ids": [
+    "f32e491f-0135-4136-aade-bff41d8b0ffd",
+    "eac91c81-6515-4c29-badd-912c57748e89",
+    "e59e9f2b-67d6-44ad-80d0-11779023d10a",
+    "dfd648e9-c43a-4629-b0a9-ca4b7617cc2f"
+  ],
+  "remaining_sessions": 0,
+  "saved_projects_preserved": 3,
+  "settings_preserved": true,
+  "project_files_modified": false,
+  "backup": "E:\\devloop-recovery-20260905\\devloop-sessions-reset-20260907T064201Z-94c4c874.backup.sqlite3",
+  "backup_sha256": "1116a03c7769ab4e6dbdc1fae31d0de1e1de3bdd09820da5740a1268dc9b1531"
+}

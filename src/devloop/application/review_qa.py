@@ -28,8 +28,8 @@ from devloop.components.review import (
     ReviewTurnInterrupted,
     ReviewTurnPaused,
 )
-from devloop.domain.capabilities import capabilities_for
 from devloop.domain.approval import locked_approval_policy
+from devloop.domain.capabilities import capabilities_for
 from devloop.domain.development import (
     ArtifactRef,
     CapabilityProfile,

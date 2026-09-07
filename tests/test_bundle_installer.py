@@ -4,10 +4,15 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
+from portable_test_support import (
+    OperatorInstallTestCase,
+    create_source_repository,
+    fixture_environment,
+    workspace_directory,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "install" / "devloop.sh"
@@ -19,7 +24,7 @@ DEVELOPMENT_SETUP_PS1 = ROOT / "install" / "setup-development.ps1"
 
 
 @unittest.skipIf(os.name == "nt", "Unix installer behavior requires a POSIX host")
-class BundleInstallerScriptTests(unittest.TestCase):
+class BundleInstallerScriptTests(OperatorInstallTestCase):
     def test_unix_installer_has_valid_shell_syntax(self) -> None:
         result = subprocess.run(
             ["bash", "-n", str(INSTALL_SH)],
@@ -47,15 +52,15 @@ class BundleInstallerScriptTests(unittest.TestCase):
         self.assertIn("immutable side-by-side releases", result.stdout)
 
     def test_unix_installer_installs_local_bundle(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             install_dir = Path(raw) / "bundle"
             bin_dir = Path(raw) / "bin"
-            env = os.environ.copy()
+            env = fixture_environment(Path(raw))
             env.update(
                 {
                     "DEVLOOP_INSTALL_DIR": str(install_dir),
                     "DEVLOOP_BIN_DIR": str(bin_dir),
-                    "DEVLOOP_REPO_URL": f"file://{ROOT.as_posix()}",
+                    "DEVLOOP_REPO_URL": create_source_repository(Path(raw)).as_uri(),
                     "DEVLOOP_REF": "HEAD",
                     "DEVLOOP_TESTING": "1",
                 }
@@ -73,15 +78,15 @@ class BundleInstallerScriptTests(unittest.TestCase):
             self.assertFalse(bin_dir.exists())
 
     def test_unix_installer_updates_existing_checkout(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             install_dir = Path(raw) / "bundle"
             bin_dir = Path(raw) / "bin"
-            env = os.environ.copy()
+            env = fixture_environment(Path(raw))
             env.update(
                 {
                     "DEVLOOP_INSTALL_DIR": str(install_dir),
                     "DEVLOOP_BIN_DIR": str(bin_dir),
-                    "DEVLOOP_REPO_URL": f"file://{ROOT.as_posix()}",
+                    "DEVLOOP_REPO_URL": create_source_repository(Path(raw)).as_uri(),
                     "DEVLOOP_REF": "HEAD",
                     "DEVLOOP_TESTING": "1",
                 }
@@ -123,16 +128,16 @@ class BundleInstallerScriptTests(unittest.TestCase):
         self.assertIn("immutable side-by-side releases", result.stdout)
 
     def test_unix_installer_rejects_non_git_install_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             install_dir = Path(raw) / "bundle"
             install_dir.mkdir()
             (install_dir / "README.md").write_text("not a git checkout", encoding="utf-8")
-            env = os.environ.copy()
+            env = fixture_environment(Path(raw))
             env.update(
                 {
                     "DEVLOOP_INSTALL_DIR": str(install_dir),
                     "DEVLOOP_BIN_DIR": str(Path(raw) / "bin"),
-                    "DEVLOOP_REPO_URL": f"file://{ROOT.as_posix()}",
+                    "DEVLOOP_REPO_URL": create_source_repository(Path(raw)).as_uri(),
                     "DEVLOOP_REF": "HEAD",
                     "DEVLOOP_TESTING": "1",
                 }
@@ -149,7 +154,7 @@ class BundleInstallerScriptTests(unittest.TestCase):
             self.assertIn("bootstrap", result.stderr)
 
     def test_unix_wrapper_bootstraps_a_missing_local_runtime(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             bundle = Path(raw) / "bundle"
             wrapper = bundle / "bin" / "devloop-plan.sh"
             wrapper.parent.mkdir(parents=True)
@@ -182,7 +187,7 @@ touch "$bundle/install/bootstrap-ran"
             self.assertIn("fake-python-started", result.stdout)
 
     def test_unix_uninstaller_removes_managed_artifacts_but_keeps_checkout(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             root = Path(raw)
             install_dir = root / "development-checkout"
             bin_dir = root / "bin"
@@ -214,15 +219,18 @@ touch "$bundle/install/bootstrap-ran"
 
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue(runtime.exists())
-            self.assertTrue((bin_dir / "devloop").exists())
-            self.assertTrue((bin_dir / "devloop-plan").exists())
+            for name in ("devloop", "devloop-plan"):
+                link = bin_dir / name
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(link.readlink(), install_dir / "bin" / f"{name}.sh")
             self.assertTrue(unrelated.exists())
             self.assertTrue((install_dir / "keep-source.txt").exists())
 
 
 @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "PowerShell is required")
-class BundleInstallerPowerShellTests(unittest.TestCase):
+class BundleInstallerPowerShellTests(OperatorInstallTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.powershell = "powershell" if os.name == "nt" and shutil.which("powershell") else "pwsh"
         self.powershell_command = [
             self.powershell,
@@ -268,7 +276,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
         self.assertIn("Prepare this development checkout", result.stdout)
 
     def test_windows_wrapper_bootstraps_a_missing_local_runtime(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             bundle = Path(raw) / "bundle"
             wrapper = bundle / "bin" / "devloop-plan.ps1"
             wrapper.parent.mkdir(parents=True)
@@ -303,7 +311,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             self.assertNotIn("runtime and bootstrap script are missing", result.stderr)
 
     def test_windows_uninstaller_removes_managed_artifacts_but_keeps_checkout(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             root = Path(raw)
             install_dir = root / "development-checkout"
             bin_dir = root / "bin"
@@ -322,7 +330,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             )
             unrelated = bin_dir / "keep.cmd"
             unrelated.write_text("@echo off\necho keep\n", encoding="ascii")
-            env = os.environ.copy()
+            env = fixture_environment(Path(raw))
             env["DEVLOOP_TESTING"] = "1"
             env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}"
 
@@ -353,7 +361,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             self.assertTrue((install_dir / "keep-source.txt").exists())
 
     def test_windows_uninstaller_removes_only_unchanged_installed_capabilities(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        with workspace_directory() as raw:
             root = Path(raw)
             install_dir = root / "development-checkout"
             install_dir.mkdir()
@@ -375,7 +383,7 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
                 ROOT / "agents" / "codex" / "senior-code-reviewer.md",
                 matching_agent,
             )
-            env = os.environ.copy()
+            env = fixture_environment(Path(raw))
             env["DEVLOOP_TESTING"] = "1"
             env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}"
 
@@ -408,17 +416,69 @@ class BundleInstallerPowerShellTests(unittest.TestCase):
             self.assertIn("layout", result.stderr)
 
     def test_windows_uninstaller_refuses_a_filesystem_root(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        # Parse and execute only the three argument-validation statements. Never launch
+        # the full uninstaller with a drive root, even when its refusal logic regresses.
+        with workspace_directory() as raw:
+            probe = Path(raw) / "root-argument-probe.ps1"
+            probe.write_text(
+                r"""param([string] $Source, [string] $RootArgument)
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$tree = [Management.Automation.Language.Parser]::ParseFile($Source, [ref] $tokens, [ref] $errors)
+if ($errors.Count) { throw 'uninstaller syntax invalid' }
+$statements = @($tree.EndBlock.Statements)
+$start = -1
+for ($i = 0; $i -lt $statements.Count; $i++) {
+    if ($statements[$i] -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $statements[$i].Left.Extent.Text -ceq '$InstallDir') { $start = $i; break }
+}
+if ($start -lt 0 -or $start + 2 -ge $statements.Count) { throw 'root guard boundary missing' }
+$guard = @($statements[$start], $statements[$start + 1], $statements[$start + 2])
+if ($guard[1] -isnot [Management.Automation.Language.AssignmentStatementAst] -or
+    $guard[1].Left.Extent.Text -cne '$root' -or
+    $guard[2] -isnot [Management.Automation.Language.IfStatementAst]) {
+    throw 'root guard structure changed; inspect before execution'
+}
+foreach ($statement in $guard) {
+    if ($statement.FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -or
+        $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+    }, $true).Count) { throw 'root guard contains an executable command' }
+    foreach ($call in $statement.FindAll({ param($node)
+        $node -is [Management.Automation.Language.InvokeMemberExpressionAst]
+    }, $true)) {
+        if ($call.Member.Extent.Text -cnotin @('GetFullPath', 'GetPathRoot', 'TrimEnd')) {
+            throw 'root guard contains an unexpected method'
+        }
+        if ($call.Static -and $call.Expression.Extent.Text -cne '[IO.Path]') {
+            throw 'root guard contains an unexpected static type'
+        }
+        if (-not $call.Static -and $call.Expression.Extent.Text -cnotin @(
+            '[IO.Path]::GetFullPath($InstallDir)', '$root'
+        )) { throw 'root guard contains an unexpected method receiver' }
+    }
+    foreach ($type in $statement.FindAll({ param($node)
+        $node -is [Management.Automation.Language.TypeExpressionAst]
+    }, $true)) {
+        if ($type.Extent.Text -cne '[IO.Path]') { throw 'root guard contains an unexpected type' }
+    }
+}
+$InstallDir = $RootArgument
+$extracted = ($guard | ForEach-Object { $_.Extent.Text }) -join "`n"
+& ([scriptblock]::Create($extracted))
+throw 'root validation returned without refusing; no uninstaller body was executed'
+""",
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 [
                     *self.powershell_command,
                     "-File",
+                    str(probe),
+                    "-Source",
                     str(UNINSTALL_PS1),
-                    "-InstallDir",
+                    "-RootArgument",
                     Path(raw).anchor,
-                    "-BinDir",
-                    str(Path(raw) / "bin"),
-                    "-KeepSkills",
                 ],
                 capture_output=True,
                 text=True,

@@ -2,7 +2,10 @@
 # Install or update Portable Dev Loop through immutable side-by-side releases.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+fi
 INSTALL_DIR="${DEVLOOP_INSTALL_DIR:-}"
 REPO_URL="${DEVLOOP_REPO_URL:-https://github.com/dimitriskl/devloop.git}"
 REF="${DEVLOOP_REF:-main}"
@@ -14,6 +17,8 @@ TRANSACTION_ID=""
 usage() {
   cat <<'EOF'
 Usage: devloop.sh [options]
+
+Install or update Portable Dev Loop through immutable side-by-side releases.
 
   --dir PATH       Stable bootstrap directory (default: ~/devloop)
   --repo URL       Git repository URL
@@ -71,6 +76,62 @@ cleanup_candidate() {
   fi
 }
 
+with_git_environment() {
+  (
+    local variable
+    for variable in GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_ATTR_SOURCE ${!GIT_CONFIG@}; do
+      unset "$variable" || return $?
+    done
+    "$@"
+  )
+}
+
+scoped_git() {
+  with_git_environment git -c core.hooksPath=/dev/null "$@"
+}
+
+assert_git_scope() {
+  local root="$1" paths expected
+  [ -d "$root/.git" ] && [ ! -L "$root" ] && [ ! -L "$root/.git" ] && [ ! -L "$root/.git/index" ] || die 'Git scope requires a private plain checkout'
+  paths="$(scoped_git -C "$root" rev-parse --path-format=absolute --show-toplevel --absolute-git-dir --git-common-dir --git-path index)" || return $?
+  paths="${paths//$'\r'/}"
+  expected="$(printf '%s\n' "$root" "$root/.git" "$root/.git" "$root/.git/index")"
+  [ "$paths" = "$expected" ] || die 'Git scope escapes the private checkout'
+}
+
+copy_release_source() {
+  local destination="$1"
+  case "$REPO_URL" in ''|-*) die 'repository must be a nonempty value, not an option' ;; esac
+  case "$REF" in ''|-*) die 'ref must be a nonempty value, not an option' ;; esac
+  scoped_git clone --no-checkout --no-local --depth 1 -- "$REPO_URL" "$destination" || return $?
+  assert_git_scope "$destination" || return $?
+  scoped_git -C "$destination" fetch --depth 1 -- origin "$REF" || return $?
+  assert_git_scope "$destination" || return $?
+  scoped_git -C "$destination" checkout --detach --force FETCH_HEAD || return $?
+  assert_git_scope "$destination" || return $?
+}
+
+source_transaction() {
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/bootstrap/transaction.py" ] && [ -f "$SCRIPT_DIR/bootstrap/verify.py" ]; then
+    printf '%s\n' "$SCRIPT_DIR/bootstrap/transaction.py"
+    return 0
+  fi
+  local staging python entry
+  [ -n "$REPO_URL" ] && [ -n "$REF" ] || die 'repository and ref must be nonempty'
+  staging="$(mktemp -d "${TMPDIR:-/tmp}/devloop-bootstrap-source.XXXXXXXX")" || return $?
+  staging="$(cd "$staging" && pwd -P)" || return $?
+  log "staging bootstrap source at $staging" >&2
+  copy_release_source "$staging" >&2 || return $?
+  for entry in install install/bootstrap install/bootstrap/verify.py install/bootstrap/transaction.py; do
+    [ ! -L "$staging/$entry" ] && [ -e "$staging/$entry" ] || die 'bootstrap source contains a missing or linked helper'
+  done
+  python="$(find_python)" || return $?
+  with_git_environment "$python" -B "$staging/install/bootstrap/verify.py" "$staging" --bootstrap-source || return $?
+  # Retain the isolated source for diagnostics/recovery; never remove a source checkout.
+  log "verified bootstrap source retained for recovery at $staging" >&2
+  printf '%s\n' "$staging/install/bootstrap/transaction.py"
+}
+
 clone_candidate() {
   local leaf parent
   parent="$(dirname "$INSTALL_DIR")"
@@ -79,30 +140,24 @@ clone_candidate() {
   mkdir "$CANDIDATE_DIR"
   if [ "${DEVLOOP_TESTING:-0}" = 1 ] && [ "${DEVLOOP_TEST_INTERRUPT_CANDIDATE_BOUNDARY:-}" = candidate_created ]; then exit 92; fi
   log "staging ref $REF outside the stable bootstrap"
-  if ! git clone --depth 1 --branch "$REF" "$REPO_URL" "$CANDIDATE_DIR"; then
-    rm -rf -- "$CANDIDATE_DIR"
-    git clone --depth 1 "$REPO_URL" "$CANDIDATE_DIR"
-    git -C "$CANDIDATE_DIR" checkout -f "$REF"
-  fi
-  CANDIDATE_COMMIT="$(git -C "$CANDIDATE_DIR" rev-parse HEAD)"
+  copy_release_source "$CANDIDATE_DIR" || return $?
+  CANDIDATE_COMMIT="$(scoped_git -C "$CANDIDATE_DIR" rev-parse HEAD)" || return $?
   case "$CANDIDATE_COMMIT" in
     *[!0-9a-f]*|'') die 'candidate commit is invalid' ;;
   esac
   [ "${#CANDIDATE_COMMIT}" -eq 40 ] || die 'candidate commit is invalid'
-  git -C "$CANDIDATE_DIR" reset --hard "$CANDIDATE_COMMIT" >/dev/null
-  git -C "$CANDIDATE_DIR" clean -ffdx >/dev/null
   if [ "${DEVLOOP_TESTING:-0}" = 1 ] && [ "${DEVLOOP_TEST_INTERRUPT_CANDIDATE_BOUNDARY:-}" = candidate_cloned ]; then exit 92; fi
 }
 
 validate_release_command() {
   local python="$1" root="$2" command="$3"
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$root/src" "$python" -m devloop.portable_release "$command"
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$root/src" with_git_environment "$python" -m devloop.portable_release "$command"
 }
 
 begin_transaction() {
   local entry="$1" operation="$2" output
   output="$(mktemp "${TMPDIR:-/tmp}/devloop-transaction.XXXXXX")"
-  if ! "$(find_python)" -B "$entry" begin "$INSTALL_DIR" "$operation" --protocol 2 > "$output"; then
+  if ! with_git_environment "$(find_python)" -B "$entry" begin "$INSTALL_DIR" "$operation" --owner-pid "$$" --protocol 2 > "$output"; then
     rm -f -- "$output"
     return 1
   fi
@@ -115,7 +170,7 @@ begin_transaction() {
 begin_legacy_migration() {
   local entry="$1" output
   output="$(mktemp "${TMPDIR:-/tmp}/devloop-transaction.XXXXXX")"
-  if ! "$(find_python)" -B "$entry" begin-legacy-migration "$INSTALL_DIR" --protocol 2 > "$output"; then
+  if ! with_git_environment "$(find_python)" -B "$entry" begin-legacy-migration "$INSTALL_DIR" --owner-pid "$$" --protocol 2 > "$output"; then
     rm -f -- "$output"
     return 1
   fi
@@ -163,16 +218,16 @@ recover_transaction() {
   [ -f "$INSTALL_DIR/bootstrap/install-transaction.json" ] || return 1
   local python result action release
   python="$(find_python)" || die 'Python 3.10+ is required'
-  result="$("$python" -B "$INSTALL_DIR/bootstrap/transaction.py" recover "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2)" || return $?
+  result="$(with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" recover "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2)" || return $?
   action="${result%%$'\t'*}"
   release="${result#*$'\t'}"
   case "$action" in
     NEEDS_ADOPTION)
       initialize_user_state "$release" || return $?
-      "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 || return $?
+      with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 || return $?
       ;;
     READY_TO_SWITCH)
-      "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 || return $?
+      with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2 || return $?
       ;;
     COMPLETE) ;;
     *) die "unsupported recovery action: $action" ;;
@@ -184,7 +239,7 @@ recover_transaction() {
 current_release() {
   local python
   python="$(find_python)" || die 'Python 3.10+ is required'
-  "$python" -B "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR"
+  with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR"
 }
 
 main() {
@@ -195,13 +250,13 @@ main() {
   if [ "$ROLLBACK" -eq 1 ]; then
     [ -f "$INSTALL_DIR/bootstrap/layout.json" ] || die 'stable bootstrap is not installed'
     begin_transaction "$INSTALL_DIR/bootstrap/transaction.py" rollback
-    "$(find_python)" -B "$INSTALL_DIR/bootstrap/transaction.py" rollback "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
+    with_git_environment "$(find_python)" -B "$INSTALL_DIR/bootstrap/transaction.py" rollback "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
     log "rolled back current release: $(current_release)"
     return 0
   fi
   local bootstrap_entry source_entry
-  source_entry="$SCRIPT_DIR/bootstrap/transaction.py"
-  if [ -f "$INSTALL_DIR/bootstrap/transaction.py" ]; then bootstrap_entry="$INSTALL_DIR/bootstrap/transaction.py"; else bootstrap_entry="$SCRIPT_DIR/bootstrap/transaction.py"; fi
+  source_entry="$(source_transaction)" || return $?
+  if [ -f "$INSTALL_DIR/bootstrap/transaction.py" ]; then bootstrap_entry="$INSTALL_DIR/bootstrap/transaction.py"; else bootstrap_entry="$source_entry"; fi
   if ! begin_transaction "$bootstrap_entry" install; then
     [ "$bootstrap_entry" != "$source_entry" ] || die 'could not acquire install lock'
     bootstrap_entry="$source_entry"
@@ -221,27 +276,27 @@ main() {
   python="$(find_python)"
   if [ -f "$INSTALL_DIR/bootstrap/current.json" ]; then
     local current_release current_commit
-    current_release="$("$python" -B "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR")"
-    current_commit="$(git -C "$current_release" rev-parse HEAD)"
+    current_release="$(with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/verify.py" "$INSTALL_DIR")"
+    current_commit="$(scoped_git -C "$current_release" rev-parse HEAD)"
     if [ "$current_commit" = "$CANDIDATE_COMMIT" ]; then
       cleanup_candidate
       CANDIDATE_DIR=""
       initialize_user_state "$current_release"
-      "$python" -B "$bootstrap_entry" abort "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
+      with_git_environment "$python" -B "$bootstrap_entry" abort "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
       trap - EXIT
       install_capabilities "$current_release"
       log "current immutable release: $CANDIDATE_COMMIT"
       return 0
     fi
   fi
-  "$python" -B "$CANDIDATE_DIR/install/bootstrap/transaction.py" publish "$INSTALL_DIR" "$CANDIDATE_DIR" "$TRANSACTION_ID" --protocol 2
+  with_git_environment "$python" -B "$CANDIDATE_DIR/install/bootstrap/transaction.py" publish "$INSTALL_DIR" "$CANDIDATE_DIR" "$TRANSACTION_ID" --protocol 2
   # Preparation can journal the candidate before failing. From this point only
   # the transaction layer may recover or remove it, including on EXIT.
   local transaction_candidate="$CANDIDATE_DIR"
   CANDIDATE_DIR=""
-  release="$("$python" -B "$INSTALL_DIR/bootstrap/transaction.py" prepare "$INSTALL_DIR" "$transaction_candidate" "$CANDIDATE_COMMIT" "$TRANSACTION_ID" --protocol 2)"
+  release="$(with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" prepare "$INSTALL_DIR" "$transaction_candidate" "$CANDIDATE_COMMIT" "$TRANSACTION_ID" --protocol 2)"
   initialize_user_state "$release"
-  "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
+  with_git_environment "$python" -B "$INSTALL_DIR/bootstrap/transaction.py" commit "$INSTALL_DIR" "$TRANSACTION_ID" --protocol 2
   trap - EXIT
   install_capabilities "$release"
   log "current immutable release: $CANDIDATE_COMMIT"

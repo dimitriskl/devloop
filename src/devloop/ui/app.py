@@ -43,11 +43,11 @@ from devloop.application.development import (
     WorkspaceDevelopmentService,
     WorkspacePrepared,
 )
-from devloop.application.finalization import FinalizationError
 from devloop.application.execution_profiles import (
     ExecutionProfileSelectionError,
     ExecutionProfileSelectionService,
 )
+from devloop.application.finalization import FinalizationError
 from devloop.application.recovery import (
     FINALIZATION_STEP_ID,
     RecoveryDisposition,

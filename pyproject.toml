@@ -47,11 +47,12 @@ include = ["devloop*"]
 version = { attr = "devloop.version.VERSION" }
 
 [tool.pytest.ini_options]
-addopts = "-p no:cacheprovider --basetemp=.tmp-pytest"
+addopts = '-p no:cacheprovider --strict-markers -m "not integration and not operator_install"'
 testpaths = ["tests"]
 xfail_strict = true
 markers = [
     "integration: requires the installed real Codex App Server",
+    "operator_install: installer, updater, rollback, uninstall or runtime bootstrap; operator only",
 ]
 
 [tool.ruff]

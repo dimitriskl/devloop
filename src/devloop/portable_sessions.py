@@ -738,7 +738,6 @@ class PortableSessionSupervisor:
                         and not self._owns_catalog_session_lease(record)
                     ),
                 )
-                self._launches[record.session_id] = record.launch
         known_prd_paths = {
             snapshot.prd_path.resolve()
             for snapshot in self._snapshots.values()
@@ -895,11 +894,11 @@ class PortableSessionSupervisor:
                     raise ValueError(
                         f"Portable session is already running: {session_id}"
                     )
-            try:
-                launch = self._launches[session_id]
-            except KeyError as error:
-                raise ValueError(f"Unknown portable session: {session_id}") from error
+            if session_id not in self._snapshots:
+                raise ValueError(f"Unknown portable session: {session_id}")
+            launch = self._launches.get(session_id)
             if session_id in self._candidate_launches:
+                launch = self._candidate_launches[session_id]
                 focused = self._claim_new_session(launch)
                 if focused is not None:
                     return focused
@@ -918,11 +917,13 @@ class PortableSessionSupervisor:
                     session_id,
                     getattr(record, "revision", 0),
                 )
-                launch = record.launch
                 if record.status is PortableSessionStatus.UNAVAILABLE:
                     raise ValueError(
                         "Portable session is unavailable; Relink its saved worktree first."
                     )
+                # Passive catalog views also contain checkouts that cannot launch.
+                # Reconstruct trusted execution arguments only on explicit Resume.
+                launch = record.launch
                 launch_target = validated_portable_launch_target(launch)
                 launch = replace(
                     launch,
@@ -996,6 +997,8 @@ class PortableSessionSupervisor:
                         activity_summary="Explicit resume requested",
                     )
                     self._remember_catalog_revision(session_id, revision)
+            if launch is None:
+                raise ValueError(f"Unknown portable session: {session_id}")
             return self._schedule_session(
                 launch,
                 command_kind,
@@ -2123,7 +2126,6 @@ class PortableSessionSupervisor:
                         None,
                     ),
                 )
-                self._launches[record.session_id] = record.launch
                 self._remember_catalog_revision(record.session_id, revision)
                 if synchronized != previous:
                     self._snapshots[record.session_id] = synchronized

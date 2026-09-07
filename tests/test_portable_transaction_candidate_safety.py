@@ -4,17 +4,19 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import unittest
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from portable_test_support import fresh_fixture_directory, require_fixture_path
 
 BOOTSTRAP = Path(__file__).resolve().parents[1] / "install" / "bootstrap"
 sys.path.insert(0, str(BOOTSTRAP))
@@ -34,18 +36,16 @@ DURABLE_PHASES = (
 
 class CandidateSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Ignore redirected TMP/TEMP values that could point into a source checkout.
-        temporary_parent = (
-            Path(os.environ["LOCALAPPDATA"]) / "Temp"
-            if os.name == "nt"
-            else Path("/tmp")
-        ).resolve(strict=True)
-        self.temporary = tempfile.TemporaryDirectory(
-            prefix="devloop-candidate-safety-", dir=temporary_parent
-        )
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve(strict=True)
-        self.assertEqual(self.root.parent, temporary_parent)
+        self.root = fresh_fixture_directory()
+        self.assertEqual(require_fixture_path(self.root), self.root)
+        # Patch the actual production seam before any transaction function runs.
+        # Audited removal assertions may replace this guard within their own context.
+        for target, name in ((transaction.shutil, "rmtree"), (transaction.os, "_exit")):
+            guard = mock.patch.object(
+                target, name, side_effect=AssertionError(f"blocked production seam: {name}"),
+            )
+            guard.start()
+            self.addCleanup(guard.stop)
         self.install = self.root / "bundle"
         self.bootstrap = self.install / "bootstrap"
         self.bootstrap.mkdir(parents=True)
@@ -81,6 +81,12 @@ class CandidateSafetyTests(unittest.TestCase):
             "tracked_fingerprint": "A" * 64,
             "runtime_fingerprint": "B" * 64,
         }
+
+    def test_default_production_recursive_removal_is_intercepted(self) -> None:
+        before = self.snapshot()
+        with self.assertRaisesRegex(AssertionError, "blocked production seam: rmtree"):
+            transaction.shutil.rmtree(self.candidate)
+        self.assertEqual(self.snapshot(), before)
 
     @staticmethod
     def write_json(path: Path, value: dict[str, object]) -> None:
@@ -224,9 +230,15 @@ class CandidateSafetyTests(unittest.TestCase):
                         return result
 
                     with mock.patch.object(Path, "lstat", autospec=True, side_effect=reparse_lstat):
-                        self.assert_recovery_rejected()
+                        message = "candidate path" if reparse_path == self.candidate else (
+                            "^" + re.escape(f"reparse or symbolic link rejected: {self.root}") + "$"
+                        )
+                        self.assert_recovery_rejected(message)
 
     def seed_recoverable_journal(self, phase: str) -> Path:
+        # Model the private Git directory required by the real verifier. Git remains intercepted.
+        (self.candidate / ".git").mkdir()
+        (self.candidate / ".git" / "HEAD").write_bytes((COMMIT + "\n").encode())
         metadata = json.loads((BOOTSTRAP.parents[1] / "portable-release.json").read_text())
         self.write_json(self.candidate / "portable-release.json", metadata)
         runtime = self.candidate / ".venv"
@@ -260,6 +272,11 @@ class CandidateSafetyTests(unittest.TestCase):
             self.assertEqual(arguments[3], "--no-optional-locks")
             self.assertEqual(arguments[4:6], ["-c", "diff.autoRefreshIndex=false"])
             responses = {
+                ("rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir",
+                 "--git-common-dir", "--git-path", "index"): "\n".join(str(path) for path in (
+                     Path(arguments[2]), Path(arguments[2]) / ".git",
+                     Path(arguments[2]) / ".git", Path(arguments[2]) / ".git" / "index",
+                 )),
                 ("rev-parse", "HEAD"): COMMIT,
                 ("diff", "--quiet", "--"): "",
                 ("diff", "--cached", "--quiet", "--"): "",
@@ -320,7 +337,7 @@ class CandidateSafetyTests(unittest.TestCase):
     def test_prepared_journal_recovers_with_candidate_and_canonical_release(self) -> None:
         release = self.seed_recoverable_journal("prepared")
         git_root = self.candidate / ".git"
-        git_root.mkdir()
+        git_root.mkdir(exist_ok=True)
         head = (COMMIT + "\n").encode()
         (git_root / "HEAD").write_bytes(head)
         inventory = [["HEAD", "file", hashlib.sha256(head).hexdigest()]]

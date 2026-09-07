@@ -65,13 +65,86 @@ function Invoke-ReleaseCommand {
     $oldPythonPath = $env:PYTHONPATH; $oldNoBytecode = $env:PYTHONDONTWRITEBYTECODE
     try {
         $env:PYTHONPATH = Join-Path $Root 'src'; $env:PYTHONDONTWRITEBYTECODE = '1'
-        & $Python -m devloop.portable_release $Command
+        Invoke-GitEnvironment { & $Python -m devloop.portable_release $Command }
         if ($LASTEXITCODE -ne 0) { throw "devloop-install: error: portable release $Command failed" }
     } finally { $env:PYTHONPATH = $oldPythonPath; $env:PYTHONDONTWRITEBYTECODE = $oldNoBytecode }
 }
 function Invoke-Bootstrap {
     param([string] $Entry, [Parameter(ValueFromRemainingArguments = $true)][object[]] $Arguments)
-    & (Get-DevLoopPython) -B $Entry @Arguments --protocol $BootstrapProtocol
+    Invoke-GitEnvironment { & (Get-DevLoopPython) -B $Entry @Arguments --protocol $BootstrapProtocol }
+}
+function Invoke-GitEnvironment {
+    param([scriptblock] $Action)
+    $selectors = @('GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE', 'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR', 'GIT_ATTR_SOURCE')
+    $saved = @{}
+    try {
+        foreach ($environmentEntry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+            if ($environmentEntry.Key -in $selectors -or $environmentEntry.Key -like 'GIT_CONFIG*') {
+                $saved[$environmentEntry.Key] = $environmentEntry.Value
+                [Environment]::SetEnvironmentVariable($environmentEntry.Key, $null, 'Process')
+            }
+        }
+        & $Action
+        $code = $LASTEXITCODE
+    } finally {
+        foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
+    }
+    $global:LASTEXITCODE = $code
+}
+function Invoke-ScopedGit {
+    param([string[]] $GitArguments)
+    Invoke-GitEnvironment { & git -c core.hooksPath=/dev/null @GitArguments }
+}
+function Assert-GitScope {
+    param([string] $Root)
+    Assert-PlainPath $Root
+    Assert-PlainPath (Join-Path $Root '.git')
+    if (-not (Test-Path -LiteralPath (Join-Path $Root '.git') -PathType Container)) { throw 'devloop-install: error: Git scope requires a private .git directory' }
+    $paths = @(Invoke-ScopedGit -GitArguments @('-C', $Root, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--absolute-git-dir', '--git-common-dir', '--git-path', 'index'))
+    if ($LASTEXITCODE -ne 0 -or $paths.Count -ne 4) { throw 'devloop-install: error: could not verify Git scope' }
+    $expected = @($Root, (Join-Path $Root '.git'), (Join-Path $Root '.git'), (Join-Path $Root '.git\index'))
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if (-not [IO.Path]::IsPathRooted($paths[$index]) -or [IO.Path]::GetFullPath($paths[$index]).TrimEnd('\') -ine [IO.Path]::GetFullPath($expected[$index]).TrimEnd('\')) { throw 'devloop-install: error: Git scope escapes the private checkout' }
+        Assert-PlainPath $expected[$index] -AllowMissing
+    }
+}
+function Copy-ReleaseSource {
+    param([string] $Destination)
+    if (-not $RepoUrl -or -not $Ref -or $RepoUrl.StartsWith('-') -or $Ref.StartsWith('-')) { throw 'devloop-install: error: repository and ref must be nonempty values, not options' }
+    Invoke-ScopedGit -GitArguments @('clone', '--no-checkout', '--no-local', '--depth', '1', '--', $RepoUrl, $Destination)
+    if ($LASTEXITCODE -ne 0) { throw "devloop-install: error: could not clone configured repository; staging retained at $Destination" }
+    Assert-GitScope $Destination
+    Invoke-ScopedGit -GitArguments @('-C', $Destination, 'fetch', '--depth', '1', '--', 'origin', $Ref)
+    if ($LASTEXITCODE -ne 0) { throw 'devloop-install: error: could not resolve requested ref' }
+    Assert-GitScope $Destination
+    Invoke-ScopedGit -GitArguments @('-C', $Destination, 'checkout', '--detach', '--force', 'FETCH_HEAD')
+    if ($LASTEXITCODE -ne 0) { throw 'devloop-install: error: could not check out requested release' }
+    Assert-GitScope $Destination
+}
+function Get-SourceTransaction {
+    if ($PSScriptRoot) {
+        $localEntry = Join-Path $PSScriptRoot 'bootstrap\transaction.py'
+        if ((Test-Path -LiteralPath $localEntry -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'bootstrap\verify.py') -PathType Leaf)) { return $localEntry }
+    }
+    if (-not $RepoUrl -or -not $Ref) { throw 'devloop-install: error: repository and ref must be nonempty' }
+    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $ancestor = $temporaryRoot
+    while ($ancestor) {
+        Assert-PlainPath $ancestor
+        $ancestor = Split-Path -Parent $ancestor
+    }
+    $staging = Join-Path $temporaryRoot ('devloop-bootstrap-source-' + [guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Path $staging | Out-Null
+    Write-InstallLog "Staging bootstrap source at $staging"
+    Copy-ReleaseSource $staging | Out-Host
+    foreach ($relative in @('install', 'install\bootstrap', 'install\bootstrap\verify.py', 'install\bootstrap\transaction.py')) {
+        Assert-PlainPath (Join-Path $staging $relative)
+    }
+    Invoke-GitEnvironment { & (Get-DevLoopPython) -B (Join-Path $staging 'install\bootstrap\verify.py') $staging --bootstrap-source }
+    if ($LASTEXITCODE -ne 0) { throw "devloop-install: error: bootstrap source validation failed; staging retained at $staging" }
+    # Retain this isolated source for diagnostics/recovery; never delete a source checkout.
+    Write-InstallLog "Verified bootstrap source retained for recovery at $staging"
+    return (Join-Path $staging 'install\bootstrap\transaction.py')
 }
 function Clone-Candidate {
     $parent = Split-Path -Parent $InstallDir; $leaf = Split-Path -Leaf $InstallDir
@@ -79,19 +152,9 @@ function Clone-Candidate {
     New-Item -ItemType Directory -Path $script:CandidateDir | Out-Null
     if ($env:DEVLOOP_TESTING -eq '1' -and $env:DEVLOOP_TEST_INTERRUPT_CANDIDATE_BOUNDARY -eq 'candidate_created') { [Environment]::Exit(92) }
     Write-InstallLog "Staging ref $Ref outside the stable bootstrap"
-    & git clone --depth 1 --branch $Ref $RepoUrl $script:CandidateDir
-    if ($LASTEXITCODE -ne 0) {
-        if (Test-Path -LiteralPath $script:CandidateDir) { Remove-Item -LiteralPath $script:CandidateDir -Recurse -Force }
-        & git clone --depth 1 $RepoUrl $script:CandidateDir
-        if ($LASTEXITCODE -ne 0) { throw "devloop-install: error: could not clone $RepoUrl" }
-        & git -C $script:CandidateDir checkout -f $Ref
-        if ($LASTEXITCODE -ne 0) { throw "devloop-install: error: could not resolve ref $Ref" }
-    }
-    $script:CandidateCommit = (& git -C $script:CandidateDir rev-parse HEAD).Trim()
+    Copy-ReleaseSource $script:CandidateDir
+    $script:CandidateCommit = (Invoke-ScopedGit -GitArguments @('-C', $script:CandidateDir, 'rev-parse', 'HEAD')).Trim()
     if ($LASTEXITCODE -ne 0 -or $script:CandidateCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'devloop-install: error: candidate commit is invalid' }
-    & git -C $script:CandidateDir reset --hard $script:CandidateCommit
-    & git -C $script:CandidateDir clean -ffdx
-    if ($LASTEXITCODE -ne 0) { throw 'devloop-install: error: could not clean candidate' }
     if ($env:DEVLOOP_TESTING -eq '1' -and $env:DEVLOOP_TEST_INTERRUPT_CANDIDATE_BOUNDARY -eq 'candidate_cloned') { [Environment]::Exit(92) }
 }
 function Install-CandidateRuntime {
@@ -115,7 +178,7 @@ function Initialize-UserState {
     Invoke-ReleaseCommand $python $ReleaseRoot 'prepare-user-state'
 }
 function Get-VerifiedRelease {
-    $release = (& (Get-DevLoopPython) -B (Join-Path $InstallDir 'bootstrap\verify.py') $InstallDir).Trim()
+    $release = (Invoke-GitEnvironment { & (Get-DevLoopPython) -B (Join-Path $InstallDir 'bootstrap\verify.py') $InstallDir }).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'devloop-install: error: current release verification failed' }; return $release
 }
 function Recover-PendingTransaction {
@@ -151,7 +214,7 @@ function Install-Capabilities {
     } catch { Write-Warning "devloop-install: capability installation warning: $($_.Exception.Message)" }
 }
 function Show-NextSteps {
-    $root = Get-VerifiedRelease; $commit = (& git -C $root rev-parse HEAD).Trim()
+    $root = Get-VerifiedRelease; $commit = (Invoke-ScopedGit -GitArguments @('-C', $root, 'rev-parse', 'HEAD')).Trim()
     Write-Host ''; Write-Host "Portable Dev Loop is installed at $InstallDir"; Write-Host "Current immutable release: $commit"
     Write-Host "Run: & '$InstallDir\bin\devloop.ps1' --help"; Write-Host "Plan: & '$InstallDir\bin\devloop-plan.ps1' --help"
     Write-Host "Update: & '$InstallDir\install\devloop.ps1'"; Write-Host "Uninstall: & '$InstallDir\install\uninstall-devloop.ps1'"
@@ -168,7 +231,7 @@ if ($Rollback) {
     Invoke-Bootstrap $transaction rollback $InstallDir $script:TransactionId
     if ($LASTEXITCODE -ne 0) { throw 'devloop-install: error: rollback failed' }; Show-NextSteps; return
 }
-$sourceTransaction = Join-Path $PSScriptRoot 'bootstrap\transaction.py'
+$sourceTransaction = Get-SourceTransaction
 $transactionEntry = if (Test-Path -LiteralPath (Join-Path $InstallDir 'bootstrap\transaction.py')) { Join-Path $InstallDir 'bootstrap\transaction.py' } else { $sourceTransaction }
 $beginResult = Invoke-Bootstrap $transactionEntry begin $InstallDir install --owner-pid $PID
 if ($LASTEXITCODE -ne 0 -and $transactionEntry -ne $sourceTransaction) {
@@ -181,7 +244,7 @@ if (Recover-PendingTransaction) { Install-Capabilities; Show-NextSteps; return }
 try {
     Clone-Candidate; Install-CandidateRuntime
     $currentRoot = if (Test-Path -LiteralPath (Join-Path $InstallDir 'bootstrap\current.json')) { Get-VerifiedRelease } else { $null }
-    $currentCommit = if ($currentRoot) { (& git -C $currentRoot rev-parse HEAD).Trim() } else { $null }
+    $currentCommit = if ($currentRoot) { (Invoke-ScopedGit -GitArguments @('-C', $currentRoot, 'rev-parse', 'HEAD')).Trim() } else { $null }
     if ($currentCommit -and $currentCommit -ceq $script:CandidateCommit) {
         Remove-Item -LiteralPath $script:CandidateDir -Recurse -Force; $script:CandidateDir = $null; Initialize-UserState $currentRoot
         Invoke-Bootstrap $transactionEntry abort $InstallDir $script:TransactionId

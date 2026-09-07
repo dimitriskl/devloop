@@ -59,6 +59,8 @@ parse_args() { :; }
 absolute_install_dir() { :; }
 begin_transaction() { event begin; }
 begin_legacy_migration() { event legacy; }
+source_transaction() { printf '%s\n' "$SCRIPT_DIR/bootstrap/transaction.py"; }
+with_git_environment() { "$@"; }
 current_release() { printf '%s\n' "$INSTALL_DIR/releases/$CANDIDATE_COMMIT"; }
 clone_candidate() {
   CANDIDATE_DIR=/__devloop_bash_probe_no_filesystem__/.install.candidate-probe
@@ -114,6 +116,8 @@ probe_python() {
 }
 readonly -f event die log find_python parse_args absolute_install_dir begin_transaction
 readonly -f begin_legacy_migration current_release clone_candidate install_runtime
+readonly -f source_transaction
+readonly -f with_git_environment
 readonly -f install_capabilities command git rm mkdir python python3 probe_python '['
 """
         + definitions

@@ -1,8 +1,195 @@
 # Portable v3 recovery and release status
 
-Updated: 2026-09-06. This is a resumable work record, not release approval.
+Updated: 2026-09-07. This is a resumable work record, not release approval.
 
-## Verified recovery checkpoint
+## Current continuation: 2026-09-07
+
+- Latest checkpoint: test execution and implementation are paused after QA
+  evidence files disappeared. Root independently confirmed the missing files,
+  the surviving process record, all 21 unchanged transaction/distribution
+  source/helper hashes, and the unchanged session backup. The cause is unknown;
+  a user clarification about removal or quarantine is pending. No affected probe
+  was recreated or rerun. See
+  [the retained interruption record](portable-v3-qa-interruption-20260907.md).
+- Workspace and working-file write access verified at
+  `E:\devloop-recovery-20260905` by creating, reading and removing one unique
+  probe file. The managed grant exposes `.git` read-only; no escalation or
+  Git permission workaround is authorized.
+- HEAD verified as `561403e719750032ac992ed64b96811ee17ebc93`. The seven R02
+  source/test SHA-256 values in the 2026-09-06 handoff match this checkpoint.
+- Fresh independent R02 QA `issue0012_r02_final_fresh_qa`: **SCOPED PASS**,
+  86 distinct tests, no skips or audit violations. Root reread its report and
+  verified SHA-256
+  `50D2C3346E1DE7C1C4F8072F42720958E4FC3F722B72A4EC5494ED43FB38E44A`.
+  This completes R02's scoped developer/review/QA sequence only.
+- The supplied session-reset report records four removed sessions, zero
+  remaining sessions, three preserved saved projects and preserved settings.
+  Its backup and report are unrelated user artifacts and must remain intact.
+- [x] Startup crash scoped repair: fresh implementation, independent source
+  review and fresh executable QA **PASS**. Implementation is frozen in `src/devloop/portable_sessions.py`
+  with regressions in `tests/test_portable_session_startup.py`: 13 focused
+  developer tests passed, and immutable read-only replay displays all four
+  backed-up records. Startup and peer refresh now defer launch reconstruction
+  until explicit Resume, which first checks UNAVAILABLE status. Fresh
+  independent source review **PASS** is recorded in
+  `.tmp-startup-review-20260907/report.md`. Fresh QA independently passed 13
+  startup regressions, replayed all four actual backup rows without launches,
+  verified unavailable Resume gives the Relink instruction, and confirmed the
+  backup hash and absence of sidecars. The actual PRD-only dry-run also passed,
+  with eight prompts, board/state and mirrors verified in retained artifacts.
+  This certifies the scoped repair, not live native-terminal or release behavior.
+- Issues 0012 and 0013 remain incomplete. R12's installed wiki storage decision
+  has been requested; dependent changes wait for the user's answer.
+- The old protocol-v2 helper finding exposed a second unresolved product
+  boundary: permit an explicit recoverable security migration of verified
+  unchanged bootstrap helpers, or refuse old helpers pending operator migration.
+  The user was asked; no answer is recorded. The other three source repairs are
+  frozen for a fresh independent review; this behavior remains undecided.
+- The unchanged, previously reviewed historical overlay patch was materialized
+  successfully after verifying its SHA-256 and three exact Add File targets.
+  The source-only integrity test now passes (one test, 2026-09-07); no historical
+  code was executed. Fresh independent inert-data QA now **PASS**: all 18
+  decoded sources (77,321 bytes), 142 provenance records from 101 original
+  patch events, and 28 corruption probes were checked with PowerShell/.NET.
+  Evidence: `.tmp-startup-fixture-fresh-qa-20260907/inert-fixture-result.json`,
+  SHA-256 `6A633976AB0BC0F63CC3E72667B2D5E1BE007842A6010A7ABEC987E3588CB079`.
+  Python integrity-test reexecution, historical patch replay and historical
+  installer execution were not part of that QA. Compatibility harness
+  integration is drafted but has not passed review or executable QA. Test source hash remains
+  `772282591BEF7D8427FA59B36840AC372D80AE02F8F659B249E6BC43BAAFD39F`.
+- The recovered `.venv` cannot launch its unavailable WindowsApps Python base.
+  Python 3.12.13 from the available Codex runtime imports the existing validation
+  packages successfully: pytest 8.4.2, Textual 8.2.8 and mypy 1.20.2. No runtime
+  or dependency installation was performed. Initial configured Ruff and mypy
+  diagnostics are recorded in `.tmp-sep07-configured-ruff.txt` and
+  `.tmp-sep07-configured-mypy.txt`. A fresh seven-file baseline source repair
+  now passes configured native Ruff (`src tests`, exit zero). Fresh independent
+  source review **PASS** and a second native Ruff run are recorded in
+  `.tmp-baseline-fresh-review-independent-20260907/review.md` (SHA-256
+  `D7C01CD01EEF379A0ED2B176569BCB59AE7C9D91B70A6C2D4C823D947170601D`).
+  Fresh executable QA now also **PASS** for this seven-file baseline slice:
+  configured strict mypy (83 files), configured Ruff, nine-file in-memory
+  compilation and 27 selected baseline cases. Five initial metadata-prerequisite
+  failures were rerun successfully after actual setuptools metadata generation
+  in a fresh workspace snapshot; no installation or manual entry-point stub
+  was used. The startup source retains its independently confirmed pre-existing
+  one scoped Ruff and twelve scoped mypy diagnostics; configured gates are clean.
+- After those successful executions, the exact Python runtime began returning
+  Access denied in three independent agent contexts. Following the user's
+  continuation request, root rechecked that same executable in the sandbox:
+  Python 3.12.13 and the existing pytest/Textual/mypy imports now pass. Evidence:
+  `.tmp-python-access-restored-20260907.log`. Focused safe executable checks may
+  resume. The cause of the temporary denial is not established; no escalation,
+  interpreter substitution, installation or executable copy was attempted.
+  The broad suite still waits for the harness safety repairs and fresh review.
+- Static local-file link validation checked 55 links across 20 current release
+  and PRD documents: all targets exist. This checks file targets, not anchors,
+  remote links, terminal behavior or release readiness.
+- Fresh transaction/distribution drafts received independent source review
+  **FAIL**. Four P1 findings require further repair: partial legacy
+  backup copies, uninstall retry argument handling, recaptured release-content
+  ownership, and old protocol-v2 helpers bypassing new lock protection. These
+  findings are from source inspection and one isolated fake-Python PowerShell
+  option-dispatch probe; no installer execution is claimed. A fresh
+  implementation agent repaired three findings and froze nine files in
+  `.tmp-packaging-rework-20260907.md`, SHA-256
+  `2883693F35050F0E5D0EBE3A29BE9989C6FB19AA33E42638019F5A02C78B9563`.
+  Native source checks and isolated option parsing passed; no Python behavior
+  was executed. Fresh review **FAIL** found a further retry defect: the journal
+  string overwrites the caller's install-root Path before option validation.
+  Root directly verified the code and the completed report at
+  `.tmp-packaging-rework-independent-review-20260907/review.md` (SHA-256
+  `029AEC97B635366721A9E352CC11871D7F0D5AEA578F66EBB276EAA3260651CC`).
+  The caller-Path defect and two reproduced Windows read-only-handle fsync
+  failures are now repaired. Final developer guarded suite: 36 PASS. Fresh
+  independent source review **PASS**:
+  `.tmp-transaction-retry-flush-fresh-review-20260907/review.md`, SHA-256
+  `B17839DB4A6AF1DF67029F8C5E90D73DE723F179544D7E922559DA6E679D18C8`.
+  Transaction source SHA-256 is
+  `9F0346C2916364762E5B4933D153F87BE161EFCD02C88C13ED8CFAAF5CB8E4CD`.
+  Fresh independent executable guarded recovery QA **PASS**: 36 tests,
+  zero failures/errors/skips, 104.32 seconds. Root verified the JUnit, log and
+  all 21 input hashes. Distribution QA remains incomplete: its initial run
+  had 18 passes and 10 failures; the retry recorded two passes before the
+  runner pipe closed, and several evidence files are now missing. Read-only
+  Windows legacy assets still refuse publication
+  while preserving originals/staging; successful support is not claimed.
+- The first safe-harness independent source review returned **FAIL** for four
+  findings: profile-temp fixtures bypass workspace isolation; Linux can inherit
+  the operator's XDG_STATE_HOME; operator PASS does not bind the complete test
+  inventory and unchanged source; and dangling symlink assertions cannot pass.
+  Report: `.tmp-safe-harness-review-525685970b0d4c97b46b7e00b02608fe/report.md`,
+  SHA-256 `1E9D0B40D7C3D2A768A6AE06717FA5622B6D9113218CB40217D2BBBBC1E65FF5`.
+  The four repairs are now frozen for a new independent review in
+  `.tmp-safe-harness-rework-20260907/report.md`, SHA-256
+  `F9DF6812B4F6717BFAF0891D6CEE691D7B4FF2012CADB7FCACD31D05083CD446`.
+  Targeted runs resolved fixture/diagnostic mismatches while retaining mutation
+  guards and preservation assertions. Earlier runs imported older transaction
+  bytes; their counts must not be combined into a final-tree full PASS. Fresh
+  independent source review now **SCOPED PASS**, with 26 inert harness tests
+  passing. Report: `.tmp-safe-harness-rework-independent-review-20260907/report.md`,
+  SHA-256 `193FD14B73337D52D14F3BA511438D9045847D33C8E3C0E3E8CBDE1124D8DCEF`.
+  Complete final-tree QA remains required before broad execution. Collection
+  was incomplete because of missing explicit pytest-asyncio loading; the
+  corrective collection failed at the managed launcher before Python started.
+  No approved operator manifest or installer gate exists yet.
+- The connected three-worktree Issue 0013 scenario is implemented and frozen
+  and received fresh independent source review **FAIL** for two P2 findings:
+  cleanup errors can skip remaining owned workers, and the background-alpha
+  notification wait can be satisfied by beta's earlier attention marker.
+  Report: `.tmp-integrated-scenario-independent-review-20260907/review.md`,
+  SHA-256 `4C1BAB157645B7C1E31D64D2C309D05AD25E23B583C54B3E424FCE08B09E3D19`.
+  A fresh implementation agent owns both corrections. Source and limits are in
+  `docs/portable-v3-integrated-scenario.md`. Native Ruff and whitespace checks
+  passed. Seventeen focused cleanup/notification regressions now pass. The first
+  connected run **FAILED** waiting for beta input. One instrumented diagnostic
+  run also **FAILED**, proving beta's fake backend encountered PermissionError
+  reading its exact command file before requesting input. Both runs preserved
+  the original error and confirmed cleanup without reported failures. Later
+  parent reads succeed and alpha/beta file ACLs match, but the earlier worker
+  denial's cause remains unknown. No retry mask or permission change was added.
+  Final source freeze: `.tmp-retry-scenario-fresh-repair-20260907/scenario-freeze.md`,
+  SHA-256 `A8EE8EB439543CED6169850B4263A3D6FC3A3B7A8F02DEC88DE37E734EBC3E55`.
+  Fresh independent final source review now **SCOPED PASS**:
+  `.tmp-scenario-rework-fresh-review-20260907/review.md`, SHA-256
+  `513031EEA2237B864F227B7E255E5D8E337E6D87C6A8352D89C647E3B918B38E`.
+  Fresh bounded QA reached all 17 test bodies but did not complete successfully:
+  JUnit reporting triggered a Windows platform subprocess blocked by its process
+  guard. Exit 1 and incomplete JUnit are not a QA PASS. The reporting correction,
+  fresh bounded QA and operator replay preparation remain pending. No third connected
+  agent run is authorized while this evidence gap remains.
+  Its representative v0.2.1-shaped
+  project is synthetic, and app restarts use fresh instances in one pytest
+  process. Separate child processes test application/Plain Mode leases. Native
+  wrappers, real planning chat, actual historical installation compatibility
+  and full release gates remain separate requirements. The full safe suite
+  remains pending; installer-bearing suites must not be agent-launched.
+- A usage-limit interruption stopped the three active agents and rejected one
+  recovery-document update. After the user requested continuation, read-only
+  workspace access succeeded and those agent tasks resumed. The refused update
+  was not treated as persisted evidence.
+- [x] Fresh scoped startup/baseline QA: **41 distinct selected cases passed**,
+  46 executions including five preserved initial metadata failures, no skips.
+  Final report `.tmp-startup-baseline-fresh-executable-qa-20260907/report.md`,
+  SHA-256 `0ADB8A07003A04E2B46103D74E8A296E9B57E2A140A70362D807193545FF8BE2`;
+  final evidence freeze SHA-256
+  `A84A9E3E0F82310AAF8A56B08B4D4A208D3B0CFE42AC28C42B52E4E868D67B10`.
+  Root reread the final results and verified these hashes and the unchanged
+  session backup. Neither Issue 0012 nor Issue 0013 is complete.
+- [x] Guarded transaction recovery slice: fresh implementation, independent
+  source review and fresh independent executable QA **SCOPED PASS**. All 36
+  selected recovery cases passed on the current transaction/test hashes;
+  `.tmp-transaction-distribution-fresh-qa-20260907/transaction-junit.xml`
+  SHA-256 `1663CBA2A50CEB3CBD5ACCD8FE2D23A506A2861F1270FDA9E0E0610ADF54C532`.
+  This marker excludes distribution, native installers, older-helper policy,
+  wiki storage, broad final-tree regression and release certification.
+
+All older access, agent-capacity and uncommitted-checkpoint paragraphs below
+are historical records. They do not describe this session's working-file
+permission, current HEAD or R02 QA status. Earlier native/operator gates and
+other unresolved repair findings remain open until replaced by new evidence.
+
+## Historical recovery checkpoint (2026-09-06)
 
 - Recovered source checkout: `E:\devloop-recovery-20260905`.
 - Original recovery checkpoint: `a69baa8`.

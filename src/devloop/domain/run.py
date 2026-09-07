@@ -3,16 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from devloop.domain.capabilities import ResolvedCapabilityProfile
 from devloop.domain.approval import ApprovalPolicy
+from devloop.domain.capabilities import ResolvedCapabilityProfile
 from devloop.domain.development import (
+    ArtifactRef,
     DevelopmentCursor,
     IssueRuntimeState,
     PlanningPackageRef,
     WorkspaceRef,
 )
-from devloop.domain.finalization import FinalizationCursor
 from devloop.domain.execution import ExecutionProfile, ExecutionTelemetry
+from devloop.domain.finalization import FinalizationCursor
 from devloop.domain.identifiers import (
     ExecutionThreadId,
     ExecutionTurnId,

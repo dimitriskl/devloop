@@ -28,13 +28,175 @@ required release gates are resolved.
 
 - [x] R01 scoped repair: fresh implementation, independent review PASS, and
   independent sandbox QA PASS. Native installer/platform gates remain open.
-- [ ] R02-R06, R09-R10: open; no fixes certified.
+- [x] R02 scoped repair: fresh implementation, independent review PASS and
+  fresh independent QA PASS (86 distinct tests); see the 2026-09-07 checkpoint.
+- [ ] R03-R06, R09-R10: open; no fixes certified.
 - [x] R07-R08 scoped repairs: fresh implementation, independent review PASS,
   and independent in-memory Bash QA PASS. Native installer gates remain open.
 - [ ] R11: additional fresh read-only review confirms Git repository-selection
   settings can redirect validation outside the intended worktree/index.
 - [ ] R12: parent source-only reproduction of default wiki writes inside the
   immutable release; fresh validation and a storage-location decision pending.
+- [x] Historical bootstrap overlay materialized from the unchanged reviewed
+  patch; fresh inert-data QA PASS on 2026-09-07 (18 sources, 77,321 decoded
+  bytes, 142 provenance records, 28 corruption probes). This is data integrity
+  only; compatibility harness integration and native execution remain open.
+
+### Final retry/flush scoped QA PASS; distribution incomplete, 2026-09-07
+
+Fresh implementation corrected the caller-Path overwrite and two actual Windows
+`rb`/fsync errno-9 failures. Final developer guarded suite: 36 PASS, including
+the real retry continuation, interruption boundaries and preservation checks.
+Fresh independent source review **PASS**:
+`.tmp-transaction-retry-flush-fresh-review-20260907/review.md`, SHA-256
+`B17839DB4A6AF1DF67029F8C5E90D73DE723F179544D7E922559DA6E679D18C8`.
+The reviewer compared the exact preceding transaction bytes and verified all
+seven other packaging files remained at their reviewed hashes.
+
+Current transaction SHA-256:
+`9F0346C2916364762E5B4933D153F87BE161EFCD02C88C13ED8CFAAF5CB8E4CD`;
+guarded regression file SHA-256:
+`DCED656D8E9FAA15B9B5326A043F91F4B2B5DB77A6DA725E4AB22CFC6A805377`.
+Fresh independent guarded recovery QA **PASS**: 36 tests, zero failures,
+errors or skips, 104.32 seconds. Root checked the retained log/JUnit and all
+21 unchanged source/helper inputs. Evidence:
+`.tmp-transaction-distribution-fresh-qa-20260907/transaction-junit.xml`, SHA-256
+`1663CBA2A50CEB3CBD5ACCD8FE2D23A506A2861F1270FDA9E0E0610ADF54C532`.
+This certifies the selected recovery slice only. Initial distribution/Bash
+QA had 18 passes and 10 failures; a retry recorded two passes before its runner
+pipe closed. The QA launcher and three previously recorded probe files are
+now missing. Execution is paused pending clarification; the cause is unknown.
+See [the interruption record](portable-v3-qa-interruption-20260907.md).
+Windows read-only legacy assets still refuse publication, preserving original
+and staged bytes/attributes; successful support is not claimed. Old-v2 helper
+migration/refusal and R12 remain unanswered product decisions. Native/operator
+gates remain open; this source PASS does not complete Issue 0012.
+
+### Earlier packaging rework independent review FAIL, 2026-09-07
+
+Fresh `packaging_rework_fresh_implementation` froze three P1 source repairs:
+retain the release inventory from full ownership validation, parse and validate
+public retry options before recovery, and durably stage legacy backups before
+exclusive publication. Report and nine-file hashes:
+`.tmp-packaging-rework-20260907.md`, SHA-256
+`2883693F35050F0E5D0EBE3A29BE9989C6FB19AA33E42638019F5A02C78B9563`.
+Native Ruff, PowerShell AST, Bash syntax, isolated option-prefix probes and
+scoped whitespace checks passed. Python regressions remain unexecuted.
+
+The fresh review found another P1: `resume_uninstall()` replaces its caller's
+optional install-root Path with the journal's string, then calls `.absolute()`
+on that string during option validation. Root directly verified this path and
+the final review report:
+`.tmp-packaging-rework-independent-review-20260907/review.md`, SHA-256
+`029AEC97B635366721A9E352CC11871D7F0D5AEA578F66EBB276EAA3260651CC`.
+The report found no additional source blocker in the other two narrow repairs.
+A fresh implementer owns the retry correction; independent review and
+executable QA of the corrected tree remain required.
+
+The accepted older protocol-v2 helper finding is explicitly unresolved. The
+user's choice between recoverable migration and refusal is pending. No combined
+packaging PASS is possible from this partial rework. Fresh executable QA is
+still required.
+
+The initial safe-harness review also returned **FAIL** for fixture isolation,
+inherited Linux state, incomplete operator-evidence binding and dangling-link
+assertions. Its report is
+`.tmp-safe-harness-review-525685970b0d4c97b46b7e00b02608fe/report.md`, SHA-256
+`1E9D0B40D7C3D2A768A6AE06717FA5622B6D9113218CB40217D2BBBBC1E65FF5`.
+The four repairs are now frozen in
+`.tmp-safe-harness-rework-20260907/report.md`, SHA-256
+`F9DF6812B4F6717BFAF0891D6CEE691D7B4FF2012CADB7FCACD31D05083CD446`.
+Fresh independent source review **SCOPED PASS** is now recorded in
+`.tmp-safe-harness-rework-independent-review-20260907/report.md`, SHA-256
+`193FD14B73337D52D14F3BA511438D9045847D33C8E3C0E3E8CBDE1124D8DCEF`,
+with 26 inert harness tests passing. Targeted
+developer results span different source snapshots and are not a full final-tree
+PASS. Broad pytest and operator installation gates remain unexecuted; the
+harness still requires complete independent final-tree QA. Collection did not
+complete, and no reviewed operator manifest was created.
+
+### Combined packaging re-review FAIL, 2026-09-07
+
+Fresh independent reviewer `packaging_fresh_review` rejected the nine-file
+draft below with four P1 findings. Report: `.tmp-packaging-review-20260907`,
+SHA-256 `ABF68F946E1409BB8A7CC693D380CE49E1431BB22C53D47A0FE6FC40FD8AE640`.
+All nine frozen file hashes were independently verified unchanged.
+
+1. Late ignored, tracked or runtime content can be captured as removal evidence
+   after the original release validation. Bind that inventory to original
+   release ownership before authorizing deletion.
+2. Installed and external uninstall retry paths omit caller option handling.
+   A PowerShell AST-only probe with fake Python confirmed that Help and
+   KeepSkills still dispatch recovery. Parse help/invalid options before
+   mutation and validate preservation/destination options against the plan.
+3. Existing accepted protocol-v2 bootstrap helpers do not participate in the
+   new advisory guard and are still selected for mutation by both drivers.
+   Establish a safe compatibility/migration or exclusion boundary before
+   invoking old lock mutation; testing two new guard handles is insufficient.
+4. Direct copies into final legacy backups leave partial files on interruption;
+   retry refuses although the original remains intact. Use validated durable
+   atomic publication and recover only transaction-owned staging data.
+
+Apart from the isolated PowerShell option-dispatch probe, these findings are
+source-only. No Python, installer, old helper, deletion or native gate ran.
+The partial rework above supersedes this rejected source draft; another
+independent review and executable QA remain required. No repair or issue
+completion marker is promoted by this review.
+
+### R03-R06/R09-R11 implementation freeze, 2026-09-07
+
+Fresh implementation agents `transactions_fresh_implementation` and
+`distribution_fresh_implementation` completed source drafts. A new independent
+`packaging_fresh_review` is reviewing the combined diff. **No new repair PASS
+or completion marker is certified by this source freeze.**
+
+Transaction scope: action ownership and current-content revalidation, guarded
+stale-lock reclamation, interrupted bootstrap publication, exact fresh-pointer
+recovery, retained-release reactivation, and external uninstall retry launchers.
+Distribution scope: standalone/streamed source staging, effective Git path
+validation, and child-only Git selector isolation including older helpers.
+
+Native Ruff, PowerShell AST, Bash syntax and scoped whitespace checks passed.
+The 22 transaction tests were not executed. Four distribution tests passed on
+an intermediate tree before the runner pipe closed; later source changes and
+the final 17 new plus nine existing Bash tests have no behavioral result.
+Python execution subsequently returned Access denied across three contexts.
+Strict mypy, final behavioral tests, independent executable QA and all native
+operator gates remain pending. No installer or uninstaller was executed.
+These drafts change dependencies of earlier passing slices. R01/R02/R07/R08
+PASS records apply to their recorded checkpoint bytes; their regressions must
+run again before the combined final tree can be certified.
+
+| Frozen file | SHA-256 |
+| --- | --- |
+| `install/bootstrap/transaction.py` | `2182D695962F3D8018758662B33E9CB14455B7559DA8A9F639A7943A56764023` |
+| `install/bootstrap/install/uninstall-devloop.ps1` | `C245639B3C3ACFD66315E0A65D57B318428F06169D099A3578A86DD498CFFCF6` |
+| `install/bootstrap/install/uninstall-devloop.sh` | `7E32E6D266897D62CAF55F7CA58E77CDF13DEA535D75DC732D91EE2679ADE144` |
+| `tests/test_portable_transaction_recovery_repairs.py` | `9484F81C6B3CBE5F964FF92ACE11CE6D815C29AE87EBB19332F6A24AF10121AD` |
+| `install/devloop.ps1` | `755844DF320ADE387346DC76A7A53BD4B23EB943B217F9BD9A933A9D2A5F4EC1` |
+| `install/devloop.sh` | `54F80B7928198978D4D6BCA016B8B56BF113ADAFD9BD6ACE9B6A72FDE2CDF6CF` |
+| `install/bootstrap/verify.py` | `5C6FB789BE3365B65D5F2BF117D6A100349E2CFB3F4720A7BFA299C9383B3F95` |
+| `tests/test_portable_bash_recovery_safety.py` | `30E8986521C2CC99E0FBCBBFF5897115C0B33FF943D3203F4E85C1D103492201` |
+| `tests/test_portable_distribution_git_scope.py` | `C5CFCEFB818E3FBC1606CEDF719417028CAC6B5ABB864CC4936C5AD6EEC7C5A6` |
+
+### Current checkpoint: R02 QA verified on 2026-09-07
+
+Root reread the fresh QA report at
+`C:\Users\Dimitris\AppData\Local\Temp\devloop-r02-qa-f7a925\report.md`
+and verified SHA-256
+`50D2C3346E1DE7C1C4F8072F42720958E4FC3F722B72A4EC5494ED43FB38E44A`.
+Result: **SCOPED PASS**, 86 executions / 86 distinct tests, zero skips or
+audit violations. All seven frozen source/test hashes match current HEAD
+`561403e719750032ac992ed64b96811ee17ebc93`. Production recursive removal
+was intercepted; native installer, uninstall, rollback, console and
+authenticated behavior were not exercised. The recorded 2 Ruff and 26
+transaction mypy diagnostics remain open until a fresh repair clears them.
+
+The recovered E: workspace now permits working-file writes, verified with a
+unique create/read/remove probe. The `.git` grant is read-only. Older pending
+QA, unavailable fresh-agent and F: workspace statements below are historical;
+they are superseded only for the scopes explicitly verified here. Other
+findings and mandatory issue/release gates remain open.
 
 ### R02 implementation and first re-review
 

@@ -34,8 +34,8 @@ from devloop.components.workspace import (
     WorkspacePreparationCancelled,
     WorkspaceProposal,
 )
-from devloop.domain.capabilities import capabilities_for
 from devloop.domain.approval import locked_approval_policy
+from devloop.domain.capabilities import capabilities_for
 from devloop.domain.development import (
     ArtifactRef,
     CapabilityProfile,
@@ -780,7 +780,7 @@ class WorkspaceDevelopmentService:
             development = current.development
             if development is None:
                 raise WorkspaceDevelopmentError("Development cursor disappeared.") from error
-            completed = tuple(
+            completed_item_ids = tuple(
                 dict.fromkeys((*development.completed_item_ids, *error.completed_item_ids))
             )
             stalled = replace(
@@ -791,7 +791,7 @@ class WorkspaceDevelopmentService:
                     development,
                     thread_id=error.thread_id,
                     turn_id=error.turn_id,
-                    completed_item_ids=completed,
+                    completed_item_ids=completed_item_ids,
                 ),
                 operation=OperationState(),
                 workspace_state_hash=capture_repository_state_hash(Path(workspace.path)),

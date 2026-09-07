@@ -5,11 +5,11 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import unittest
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -17,6 +17,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
+
+from portable_test_support import (
+    fresh_fixture_directory,
+    isolated_environment,
+    require_fixture_path,
+    session_root,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / "install" / "bootstrap"
@@ -32,16 +39,16 @@ TRANSACTION_ID = "33333333-3333-4333-8333-333333333333"
 
 class ReleaseContentSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Never honor TMP/TEMP redirected into a source checkout.
-        self.temporary_parent = (
-            Path(os.environ["LOCALAPPDATA"]) / "Temp"
-            if os.name == "nt" else Path("/tmp")
-        ).resolve(strict=True)
-        self.root = Path(tempfile.mkdtemp(
-            prefix="devloop-release-content-safety-", dir=self.temporary_parent,
-        )).resolve(strict=True)
+        self.root = fresh_fixture_directory()
         self.validate_root()
-        self.addCleanup(self.cleanup_fixture)
+        # Retain fixtures, and fail closed at the actual production removal seam.
+        # Existing nested removal mocks are the explicit audited overrides.
+        for target, name in ((transaction.shutil, "rmtree"), (transaction.os, "_exit")):
+            guard = mock.patch.object(
+                target, name, side_effect=AssertionError(f"blocked production seam: {name}"),
+            )
+            guard.start()
+            self.addCleanup(guard.stop)
         self.git_executable = (
             Path(r"C:\Program Files\Git\cmd\git.exe")
             if os.name == "nt" else Path(shutil.which("git") or "/nonexistent-git")
@@ -51,10 +58,7 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         self.empty_config.write_bytes(b"")
         self.empty_directory = self.root / "empty-git-support"
         self.empty_directory.mkdir()
-        self.git_environment = {
-            key: value for key, value in os.environ.items()
-            if not key.upper().startswith("GIT_")
-        }
+        self.git_environment = isolated_environment(self.root / "git-environment")
         self.git_environment.update({
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": str(self.empty_config),
@@ -98,22 +102,22 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         self.run_guard.start()
         self.addCleanup(self.run_guard.stop)
 
+    def test_default_production_recursive_removal_is_intercepted(self) -> None:
+        before = self.snapshot()
+        with self.assertRaisesRegex(AssertionError, "blocked production seam: rmtree"):
+            transaction.shutil.rmtree(self.release)
+        self.assertEqual(self.snapshot(), before)
+
     def validate_root(self) -> None:
+        self.assertEqual(require_fixture_path(self.root), self.root)
         self.assertEqual(self.root.resolve(strict=True), self.root)
-        self.assertEqual(self.root.parent, self.temporary_parent)
-        self.assertTrue(self.root.name.startswith("devloop-release-content-safety-"))
+        self.assertEqual(self.root.parent, session_root())
+        self.assertTrue(self.root.name.startswith("fixture-"))
         self.assertFalse(self.root.is_symlink())
 
-    def cleanup_fixture(self) -> None:
-        self.validate_root()
-
-        def writable_remove(function: object, path: str, _: object) -> None:
-            target = Path(path)
-            self.assertTrue(target.resolve(strict=True).is_relative_to(self.root))
-            os.chmod(target, stat.S_IWRITE)
-            function(path)  # type: ignore[operator]
-
-        shutil.rmtree(self.root, onerror=writable_remove)
+    def changed_release_error(self) -> str:
+        # Full content evidence is checked before the narrower Git survivor proof.
+        return "^" + re.escape(f"uninstall content changed after preflight: {self.release}") + "$"
 
     def git(self, *arguments: str) -> str:
         options = list(arguments[:3]) if arguments[:1] == ("--no-optional-locks",) else []
@@ -125,6 +129,8 @@ class ReleaseContentSafetyTests(unittest.TestCase):
             ("add", "--", ".gitignore", "portable-release.json", "payload.bin", "install"),
             ("commit", "--quiet", "--no-gpg-sign", "-m", "Release safety fixture"),
             ("rev-parse", "HEAD"),
+            ("rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir",
+             "--git-common-dir", "--git-path", "index"),
             ("diff", "--quiet", "--"),
             ("diff", "--cached", "--quiet", "--"),
             ("ls-files", "--stage"),
@@ -138,13 +144,30 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         self.assertIn(arguments, allowed, "unreviewed Git command blocked")
         self.validate_root()
         self.assertTrue(self.release.resolve(strict=True).is_relative_to(self.root))
+        metadata = require_fixture_path(self.release / ".git")
+        command = [
+            str(self.git_executable), "-c", f"core.hooksPath={self.empty_directory}",
+            "-c", f"init.templateDir={self.empty_directory}",
+            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false",
+            "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-C", str(self.release),
+        ]
+        if arguments == ("init", "--quiet"):
+            self.assertFalse(metadata.exists(), "Fixture Git init requires fresh metadata")
+        else:
+            self.assertTrue(metadata.is_dir(), "Fixture Git metadata must be a private directory")
+            for name in ("config", "index", "objects", "refs"):
+                require_fixture_path(metadata / name)
+            scope = self.real_run(
+                [*command, "rev-parse", "--path-format=absolute", "--show-toplevel",
+                 "--absolute-git-dir", "--git-common-dir", "--git-path", "index"],
+                env=self.git_environment, cwd=self.root, capture_output=True,
+                text=True, encoding="utf-8", check=False, timeout=15,
+            )
+            self.assertEqual(scope.returncode, 0, scope.stderr)
+            self.assertEqual([Path(line) for line in scope.stdout.splitlines()],
+                             [self.release, metadata, metadata, metadata / "index"])
         result = self.real_run(
-            [str(self.git_executable),
-             "-c", f"core.hooksPath={self.empty_directory}",
-             "-c", f"init.templateDir={self.empty_directory}",
-             "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false",
-             "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false",
-             "-C", str(self.release), *options, *arguments],
+            [*command, *options, *arguments],
             env=self.git_environment, cwd=self.root, capture_output=True,
             text=True, encoding="utf-8", check=False, timeout=15,
         )
@@ -421,6 +444,22 @@ class ReleaseContentSafetyTests(unittest.TestCase):
     def test_git_admin_root_reparse_point_is_rejected_before_uninstall_mutation(self) -> None:
         self.prepare_owned_release()
         self.write_lock("uninstall")
+        # Capture the real verified read-only contract while metadata is still plain.
+        # The synthetic reparse view must never reach the real fixture Git boundary.
+        responses: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
+
+        def capture_git(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            result = self.readonly_git(arguments, **kwargs)
+            responses[tuple(arguments)] = result
+            return result
+
+        with mock.patch.object(subprocess, "run", side_effect=capture_git):
+            self.assertEqual(verify.verify(self.install), self.release)
+
+        def frozen_git(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertIn(tuple(arguments), responses, "unreviewed Git query in reparse simulation")
+            return responses[tuple(arguments)]
+
         before = self.snapshot()
         original_lstat = Path.lstat
 
@@ -434,8 +473,13 @@ class ReleaseContentSafetyTests(unittest.TestCase):
 
         try:
             with mock.patch.object(Path, "lstat", autospec=True, side_effect=reparse_lstat):
-                with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
-                    transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                with mock.patch.object(subprocess, "run", side_effect=frozen_git):
+                    with mock.patch.object(self, "real_run") as real_git:
+                        with self.reject_mutations(), self.assertRaisesRegex(
+                            RuntimeError, "Git ownership",
+                        ):
+                            transaction.uninstall_layout(self.install, TRANSACTION_ID)
+                        real_git.assert_not_called()
         finally:
             self.assertEqual(self.snapshot(), before)
 
@@ -448,7 +492,9 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         (self.release / ".git" / "operator-notes").write_bytes(b"added after interrupted preflight")
         before = self.snapshot()
         try:
-            with self.reject_mutations(), self.assertRaisesRegex(RuntimeError, "Git ownership"):
+            with self.reject_mutations(), self.assertRaisesRegex(
+                RuntimeError, self.changed_release_error(),
+            ):
                 transaction.uninstall_layout(self.install, TRANSACTION_ID)
         finally:
             self.assertEqual(self.snapshot(), before)
@@ -520,7 +566,7 @@ class ReleaseContentSafetyTests(unittest.TestCase):
                 before = self.snapshot()
                 try:
                     with self.reject_mutations(), self.assertRaisesRegex(
-                        RuntimeError, "Git ownership survivors changed",
+                        RuntimeError, self.changed_release_error(),
                     ):
                         transaction.uninstall_layout(self.install, TRANSACTION_ID)
                 finally:
@@ -574,7 +620,7 @@ class ReleaseContentSafetyTests(unittest.TestCase):
         before = self.snapshot()
         try:
             with self.reject_mutations(), self.assertRaisesRegex(
-                RuntimeError, "Git ownership survivors changed",
+                RuntimeError, self.changed_release_error(),
             ):
                 transaction.uninstall_layout(self.install, TRANSACTION_ID)
         finally:
@@ -689,8 +735,12 @@ class ReleaseContentSafetyTests(unittest.TestCase):
                         with mock.patch.object(
                             Path, "exists", autospec=True, side_effect=entry_exists,
                         ):
+                            message = "Git ownership" if target == proof else (
+                                "^" + re.escape(f"reparse or symbolic link rejected: {target}")
+                                + "$"
+                            )
                             with self.reject_mutations(), self.assertRaisesRegex(
-                                RuntimeError, "Git ownership",
+                                RuntimeError, message,
                             ):
                                 transaction.uninstall_layout(self.install, TRANSACTION_ID)
                 finally:

@@ -135,12 +135,15 @@ class ExecutionTelemetry:
             if not all(item.component_id and item.attempt_key for item in matching):
                 raise ValueError("Execution telemetry identity is incomplete.")
             timestamps = tuple(_timestamp(item.occurred_at) for item in matching)
-            if any(later < earlier for earlier, later in zip(timestamps, timestamps[1:])):
+            if any(
+                later < earlier
+                for earlier, later in zip(timestamps, timestamps[1:], strict=False)
+            ):
                 raise ValueError("Execution telemetry timestamps must be monotonic.")
             first = timestamps[0]
             if any(
                 item.elapsed_ms != round((timestamp - first).total_seconds() * 1000)
-                for item, timestamp in zip(matching, timestamps)
+                for item, timestamp in zip(matching, timestamps, strict=True)
             ):
                 raise ValueError("Execution telemetry elapsed durations are inconsistent.")
         if any(item.elapsed_ms < 0 for item in self.events):
