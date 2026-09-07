@@ -146,6 +146,12 @@ also accept the typed number; on redirected terminals they print as numbered
 lists. If the saved default is rejected, the top menu instead offers `1. Reset
 to the built-in workflow default`, then `2. Save`.
 
+The same menu opens from the shell with `devloop options` (or
+`devloop /options`), so a step's backend, model, and reasoning effort can be
+set before any PRD or run exists. `--codex <command>` names the Codex
+executable used for Model Catalog discovery and `--plain` prints numbered
+lists instead of arrow-key menus.
+
 ### Full Workflow Editor reference
 
 The full Workflow Editor described below remains in the codebase but is not

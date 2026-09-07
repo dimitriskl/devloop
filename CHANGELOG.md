@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `devloop options` (also `devloop /options`) opens Dev Loop Options directly
+  from the `devloop` command, without a PRD or a run. Until now the numbered
+  Models per role menu was reachable from `devloop` only through the
+  preflight-failure prompt; from `devloop-plan` it remains available at startup
+  and through `/options`. `--codex` names the Codex executable used for Model
+  Catalog discovery and `--plain` prints numbered lists.
 - `/options` now opens Dev Loop Options, a numbered menu (`1. Models per role`,
   `2. Save`, `0. Exit`) that sets each agent-backed step's Execution Backend,
   model, and reasoning effort through numbered backend, model, and effort

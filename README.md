@@ -279,6 +279,23 @@ Ubuntu/Linux:
 ./bin/devloop.sh --prd /path/to/prd/feature/feature.md
 ```
 
+To choose each Workflow Step's Execution Backend, model, and reasoning effort
+before any run starts, open Dev Loop Options directly:
+
+```powershell
+.\bin\devloop.ps1 options
+```
+
+```bash
+./bin/devloop.sh options
+```
+
+It is the same numbered menu `/options` opens inside a run (`1. Models per
+role`, `2. Save`, `0. Exit`), and Save writes the User Workflow Default that
+every later run reads. `--codex <command>` names the Codex executable used for
+Model Catalog discovery; `--plain` prints numbered lists instead of arrow-key
+menus.
+
 The runner infers `issues/README.md` from the PRD folder, uses
 `presets/generic-minimal.json`, processes all dependency-ready unfinished
 issues, works directly in the source checkout, and reads and updates the

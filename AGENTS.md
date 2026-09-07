@@ -14,6 +14,12 @@ Wrapper scripts are in `bin/`. Documentation is under `docs/`. Prompt templates,
 Shows runner flags and verifies Python startup.
 
 ```powershell
+.\bin\devloop.ps1 options
+```
+Opens Dev Loop Options, the numbered menu that sets each Workflow Step's
+Execution Backend, model, and reasoning effort, without starting a run.
+
+```powershell
 .\bin\devloop.ps1 --prd <prd.md> --dry-run
 ```
 Infers the canonical issue index and renders every unfinished issue's prompts

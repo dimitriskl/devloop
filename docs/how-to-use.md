@@ -250,6 +250,16 @@ paths.
 
 ## 7. `devloop` Flags
 
+Dev Loop Options:
+
+- `devloop options` (also accepted as `devloop /options`) opens Dev Loop
+  Options without a PRD or a run: the numbered `1. Models per role` menu that
+  sets each agent-backed Workflow Step's Execution Backend, model, and
+  reasoning effort in the User Workflow Default. `--codex <command>` names the
+  Codex executable used for Model Catalog discovery and `--plain` prints
+  numbered lists instead of arrow-key menus. No run flag is accepted alongside
+  it.
+
 Core inputs:
 
 - `--prd <file>` is the parent PRD Markdown file.

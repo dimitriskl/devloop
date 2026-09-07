@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from .codex_runner import CodexRunner, RoleResult, RunWideBlockerError
 from .issue_pack import (
@@ -386,6 +386,8 @@ def main(
     partial_work_context: PortablePartialWorkContext | None = None,
 ) -> int:
     raw_arguments = tuple(argv if argv is not None else sys.argv[1:])
+    if raw_arguments[:1] and raw_arguments[0] in OPTIONS_COMMAND_ALIASES:
+        return run_options_command(raw_arguments[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -971,6 +973,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devloop",
         description="Run local PRD + issue-pack tasks through Codex coder, review, and QA gates.",
+        epilog=(
+            f"Run 'devloop {OPTIONS_COMMAND}' to open Dev Loop Options, the numbered menu "
+            "that sets each Workflow Step's Execution Backend, model, and reasoning "
+            "effort in the User Workflow Default without starting a run."
+        ),
     )
     parser.add_argument("--prd", required=True, help="Path to the parent PRD Markdown file.")
     parser.add_argument(
@@ -1046,6 +1053,91 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not prompt for missing explicit worktree details.",
     )
     return parser
+
+
+OPTIONS_COMMAND = "options"
+# `/options` is how the menu is opened inside a run; accepting that spelling
+# here keeps the one habit working from the shell as well.
+OPTIONS_COMMAND_ALIASES = frozenset({OPTIONS_COMMAND, f"/{OPTIONS_COMMAND}"})
+
+
+def build_options_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=f"devloop {OPTIONS_COMMAND}",
+        description=(
+            "Open Dev Loop Options, the numbered menu that sets each agent-backed "
+            "Workflow Step's Execution Backend, model, and reasoning effort in the "
+            "User Workflow Default. No PRD is needed and no run is started."
+        ),
+    )
+    parser.add_argument(
+        "--codex",
+        default="codex",
+        help="Codex executable used for Model Catalog discovery. Default: codex.",
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Print numbered lists and read the number instead of using arrow-key menus.",
+    )
+    return parser
+
+
+def run_options_command(arguments: Sequence[str]) -> int:
+    """Open Dev Loop Options straight from the `devloop` command.
+
+    This is the same menu `/options` shows inside a run, made reachable before
+    any run exists: a Workflow Step's backend, model, and reasoning effort can be
+    chosen up front instead of only from the preflight-failure prompt. Edits go
+    to the User Workflow Default, so nothing here needs a PRD, a checkout, or a
+    Portable Workflow Session.
+    """
+    args = build_options_parser().parse_args(list(arguments))
+
+    from . import catalog as catalog_module
+    from .interactive_runner import run_options_menu
+    from .portable_presentation import (
+        PortableUiMode,
+        requested_portable_ui_mode,
+        select_portable_ui_mode,
+    )
+    from .portable_runtime import portable_plain_mode_session
+
+    ui_mode = select_portable_ui_mode(
+        requested_mode=requested_portable_ui_mode(
+            explicit_mode=PortableUiMode.PLAIN if args.plain else None,
+            environment=os.environ,
+        ),
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        term=os.environ.get("TERM"),
+    )
+    bundle = BundleContext.from_file(Path(__file__).resolve())
+    state_path = portable_planner_configuration_path()
+    selection = catalog_module.load_selection(state_path)
+
+    def open_menu() -> None:
+        run_options_menu(
+            bundle.root,
+            selection,
+            state_path,
+            component_catalog=build_portable_component_catalog(bundle.root),
+            catalog_access=BackendModelCatalogAccess(
+                cwd=Path.cwd().resolve(),
+                codex=args.codex,
+            ),
+        )
+
+    try:
+        if ui_mode is PortableUiMode.PLAIN:
+            with portable_plain_mode_session():
+                open_menu()
+        else:
+            open_menu()
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        return 130
+    return 0
 
 
 def issue_progress_label(position: int, total: int, issue_number: str) -> str:
