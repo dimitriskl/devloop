@@ -63,7 +63,7 @@ Ubuntu/Linux:
 ./bin/devloop.sh --prd /home/you/repo/prd/feature/feature.md
 ```
 
-Run only one pending issue:
+Run only the first dependency-ready unfinished issue:
 
 Windows:
 

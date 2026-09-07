@@ -230,10 +230,11 @@ worktree creation behavior once an explicit override has selected them.
 - The agreed preferred invocation is a direct runner command containing only
   the PRD argument. The implementation must not claim this shorthand works
   until the public-entrypoint regression and dry-run smoke test pass.
-- Current verified behavior differs from the target: the direct CLI requires an
-  Issue Index, all-Issues selection is opt-in, and an interactive omission of
-  worktree flags offers worktree creation. The preset and wiki are already
-  defaulted as required.
+- At PRD drafting time, the direct CLI required an Issue Index, all-Issues
+  selection was opt-in, and an interactive omission of worktree flags offered
+  worktree creation. The preset and wiki already had the required defaults.
+  Current implementation and gate results are recorded in
+  [verification evidence](./verification.md).
 - The planning intake already knows how to locate a canonical Issue Index from
   a PRD folder, but its legacy fallbacks are not part of this direct-run
   contract.

@@ -551,13 +551,20 @@ def _run_devloop_attempt(
         except ValueError as exc:
             parser.error(str(exc))
 
-    selected_source_issues = select_issues(
-        source_issues,
-        run_all=args.all,
-        start_issue=args.start_issue,
-    )
-
     try:
+        if not args.all and not args.start_issue:
+            projection = DependencyScheduler(source_issue_graph).project(
+                completed=(issue.number for issue in source_issues if issue.completed),
+                normal_attempted=(),
+            )
+            first_ready = projection.next_normal
+            selected_source_issues = [first_ready.issue] if first_ready else []
+        else:
+            selected_source_issues = select_issues(
+                source_issues,
+                run_all=args.all,
+                start_issue=args.start_issue,
+            )
         source_issue_graph.validate_selection(selected_source_issues)
     except ValueError as exc:
         parser.error(f"Issue selection preflight failed: {exc}")
@@ -1002,7 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="all",
         action="store_false",
         help=(
-            "Run only the first selected unfinished issue, or only the issue "
+            "Run only the first dependency-ready unfinished issue, or only the issue "
             "matched by --start-issue."
         ),
     )

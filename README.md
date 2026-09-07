@@ -282,7 +282,7 @@ Ubuntu/Linux:
 The runner infers `issues/README.md` from the PRD folder, uses
 `presets/generic-minimal.json`, processes all dependency-ready unfinished
 issues, works directly in the source checkout, and reads and updates the
-self-improvement wiki. Use `--single-issue` to process only the first selected
+self-improvement wiki. Use `--single-issue` to process only the first dependency-ready
 unfinished issue. `--all`, `--no-worktree`, and `--self-improvement-wiki`
 remain accepted as explicit expressions of the defaults. Declare prerequisites
 as local Markdown links under an issue's `## Blocked by` heading. Index order is

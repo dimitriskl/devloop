@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -16,6 +17,155 @@ from devloop.portable_sessions import PortableWorkflowOperation
 
 
 class PortableDirectRunTests(unittest.TestCase):
+    def test_default_full_run_schedules_prerequisites_before_index_position(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw)
+            self._initialize_repository(repository)
+            prd = self._write_prd_package(repository, issue_count=3)
+            first = prd.parent / "issues" / "0001-example.md"
+            first.write_text(
+                first.read_text(encoding="utf-8").replace(
+                    "None.", "- [Prerequisite](./0002-example.md)"
+                ), encoding="utf-8",
+            )
+            output = self._dry_run(prd, [])
+            self.assertIn("Selected issues: 0001, 0002, 0003", output)
+            self.assertLess(output.index("0002-development"), output.index("0001-development"))
+            self.assertLess(output.index("0001-development"), output.index("0003-development"))
+
+    def test_custom_wiki_location_remains_an_explicit_parser_override(self) -> None:
+        args = cli.build_parser().parse_args([
+            "--prd", "feature.md", "--self-improvement-wiki-path", "docs/custom-wiki",
+        ])
+        self.assertTrue(args.self_improvement_wiki)
+        self.assertEqual(args.self_improvement_wiki_path, "docs/custom-wiki")
+
+    def test_completed_issue_is_skipped_with_default_and_explicit_breadth(self) -> None:
+        for arguments, selected in (
+            ([], "0002, 0003"),
+            (["--all", "--no-worktree", "--self-improvement-wiki"], "0002, 0003"),
+            (["--single-issue"], "0002"),
+            (["--start-issue", "1"], "0002, 0003"),
+            (["--start-issue", "1", "--single-issue"], "0002"),
+        ):
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as raw:
+                repository = Path(raw)
+                self._initialize_repository(repository)
+                prd = self._write_prd_package(repository, issue_count=3)
+                first = prd.parent / "issues" / "0001-example.md"
+                first.write_text(
+                    first.read_text(encoding="utf-8").replace("Completed: [ ]", "Completed: [x]"),
+                    encoding="utf-8",
+                )
+                output = self._dry_run(prd, arguments)
+                self.assertIn(f"Selected issues: {selected}\n", output)
+                self.assertNotIn("0001-development", output)
+                self.assertNotIn("deprecated", output.lower())
+
+    def test_explicit_preset_and_wiki_opt_out_reach_generated_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw)
+            self._initialize_repository(repository)
+            prd = self._write_prd_package(repository, issue_count=1)
+            preset = repository / "custom-preset.json"
+            bundled = Path(cli.__file__).resolve().parents[2] / "presets/generic-minimal.json"
+            values = json.loads(bundled.read_text(encoding="utf-8"))
+            values["requiredDocs"] = ["custom-direct-run-guidance.md"]
+            preset.write_text(json.dumps(values), encoding="utf-8")
+            output = self._dry_run(prd, ["--preset", str(preset), "--no-self-improvement-wiki"])
+            prompts = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (prd.parent / "issues/.loop.logs").rglob("*.prompt.md")
+            )
+            self.assertIn("custom-direct-run-guidance.md", prompts)
+            self.assertIn("Disabled for this run.", prompts)
+            self.assertNotIn("self-improvement wiki update skipped", output)
+
+    def test_explicit_start_preserves_dependency_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw)
+            self._initialize_repository(repository)
+            prd = self._write_prd_package(repository, issue_count=2)
+            second = prd.parent / "issues" / "0002-example.md"
+            second.write_text(
+                second.read_text(encoding="utf-8").replace(
+                    "None.", "- [Prerequisite](./0001-example.md)"
+                ), encoding="utf-8",
+            )
+            for breadth in ([], ["--single-issue"]):
+                error = StringIO()
+                with (
+                    self.subTest(breadth=breadth),
+                    mock.patch.object(cli, "CodexRunner") as runner,
+                    redirect_stderr(error),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    self._dry_run(prd, ["--start-issue", "2", *breadth])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("requires unfinished issue 0001", error.getvalue())
+                runner.assert_not_called()
+
+    def test_invalid_start_reports_a_cli_error_before_runner_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw)
+            self._initialize_repository(repository)
+            prd = self._write_prd_package(repository, issue_count=1)
+            error = StringIO()
+            with (
+                mock.patch.object(cli, "CodexRunner") as runner,
+                redirect_stderr(error),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                self._dry_run(prd, ["--start-issue", "99"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("No issue matches --start-issue 99", error.getvalue())
+            runner.assert_not_called()
+
+    @staticmethod
+    def _dry_run(prd: Path, arguments: list[str]) -> str:
+        output = StringIO()
+        with (
+            portable_runtime_session(PortableRuntimeBridge()),
+            mock.patch.dict(os.environ, {
+                "APPDATA": str(prd.parent / "configuration"),
+                "DEVLOOP_UI_MODE": "application",
+            }),
+            mock.patch("devloop.worktree.read_prompt", side_effect=AssertionError("prompted")),
+            redirect_stdout(output),
+        ):
+            result = cli.main(["--prd", str(prd), "--dry-run", *arguments])
+        if result != 0:
+            raise AssertionError(output.getvalue())
+        return output.getvalue()
+
+    def test_single_issue_skips_waiting_issues_and_selects_first_ready_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw)
+            self._initialize_repository(repository)
+            prd = self._write_prd_package(repository, issue_count=3)
+            first = prd.parent / "issues" / "0001-example.md"
+            first.write_text(
+                first.read_text(encoding="utf-8").replace(
+                    "None.", "- [Prerequisite](./0002-example.md)"
+                ),
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with (
+                portable_runtime_session(PortableRuntimeBridge()),
+                mock.patch.dict(os.environ, {
+                    "APPDATA": str(repository / "configuration"),
+                    "DEVLOOP_UI_MODE": "application",
+                }),
+                redirect_stdout(output),
+            ):
+                result = cli.main(["--prd", str(prd), "--single-issue", "--dry-run"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("Selected issues: 0002\n", output.getvalue())
+        self.assertNotIn("0001-development", output.getvalue())
+        self.assertNotIn("0003-development", output.getvalue())
+
     def test_prd_only_invocation_infers_the_canonical_issue_index(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repository = Path(raw)

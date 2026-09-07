@@ -262,7 +262,7 @@ Issue selection and dependencies:
 
 - All dependency-ready unfinished issues run by default.
 - `--all` remains accepted as an explicit expression of the default.
-- `--single-issue` runs only the first selected unfinished issue.
+- `--single-issue` runs only the first dependency-ready unfinished issue.
 - `--start-issue <number-or-prefix>` starts at an issue number or filename
   prefix and continues through remaining issues unless combined with
   `--single-issue`. Preflight rejects a selection that omits an unfinished
