@@ -80,7 +80,8 @@ output. `transient_retry.py` owns the bounded retry policy both backends share:
 one attempt-wide Execution Budget across every process run, one delay, and one
 accumulated transcript. What is worth retrying is asked of the backend through
 `is_retryable_transient_failure` on the interface, which is also where each
-backend keeps the promise that a Run-Wide Blocker is never retried. This package
+backend never retries a Run-Wide Blocker inside an attempt. The run scheduler
+automatically waits and retries usage limits outside attempt budgets. This package
 must not import any CodexCLI package, which `tests/test_product_boundary.py`
 enforces.
 

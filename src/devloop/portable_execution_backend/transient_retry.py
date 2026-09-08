@@ -10,7 +10,7 @@ before each wait — so both backends retry on identical terms.
 What is *worth* retrying is the one decision this module does not make. It asks
 the backend, through :class:`~.backend.TransientFailurePredicate`, because only a
 backend can read its own provider's diagnostics. That is also what keeps the
-promise that a Run-Wide Blocker is never retried: a backend that recognises a
+promise that a Run-Wide Blocker is not retried inside an attempt: a backend seeing a
 run-wide condition refuses retryability, and this loop then returns the attempt so
 the condition can pause the run instead of spending the rest of its budget.
 """

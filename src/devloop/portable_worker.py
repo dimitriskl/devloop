@@ -81,6 +81,8 @@ class PortableWorkerRuntimeBridge:
             Queue()
         )
         self._control_reader_started = False
+        self._retry_wakeup = Event()
+        self._control_error: BaseException | None = None
         self._content_size: tuple[int, int] | None = None
 
     @property
@@ -193,6 +195,14 @@ class PortableWorkerRuntimeBridge:
 
     def request_stop(self) -> None:
         self._lifecycle_request = SupervisorMessageKind.SHUTDOWN
+        self._retry_wakeup.set()
+
+    def wait_for_retry(self, seconds: float) -> None:
+        self._raise_if_stopping()
+        self._retry_wakeup.wait(seconds)
+        self._raise_if_stopping()
+        if self._control_error is not None:
+            raise self._control_error
 
     def show_screen(self, content: str) -> None:
         self._raise_if_stopping()
@@ -412,6 +422,8 @@ class PortableWorkerRuntimeBridge:
                     self._command_decoder,
                 )
             except (OSError, PortableProtocolError, UnicodeError) as error:
+                self._control_error = error
+                self._retry_wakeup.set()
                 self._command_queue.put(
                     error
                     if isinstance(error, PortableProtocolError)
@@ -433,6 +445,7 @@ class PortableWorkerRuntimeBridge:
             }:
                 self._lifecycle_request = kind
                 self._lifecycle_command = frame
+                self._retry_wakeup.set()
                 if on_lifecycle is not None:
                     on_lifecycle(frame)
                 self._command_queue.put(frame)

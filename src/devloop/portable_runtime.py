@@ -170,6 +170,10 @@ class PortableRuntimeBridge:
         for response in responses:
             response.put((_PortableInteractionKind.STOP, ""))
 
+    def wait_for_retry(self, seconds: float) -> None:
+        if self._stop_requested.wait(seconds):
+            raise PortableRuntimeStopped("Portable application stopped.")
+
     def show_screen(self, content: str) -> None:
         self._event_queue.put(
             PortableRuntimeEvent(

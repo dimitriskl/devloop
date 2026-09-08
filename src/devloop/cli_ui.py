@@ -30,11 +30,14 @@ CAPABILITY_ACTION_BAR: tuple[tuple[str, str], ...] = (
     ("Esc", "Back"),
 )
 
+# Black-and-white frame theme, like the classic DOS prompt: white text on a
+# black window, bright white rules, and inverse video (black on white) for
+# the title bar, the Shortcuts row, and the selected menu entry.
 _ANSI_RESET = "\x1b[0m"
-_ANSI_WINDOW = "\x1b[37;44m"
-_ANSI_BORDER = "\x1b[1;36;44m"
-_ANSI_HEADER = "\x1b[1;30;46m"
-_ANSI_SELECTION = "\x1b[1;30;46m"
+_ANSI_WINDOW = "\x1b[37;40m"
+_ANSI_BORDER = "\x1b[1;37;40m"
+_ANSI_HEADER = "\x1b[30;47m"
+_ANSI_SELECTION = "\x1b[30;47m"
 
 
 def terminal_dimensions(*, fallback: tuple[int, int] = (100, 24)) -> tuple[int, int]:

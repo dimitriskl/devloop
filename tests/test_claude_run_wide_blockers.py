@@ -961,7 +961,12 @@ class RunWidePausePathTests(unittest.TestCase):
 
                 self.assertIn(statusui.RUN_PAUSED_LABEL, notice)
                 self.assertIn(kind.value, notice)
-                self.assertIn("rerun the same command", notice)
+                recovery = (
+                    "retry automatically"
+                    if kind is RunWideBlockerKind.USAGE_LIMIT
+                    else "rerun the same command"
+                )
+                self.assertIn(recovery, notice)
 
 
 if __name__ == "__main__":

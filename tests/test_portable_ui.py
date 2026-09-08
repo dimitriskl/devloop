@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,17 @@ from devloop.portable_ui.app import (
     PortableTextOverlay,
     _launch_for_checkout,
 )
+
+
+class PortableApplicationShellThemeTests(unittest.TestCase):
+    def test_stylesheet_is_black_and_white(self) -> None:
+        """Every colour in the shell stylesheet is a grey, like the DOS prompt."""
+        colors = set(re.findall(r"#([0-9a-fA-F]{6})\b", PortableApplicationShell.CSS))
+
+        self.assertTrue(colors)
+        for color in sorted(colors):
+            red, green, blue = (int(color[index : index + 2], 16) for index in (0, 2, 4))
+            self.assertEqual((red, green), (green, blue), f"#{color} is not grayscale")
 
 
 class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):

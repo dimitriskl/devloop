@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,6 +24,7 @@ from .portable_execution_backend import (
     RunWideBlockerKind,
     parse_execution_backend_id,
 )
+from .portable_execution_backend.blockers import valid_reset_timestamp
 from .portable_workflow import (
     DataContractId,
     InterruptedStepAttemptRecord,
@@ -1127,7 +1128,9 @@ class LoopStateWriter:
         )
         self.flush()
 
-    def record_run_paused(self, blocker: RunWideBlocker) -> None:
+    def record_run_paused(
+        self, blocker: RunWideBlocker, *, retry_at: float | None = None
+    ) -> None:
         active = self.active_scheduling_attempt()
         if active is None:
             raise ValueError("A Run-Wide Blocker requires an active scheduling attempt.")
@@ -1143,6 +1146,8 @@ class LoopStateWriter:
             "step_instance_id": issue_state.get("current_step_instance_id"),
             "pass": issue_state.get("current_pass"),
             "paused_at": now(),
+            "reset_at": valid_reset_timestamp(blocker.reset_at),
+            "retry_at": valid_reset_timestamp(retry_at),
         }
         previous = self.state.get("run_pause")
         pause["occurrences"] = (
@@ -1852,6 +1857,7 @@ def render_board(state: dict[str, Any]) -> str:
 
     run_pause = state.get("run_pause")
     if isinstance(run_pause, dict):
+        retry_at = valid_reset_timestamp(run_pause.get("retry_at"))
         lines.extend(
             [
                 "",
@@ -1863,6 +1869,12 @@ def render_board(state: dict[str, Any]) -> str:
                 f"Workflow step: `{run_pause.get('step_instance_id', '')}`",
                 f"Pass: `{run_pause.get('pass', '')}`",
                 f"Recovery: {run_pause.get('summary', '')}",
+                *(
+                    ["Automatic retry: " + datetime.fromtimestamp(
+                        retry_at, timezone.utc
+                    ).isoformat(timespec="seconds")]
+                    if retry_at is not None else []
+                ),
             ]
         )
 

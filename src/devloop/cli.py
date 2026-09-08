@@ -79,6 +79,7 @@ from .subprocess_utils import run_captured_text
 from .terminal_menu import choose_menu_option, render_app_screen
 from .terminal_text import compact_terminal_text, sanitize_terminal_text
 from .templates import BundleContext, load_preset
+from .usage_limit_retry import retry_usage_limited_run
 from .worktree import resolve_worktree
 from .workflow_defaults import (
     WorkflowDefaultStore,
@@ -839,9 +840,8 @@ def _run_devloop_attempt(
                 return
         print(summary)
 
-    schedule_result: DependencyScheduleResult | None = None
-    try:
-        schedule_result = execute_dependency_schedule(
+    def execute_schedule() -> DependencyScheduleResult:
+        return execute_dependency_schedule(
             issues=issues,
             graph=source_issue_graph,
             state_writer=state_writer,
@@ -854,6 +854,35 @@ def _run_devloop_attempt(
             ),
             blocker_resolution_passes=blocker_resolution_budget,
             simulation=args.dry_run,
+        )
+
+    countdown_updates = 0
+
+    def show_usage_countdown(summary: str) -> None:
+        from .portable_runtime import active_portable_runtime, publish_active_session_status
+
+        nonlocal countdown_updates
+        countdown_updates += 1
+        if active_portable_runtime() is None and not sys.stdout.isatty():
+            if countdown_updates % 60 == 1:
+                print(summary, flush=True)
+            return
+        publish_active_session_status(stage=summary)
+        if delivery_dashboard is not None:
+            delivery_dashboard.show_scheduler_status(summary)
+        else:
+            publish_portable_screen(summary)
+            if sys.stdout.isatty():
+                print(f"\r{summary}", end="", flush=True)
+
+    schedule_result: DependencyScheduleResult | None = None
+    try:
+        schedule_result = (
+            execute_schedule()
+            if args.dry_run
+            else retry_usage_limited_run(
+                execute_schedule, state_writer, show_usage_countdown
+            )
         )
     except RunWideBlockerError as error:
         state_writer.record_run_paused(error.blocker)

@@ -54,7 +54,12 @@ from .backend import (
     describe_refusals,
     report_model_mismatch,
 )
-from .blockers import RunWideBlocker, RunWideBlockerKind, RunWideBlockerPolicy
+from .blockers import (
+    RunWideBlocker,
+    RunWideBlockerKind,
+    RunWideBlockerPolicy,
+    valid_reset_timestamp,
+)
 from .checkpoint import update_checkpoint_for_step_activity
 from .claude_catalog import (
     ClaudeModelCatalogAdapter,
@@ -97,6 +102,7 @@ CLAUDE_API_ERROR_STATUS_KEY = "api_error_status"
 # disposition rather than merely describing the window.
 CLAUDE_RATE_LIMIT_INFO_KEY = "rate_limit_info"
 CLAUDE_RATE_LIMIT_STATUS_KEY = "status"
+CLAUDE_RATE_LIMIT_RESET_KEY = "resetsAt"
 # The one terminal reason that means the attempt ran to its own conclusion.
 # Anything else the provider reports is a failure, even when it arrives with no
 # error flag and a success subtype. The field is treated as absent-means-completed
@@ -250,8 +256,7 @@ CLAUDE_API_ERROR_BLOCKER_KINDS = {
 # that can actually work and ends by pointing at the rerun that resumes the run.
 CLAUDE_RUN_WIDE_BLOCKER_SUMMARIES = {
     RunWideBlockerKind.USAGE_LIMIT: (
-        "Claude usage is exhausted. Restore usage availability, then rerun the "
-        "same command."
+        "Claude usage is exhausted. The run will retry automatically while open."
     ),
     RunWideBlockerKind.AUTHENTICATION: (
         "Claude authentication is unavailable. Restore authentication, then "
@@ -601,14 +606,22 @@ def claude_run_wide_blocker(
         kind = RunWideBlockerKind.USAGE_LIMIT
     if kind is None:
         return None
-    return RunWideBlocker(kind=kind, summary=CLAUDE_RUN_WIDE_BLOCKER_SUMMARIES[kind])
+    return RunWideBlocker(
+        kind=kind,
+        summary=CLAUDE_RUN_WIDE_BLOCKER_SUMMARIES[kind],
+        reset_at=(
+            _exhausted_rate_limit_reset(stdout)
+            if kind is RunWideBlockerKind.USAGE_LIMIT
+            else None
+        ),
+    )
 
 
 def is_retryable_claude_transient_failure(*, stdout: str, stderr: str) -> bool:
     """Whether a bounded retry could clear what ended this failed Claude attempt.
 
     A classified Run-Wide Blocker is refused outright, which is how the promise
-    that a Run-Wide Blocker is never retried is kept for this backend: the
+    that a Run-Wide Blocker is never retried inside an attempt is kept: the
     provider has answered the call, and repeating it would spend the attempt's
     remaining budget to be told the same thing.
 
@@ -1435,6 +1448,24 @@ def _reports_exhausted_rate_limit(stdout: str) -> bool:
         if status is CLAUDE_EXHAUSTED_RATE_LIMIT_STATUS:
             return True
     return False
+
+
+def _exhausted_rate_limit_reset(stdout: str) -> float | None:
+    """Read only rejected windows, never an allowed warning or provider prose."""
+    resets: list[float] = []
+    for line in stdout.splitlines():
+        payload = parse_claude_event(line)
+        if payload is None or payload.get("type") != ClaudeEventType.RATE_LIMIT.value:
+            continue
+        info = payload.get(CLAUDE_RATE_LIMIT_INFO_KEY)
+        if not isinstance(info, dict):
+            continue
+        if info.get(CLAUDE_RATE_LIMIT_STATUS_KEY) != CLAUDE_EXHAUSTED_RATE_LIMIT_STATUS.value:
+            continue
+        reset = valid_reset_timestamp(info.get(CLAUDE_RATE_LIMIT_RESET_KEY))
+        if reset is not None:
+            resets.append(reset)
+    return max(resets) if resets else None
 
 
 def _accounted_serving_model(terminal_result: dict[str, Any]) -> str | None:

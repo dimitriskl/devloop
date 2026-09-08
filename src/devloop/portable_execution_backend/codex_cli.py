@@ -95,7 +95,7 @@ RUN_WIDE_BLOCKER_PATTERNS = (
             r"out of credits|credits? exhausted)\b",
             re.IGNORECASE,
         ),
-        "Codex usage is exhausted. Restore usage availability, then rerun the same command.",
+        "Codex usage is exhausted. The run will retry automatically while open.",
     ),
     (
         RunWideBlockerKind.AUTHENTICATION,

@@ -423,8 +423,17 @@ and waiting projections, normal attempts, per-issue additional-pass counters,
 and the active scheduling reservation. Rerunning the same command resumes that
 reservation without double charging it. On either Execution Backend, usage
 exhaustion, authentication failure, service unavailability, or model access
-withdrawn mid-run pauses the entire run as `RUN PAUSED`; restore the backend
-condition and rerun the same command to continue the exact issue, workflow step,
+withdrawn mid-run pauses the entire run as `RUN PAUSED`. Usage limits now show a
+countdown and retry automatically at the provider's reported reset time. If no
+usable reset time is supplied, or a retry still hits the limit, Dev Loop waits
+five minutes between attempts until one succeeds. This applies to both Claude
+Code and Codex CLI. The current Codex CLI adapter does not extract a reset time,
+so Codex usage limits use the five-minute interval. The deadline is persisted;
+manually resuming a paused session honors its remaining wait. Pause, Cancel,
+Force Stop, and application shutdown interrupt the timer. Keep the application
+open for automatic retries; the waiting worker retains its execution slot and
+worktree lease. Other run-wide conditions still require restoring the backend
+and rerunning the same command to continue the exact issue, workflow step,
 pass, scheduling phase, and Blocker Resolution round. A pause changes no issue
 outcome and spends no attempt budget. A transient network failure is retried
 inside the same attempt instead, under that attempt's Execution Budget.

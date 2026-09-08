@@ -328,30 +328,30 @@ class PortableSessionActionConfirmation(ModalScreen[bool]):
 class PortableApplicationShell(App[None]):
     CSS = """
     Screen {
-        background: #012456;
-        color: #f4f7fb;
+        background: #000000;
+        color: #ffffff;
     }
 
     #portable-shell {
         width: 100%;
         height: 100%;
-        border: solid #3a96dd;
-        background: #012456;
+        border: solid #ffffff;
+        background: #000000;
     }
 
     #portable-header {
         height: 1;
         padding: 0 1;
-        background: #0b5d7a;
-        color: #ffffff;
+        background: #ffffff;
+        color: #000000;
         text-style: bold;
     }
 
     #portable-tabs {
         height: 1;
         padding: 0 1;
-        background: #081b2c;
-        color: #9cdcfe;
+        background: #000000;
+        color: #ffffff;
         text-style: bold;
     }
 
@@ -363,7 +363,7 @@ class PortableApplicationShell(App[None]):
         width: 35%;
         min-width: 28;
         max-width: 42;
-        border-right: solid #3a96dd;
+        border-right: solid #ffffff;
     }
 
     #portable-right-pane {
@@ -373,20 +373,20 @@ class PortableApplicationShell(App[None]):
     .portable-pane-title {
         height: 1;
         padding: 0 1;
-        background: #073763;
-        color: #9cdcfe;
+        background: #000000;
+        color: #ffffff;
         text-style: bold;
     }
 
     #portable-navigation {
         height: 1fr;
-        background: #012456;
-        color: #f4f7fb;
+        background: #000000;
+        color: #ffffff;
     }
 
     #portable-navigation > .option-list--option-highlighted {
-        background: #2b579a;
-        color: #ffffff;
+        background: #ffffff;
+        color: #000000;
         text-style: bold;
     }
 
@@ -400,43 +400,43 @@ class PortableApplicationShell(App[None]):
         max-height: 12;
         padding: 0 1 1 1;
         overflow-y: auto;
-        border-bottom: solid #3a96dd;
-        background: #001b3d;
+        border-bottom: solid #ffffff;
+        background: #000000;
     }
 
     #portable-detail {
         height: 2fr;
         padding: 0 1;
         overflow-y: auto;
-        border-bottom: solid #3a96dd;
+        border-bottom: solid #ffffff;
     }
 
     #portable-activity {
         height: 1fr;
         padding: 0 1;
-        background: #001b3d;
+        background: #000000;
     }
 
     #portable-input {
         display: none;
         height: 3;
         margin: 0 1;
-        border: solid #3a96dd;
+        border: solid #ffffff;
     }
 
     #portable-status {
         height: 1;
         padding: 0 1;
-        background: #0b5d7a;
-        color: #ffffff;
+        background: #ffffff;
+        color: #000000;
         text-style: bold;
     }
 
     #portable-actions {
         height: 1;
         padding: 0 1;
-        background: #081b2c;
-        color: #f4f7fb;
+        background: #000000;
+        color: #ffffff;
     }
 
     #portable-size-warning {
@@ -446,7 +446,7 @@ class PortableApplicationShell(App[None]):
         height: 100%;
         padding: 2 4;
         background: #000000;
-        color: #ffff00;
+        color: #ffffff;
         text-align: center;
         content-align: center middle;
         text-style: bold;
@@ -471,15 +471,15 @@ class PortableApplicationShell(App[None]):
     .portable-overlay {
         width: 82%;
         height: 76%;
-        border: solid #3a96dd;
-        background: #012456;
+        border: solid #ffffff;
+        background: #000000;
     }
 
     .portable-overlay-title {
         height: 1;
         padding: 0 1;
-        background: #0b5d7a;
-        color: #ffffff;
+        background: #ffffff;
+        color: #000000;
         text-style: bold;
     }
 
@@ -492,7 +492,7 @@ class PortableApplicationShell(App[None]):
     #portable-log-filter {
         height: 3;
         margin: 0 1;
-        border: solid #3a96dd;
+        border: solid #ffffff;
     }
 
     #portable-log-content {
@@ -503,7 +503,7 @@ class PortableApplicationShell(App[None]):
     .portable-overlay-actions {
         height: 1;
         padding: 0 1;
-        background: #081b2c;
+        background: #000000;
     }
     """
 

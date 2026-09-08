@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Interactive screens are now black and white like the classic DOS prompt
+  instead of blue: white text on black, bright white borders, and the title
+  bar, Shortcuts row, and selected entry in inverse video. This covers the
+  numbered menus (startup, Dev Loop Options, Models per role) and the
+  full-screen application shell. `NO_COLOR` and `--plain` still disable
+  colour sequences entirely.
 - Dev Loop Options screens no longer show each number twice (`1. 1. Analysis`)
   in the arrow-key menu. The labels carried their own number while the menu
   renderer already prints the key; labels are now bare and plain mode still

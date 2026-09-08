@@ -288,10 +288,13 @@ interpreter for installed commands.
 
 ## Visual Style
 
-The initial theme is Midnight Commander-inspired rather than an exact clone:
+The layout is Midnight Commander-inspired; the colours are those of the
+classic DOS prompt:
 
-- dark blue application background;
-- cyan/white focused selections;
+- black application background with white text;
+- inverse video (black on white) for the title bar, status row, Shortcuts
+  row, and focused selections;
+- bright white borders and rules;
 - a strong fixed border and pane divider;
 - green success, yellow warning, and red error accents;
 - high-contrast focus markers and explicit text labels;

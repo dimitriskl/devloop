@@ -11,6 +11,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
+
+MAX_RESET_TIMESTAMP = 253402300800  # First second outside datetime's supported years.
+
+
+def valid_reset_timestamp(value: object) -> float | None:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value < MAX_RESET_TIMESTAMP
+        and isfinite(value)
+    ):
+        return float(value)
+    return None
 
 
 class RunWideBlockerKind(str, Enum):
@@ -34,6 +48,7 @@ class RunWideBlockerKind(str, Enum):
 class RunWideBlocker:
     kind: RunWideBlockerKind
     summary: str
+    reset_at: float | None = None
 
 
 class RunWideBlockerPolicy(str, Enum):

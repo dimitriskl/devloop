@@ -277,8 +277,9 @@ class ExecutionBackend(ABC):
         repeated on a guess.
 
         A backend's predicate is also where the promise that a Run-Wide Blocker is
-        never retried is kept. Exhausted usage, invalid authentication, and
-        withdrawn model access cannot change without operator action, so a backend
+        never retried inside an attempt is kept. Usage resets are handled by the
+        run scheduler outside attempt budgets; authentication and withdrawn model
+        access still require operator action. A backend
         that recognises one of them in this output must refuse retryability rather
         than spend the attempt's remaining budget re-asking a provider that has
         already given its answer.

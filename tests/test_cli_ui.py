@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -165,6 +166,30 @@ class CliUiTests(unittest.TestCase):
 
         self.assertIn("\x1b[", rendered)
         self.assertIn("> 1. Start", rendered)
+
+    def test_render_screen_frame_uses_black_and_white_theme(self) -> None:
+        """Frames look like the DOS prompt: white on black, inverse video for bars."""
+        rendered = render_screen_frame(
+            path="Dev Loop > Workflow Editor > Dev Loop Options",
+            body=("Choose an option", "", "> 1. Models per role", "  2. Save"),
+            action_bar=(("Up/Down", "Choose"), ("Enter", "Select"), ("Esc", "Back")),
+            width=60,
+            height=12,
+            unicode_ok=False,
+            color_ok=True,
+        )
+
+        sgr_parameters = set(re.findall(r"\x1b\[([0-9;]*)m", rendered))
+        self.assertEqual(sgr_parameters, {"0", "30;47", "37;40", "1;37;40"})
+        lines = rendered.splitlines()
+        self.assertTrue(lines[0].startswith("\x1b[30;47m"), lines[0])
+        selected = next(line for line in lines if "> 1. Models per role" in line)
+        self.assertTrue(selected.startswith("\x1b[30;47m"), selected)
+        unselected = next(line for line in lines if "2. Save" in line)
+        self.assertTrue(unselected.startswith("\x1b[37;40m"), unselected)
+        shortcuts = next(line for line in lines if "Enter Select" in line)
+        self.assertTrue(shortcuts.startswith("\x1b[30;47m"), shortcuts)
+        self.assertTrue(lines[-1].startswith("\x1b[1;37;40m"), lines[-1])
 
     def test_render_screen_frame_honors_no_color(self) -> None:
         with mock.patch.object(sys.stdout, "isatty", return_value=True), mock.patch.dict(
