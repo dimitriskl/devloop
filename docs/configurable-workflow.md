@@ -105,6 +105,9 @@ and Step Attempt Records are preserved, and the change is recorded as a
 `workflow-preferences-applied` event. An attempt that has already launched keeps
 the settings it started with; subsequent attempts on unfinished Issues use the
 new preferences.
+If the paused step changes Execution Backend, resuming clears the previous
+backend's usage-limit wait and retries that step with the new backend. Changing
+only its model, or another step's backend, preserves the existing deadline.
 The editor exposes Current Run as read-only and the Workflow Default as
 editable. A hash mismatch or unknown field stops recovery instead of
 normalizing corrupted state.

@@ -1731,6 +1731,7 @@ def resolve_run_workflow(
                 preferred_workflow,
                 catalog,
             )
+        state_writer.reconcile_usage_pause_backend(workflow)
         return workflow
     if workflow_snapshot is not None:
         workflow = load_portable_workflow(workflow_snapshot.to_dict(), catalog)

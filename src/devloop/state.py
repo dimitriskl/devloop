@@ -20,6 +20,7 @@ from .codex_runner import (
 from .issue_pack import Issue
 from .issue_scheduler import SchedulingPhase
 from .portable_execution_backend import (
+    ExecutionBackendId,
     RunWideBlocker,
     RunWideBlockerKind,
     parse_execution_backend_id,
@@ -55,6 +56,9 @@ from .step_configuration import (
     StepAttemptProvenance,
     StepCapabilityProfile,
 )
+
+RUN_PAUSED_EVENT = "run-paused"
+WORKFLOW_PREFERENCES_APPLIED_EVENT = "workflow-preferences-applied"
 
 
 class ResumeRole(str, Enum):
@@ -346,7 +350,7 @@ class LoopStateWriter:
         refreshed_hash = canonical_workflow_hash(refreshed_workflow)
         self.state["resolved_workflow_hash"] = refreshed_hash
         self.add_event(
-            "workflow-preferences-applied",
+            WORKFLOW_PREFERENCES_APPLIED_EVENT,
             {
                 "from_hash": previous_hash,
                 "to_hash": refreshed_hash,
@@ -1159,7 +1163,7 @@ class LoopStateWriter:
         scheduler_state = self.state.setdefault("dependency_scheduler", {})
         scheduler_state["phase"] = SchedulingPhase.RUN_PAUSED.value
         self.add_event(
-            "run-paused",
+            RUN_PAUSED_EVENT,
             {
                 "issue": active["issue"],
                 "status": blocker.kind.value,
@@ -1195,6 +1199,44 @@ class LoopStateWriter:
             },
         )
         self.flush()
+
+    def reconcile_usage_pause_backend(self, workflow: WorkflowDefinition) -> None:
+        """Discard a previous backend's wait after validated resume preferences.
+
+        Use the durable change history so this also repairs pauses whose backend
+        preferences were already replaced by an older runner. No matching history
+        means the existing deadline remains authoritative.
+        """
+        pause = self.run_pause()
+        if pause is None or pause["kind"] != RunWideBlockerKind.USAGE_LIMIT.value:
+            return
+        step = next(
+            (
+                step for step in workflow.steps
+                if str(step.instance_id) == pause.get("step_instance_id")
+            ),
+            None,
+        )
+        if step is None or step.execution_settings is None:
+            return
+        backend_at_pause: ExecutionBackendId | None = None
+        for event in reversed(self.state.get("events", [])):
+            if event["type"] == RUN_PAUSED_EVENT:
+                if any(event.get(key) != pause.get(key) for key in ("issue", "phase", "ordinal")):
+                    return
+                if event.get("status") != RunWideBlockerKind.USAGE_LIMIT.value:
+                    return
+                break
+            if event["type"] == WORKFLOW_PREFERENCES_APPLIED_EVENT:
+                for change in event.get("backend_changes", []):
+                    if change["step_instance_id"] == str(step.instance_id):
+                        # Walking backwards leaves the earliest change's source:
+                        # the backend that actually reached the usage limit.
+                        backend_at_pause = parse_execution_backend_id(change["from_backend"])
+        else:
+            return
+        if backend_at_pause is not None and backend_at_pause is not step.execution_settings.backend:
+            self.clear_run_pause()
 
     def record_issue_start(
         self,
