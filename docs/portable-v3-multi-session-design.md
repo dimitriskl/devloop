@@ -86,8 +86,9 @@ existing terminal sanitization boundary.
 
 ## Lifecycle and recovery
 
-- Startup is passive: only the Sessions tab opens and no worker starts until an
-  explicit Resume.
+- Opening the session browser is passive: saved sessions wait for explicit Resume.
+  A delivery command with `--prd` starts and focuses its supplied session immediately,
+  subject to the existing worktree lease and machine concurrency limit.
 - Pause stops new scheduling and lets the active operation reach a durable
   checkpoint. Force Stop is a separate explicit action that may interrupt the
   current operation while retaining partial filesystem work, diagnostics, and

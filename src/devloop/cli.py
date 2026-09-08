@@ -439,7 +439,10 @@ def main(
                     PortableSessionLaunch,
                     PortableWorkflowOperation,
                 )
-                from .portable_ui.app import run_portable_sessions_application
+                from .portable_ui.app import (
+                    PortableSessionStartupAction,
+                    run_portable_sessions_application,
+                )
             except ModuleNotFoundError as error:
                 if error.name != "textual":
                     raise
@@ -457,7 +460,8 @@ def main(
                     operation=PortableWorkflowOperation.DELIVERY,
                     arguments=raw_arguments,
                     argument_base=argument_base,
-                )
+                ),
+                startup_action=PortableSessionStartupAction.START_SUPPLIED_SESSION,
             )
         return operation()
     with portable_plain_mode_session():

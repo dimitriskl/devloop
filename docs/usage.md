@@ -51,6 +51,10 @@ screenshot paste regardless of what the installed Codex CLI supports natively.
 Run every dependency-ready unfinished issue with the canonical Issue Index,
 generic-minimal preset, source checkout, and self-improvement wiki defaults:
 
+In an interactive terminal, supplying `--prd` starts and focuses that session
+without a session-selection step. Existing worktree locks and concurrency limits
+still apply.
+
 Windows:
 
 ```powershell

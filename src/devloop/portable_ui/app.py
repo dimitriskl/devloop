@@ -101,6 +101,11 @@ STALE_SESSION_INPUT_MESSAGE = (
 )
 
 
+class PortableSessionStartupAction(str, Enum):
+    SHOW_SESSIONS = "SHOW_SESSIONS"
+    START_SUPPLIED_SESSION = "START_SUPPLIED_SESSION"
+
+
 class SessionEventRenderTarget(str, Enum):
     SNAPSHOT = "SNAPSHOT"
     HISTORY = "HISTORY"
@@ -527,6 +532,7 @@ class PortableApplicationShell(App[None]):
         *,
         session_supervisor: PortableSessionController | None = None,
         session_launch: PortableSessionLaunch | None = None,
+        startup_action: PortableSessionStartupAction = PortableSessionStartupAction.SHOW_SESSIONS,
         session_target_resolver: PortableSessionTargetController | None = None,
         attention_bell: bool | None = None,
     ) -> None:
@@ -539,6 +545,7 @@ class PortableApplicationShell(App[None]):
         self._operation = operation
         self._session_supervisor = session_supervisor
         self._session_launch = session_launch
+        self._startup_action = startup_action
         self._session_target_resolver = (
             session_target_resolver or PortableSessionTargetResolver()
         )
@@ -653,6 +660,8 @@ class PortableApplicationShell(App[None]):
                     for project in list_saved_projects()
                 )
             self._show_sessions_tab()
+            if self._startup_action is PortableSessionStartupAction.START_SUPPLIED_SESSION:
+                self._start_selected_session()
             return
         self.run_worker(
             self._execute_operation,
@@ -2580,8 +2589,12 @@ def run_portable_application(operation: Callable[[], int]) -> int:
     return app.operation_result if app.operation_result is not None else 130
 
 
-def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
-    """Run a passive Sessions tab that explicitly launches an isolated worker."""
+def run_portable_sessions_application(
+    launch: PortableSessionLaunch,
+    *,
+    startup_action: PortableSessionStartupAction = PortableSessionStartupAction.SHOW_SESSIONS,
+) -> int:
+    """Open Sessions or execute the session explicitly supplied by the CLI."""
     from ..portable_session_catalog import (
         PortableResumeCandidate,
         PortableSessionCatalog,
@@ -2602,6 +2615,7 @@ def run_portable_sessions_application(launch: PortableSessionLaunch) -> int:
         bridge,
         session_supervisor=supervisor,
         session_launch=launch,
+        startup_action=startup_action,
     )
     app.run()
     return app.operation_result if app.operation_result is not None else 0
