@@ -83,6 +83,7 @@ class WorkerMessageKind(str, Enum):
     STATUS = "STATUS"
     ACTIVITY = "ACTIVITY"
     SAFE_OUTPUT = "SAFE_OUTPUT"
+    SCREEN = "SCREEN"
     INPUT_REQUEST = "INPUT_REQUEST"
     CHECKPOINT = "CHECKPOINT"
     CHECKPOINT_FAILURE = "CHECKPOINT_FAILURE"
@@ -332,6 +333,7 @@ _WORKER_PAYLOAD_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         frozenset({"content"}),
         frozenset({"is_error"}),
     ),
+    WorkerMessageKind.SCREEN.value: (frozenset({"content"}), frozenset()),
     WorkerMessageKind.INPUT_REQUEST.value: (
         frozenset({"request_kind"}),
         frozenset(

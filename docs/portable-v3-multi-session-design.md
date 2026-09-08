@@ -42,6 +42,10 @@ a separate child process with its own current directory, runtime bridge, Codex
 execution, output capture, and failure boundary. A failed worker cannot stop a
 sibling session.
 
+Live screen updates replace the current view; they do not append spinner frames
+to Activity history. The worker sends these as `SCREEN` events, while captured
+output continues to use `SAFE_OUTPUT` events.
+
 Supervisor and worker exchange a versioned JSON Lines protocol over redirected
 standard input and output. Standard error is captured as per-session
 diagnostics. Python's standard library and the already pinned Textual runtime

@@ -8,9 +8,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: Dev Loop startup, authenticated backends, cross-platform and release workflows
 - Lesson: Detect mandatory gates that require credentials, network access, another operating system, writable user storage, recording, or publication authority before starting a long issue pack.
-- Evidence: In the July 21 recovery run, Issue 0003 could not run mandatory mobile gates. On July 25, Issue 0014 accumulated repeated database-security review cycles without its disposable PostgreSQL/PostGIS gate, and Issue 0015 then repeated the same missing `DATABASE_TEST_ADMIN_URL` blocker.
-- Action: Preflight every non-repository prerequisite, including required database URLs, clients, extensions, and dependencies; show unavailable acceptance gates and ask the operator to satisfy them or explicitly accept a partial run before issue execution.
-- Last seen: 2026-07-25
+- Evidence: July runs lacked mandatory mobile and PostgreSQL gates. In `.compiler-runs/20260908-125258-context.md`, dynamic-query-delta-timestamp Issue 0001 review recorded seven SQL tests executing, but QA skipped them for unsupported encryption; Issue 0002's final attempts also skipped required SQL regressions.
+- Action: Preflight required database clients, connectivity, encryption support, and other external prerequisites in the actual gate environment; retain executed/skipped counts per attempt instead of inheriting another role's success. For unavailable gates, provide an operator action with a non-secret workspace result log and keep completion unverified.
+- Last seen: 2026-09-08
 
 ## Execute Database Security Contracts
 
@@ -176,9 +176,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
 - Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round, including after a run is resumed.
-- Evidence: Issue 0003 received five attempts on July 21 for the same missing platform prerequisites, and Issue 0001 consumed all five July 23 retries without an environment change. On July 25, Issue 0015 repeated an already-applied privilege fix and returned the same missing `DATABASE_TEST_ADMIN_URL` blocker twice.
-- Action: Persist a normalized blocker fingerprint with its relevant environment, repository, and contract state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries and resumed runs until that state or guidance changes, surface a concise diagnostic, and leave one operator or runner action on the loop board.
-- Last seen: 2026-07-25
+- Evidence: July runs exhausted retries on unchanged platform and database prerequisites. In `.compiler-runs/20260908-125258-context.md`, dynamic-query-delta-timestamp Issue 0002 blocker-resolution rounds 4 and 5 both verified existing fixes but remained blocked by SQL connectivity and pending locked-fixture approval; Issues 0003-0005 stayed dependency-waiting.
+- Action: Persist a normalized blocker fingerprint with its relevant environment, repository, contract, and approval state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries and resumed runs until that state or guidance changes. Surface the exact pending operator actions instead of asking another coder to reapply existing fixes.
+- Last seen: 2026-09-08
 
 ## Validate Every Component Of Derived Data
 
@@ -443,3 +443,27 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Evidence: Issue 0005 could not update issue acceptance boxes, and Issue 0004 later stayed blocked through three clean retries after the required issue markdown was missing and both `apply_patch` and direct creation were denied at the issue-pack path.
 - Action: Before patching issue files, verify the file exists and avoid delete/recreate flows; when issue markers cannot be updated, record completion evidence in writable project docs, report the exact stale or missing marker, and stop retrying once the same permission blocker is proven.
 - Last seen: 2026-07-03
+
+## Validate Source Metadata Before Synchronization Side Effects
+
+- Applies to: coder, reviewer, QA, SQL extraction, synchronization and reserved system columns
+- Lesson: Validate actual source result columns even when no rows are returned; SQL-text matching and first-row inspection do not establish the output schema. A rejected or incomplete source must never drive deletion reconciliation.
+- Evidence: `.compiler-runs/20260908-125258-context.md`, dynamic-query-delta-timestamp Issue 0002 reviews on September 7-8 found harmless SQL text rejected, empty-result collisions missed, failed batches reaching deletes with incomplete keys, and legacy relay/Node paths bypassing guards. Later coder results report schema-only checks and terminal batch failures.
+- Action: Trace every reachable direct, hash, legacy relay, preview, and streaming path; validate source metadata before DDL, writes, or empty-source deletion, keep target reads outside source-only restrictions, and abort reconciliation after any failed batch. Test zero-row collisions and populated-target preservation at the owning boundaries.
+- Last seen: 2026-09-08
+
+## Preserve Database Key Types During Parameter Binding
+
+- Applies to: coder, reviewer, QA, SQL synchronization and update/delete identity
+- Lesson: Internal dictionary-key encodings and parseable string contents are not database parameter types; bind the actual typed row value without guessing from its text.
+- Evidence: `.compiler-runs/20260908-125258-context.md`, dynamic-query-delta-timestamp Issue 0002 coder results traced failures to encoded keys used as SQL parameters. The September 8 10:34 review then recorded a read-only probe where GUID coercion matched two distinct string keys; the next coder added string-sibling and genuine GUID regressions.
+- Action: Keep bookkeeping keys separate from SQL values and preserve the reader's CLR type. Exercise UPDATE and DELETE against integer, genuine GUID, GUID-looking string, and suffix-bearing sibling keys in an isolated database; assert that unrelated rows remain unchanged.
+- Last seen: 2026-09-08
+
+## Check Existing Fixtures When Adding Runtime Dependencies
+
+- Applies to: coder rework, dependency injection, test fixtures and repository test-lock policies
+- Lesson: A new production dependency can turn existing unit fixtures into real database callers when constructor defaults bypass their mocks; new tests alone will miss those regressions.
+- Evidence: `.compiler-runs/20260908-125258-context.md`, dynamic-query-delta-timestamp Issue 0002's final two coder attempts reported three existing relay fixtures invoking a new metadata validator against fake SQL connections. Fixture edits remained blocked pending the repository's TDD-review approval.
+- Action: Inspect every construction site and the actual fixture lock status before introducing a dependency. Supply controlled collaborators in editable fixtures while preserving assertions, resolve any explicitly required reopening approval early, and run the affected existing suite as well as new boundary tests.
+- Last seen: 2026-09-08

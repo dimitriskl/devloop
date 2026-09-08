@@ -128,6 +128,12 @@ charging the active issue. Restore availability and rerun the identical command
 to resume its persisted issue, workflow step, pass, phase, and remaining
 budgets.
 
+The completion review shows each unfinished issue's recorded recovery actions
+and supporting diagnostics under **What to do next**. Resolve those blockers
+before choosing **Rerun unfinished issues**. Dependent issues can proceed once
+their prerequisites complete. If an attempt recorded no recovery instructions,
+the review says so and points to the issue details and saved loop state.
+
 Preview prompts without invoking Codex:
 
 Windows:

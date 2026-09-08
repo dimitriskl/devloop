@@ -1514,8 +1514,8 @@ class PortableApplicationShell(App[None]):
             context_lines.append(f"Result: {snapshot.result}")
         if snapshot.input_request is not None and snapshot.input_request.prompt:
             context_lines.extend(("", snapshot.input_request.prompt))
-        elif snapshot.activity:
-            context_lines.append(f"Latest activity: {snapshot.activity[-1]}")
+        elif snapshot.latest_activity:
+            context_lines.append(f"Latest activity: {snapshot.latest_activity}")
         if snapshot.diagnostics:
             context_lines.extend(("", "Diagnostics", *snapshot.diagnostics[-10:]))
         if snapshot.recovery_available:
@@ -1554,6 +1554,8 @@ class PortableApplicationShell(App[None]):
             activity.write(
                 sanitize_terminal_text(line, preserve_newlines=True)
             )
+        if snapshot.current_screen and snapshot.input_request is None:
+            activity.write(sanitize_terminal_text(snapshot.current_screen, preserve_newlines=True))
         rejection = self._session_input_rejections.get(snapshot.session_id)
         self.query_one("#portable-status", Static).update(
             f"INPUT NOT SENT · {rejection}"
@@ -1638,7 +1640,7 @@ class PortableApplicationShell(App[None]):
                 else "-"
             )
             latest_activity = (
-                snapshot.activity[-1] if snapshot.activity else "-"
+                snapshot.latest_activity or "-"
             )
             sections.extend(
                 (
@@ -2495,13 +2497,19 @@ class PortableApplicationShell(App[None]):
             )
 
     def action_logs(self) -> None:
-        captured_lines = list(self._captured_output)
-        if self._completion_review_content is not None:
-            captured_lines.insert(0, self._completion_review_content)
+        snapshot = self._session_snapshots.get(self._active_session_id or "")
+        if snapshot is not None:
+            captured_lines = [*snapshot.activity, *snapshot.diagnostics]
+            current_screen = snapshot.current_screen
+        else:
+            captured_lines = list(self._captured_output)
+            current_screen = self._completion_review_content or ""
+        if current_screen:
+            captured_lines.insert(0, current_screen)
         lines = tuple(captured_lines) or ("No captured output yet.",)
         title = (
             COMPLETION_REVIEW_LOG_TITLE
-            if self._completion_review_content is not None
+            if current_screen.lstrip().startswith(REVIEW_SCREEN_PATH)
             else CAPTURED_ACTIVITY_TITLE
         )
         self.push_screen(PortableLogOverlay(lines, title=title))

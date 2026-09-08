@@ -15,6 +15,51 @@ from devloop.run_review import (
 
 
 class RunReviewTests(unittest.TestCase):
+    def test_review_shows_recorded_actions_and_blocker_evidence_before_rerun(self) -> None:
+        review = build_run_review(
+            [Issue("0002", "Delta column", Path("0002.md"), False)],
+            {"0002": {
+                "status": "BLOCKED",
+                "blocked_summary": "Completion blocked by SQL and locked test fixtures.",
+                "fix_list": [
+                    "Approve fixture-only reopening under docs/TDD/README.md.",
+                    "Provide a working SQL test environment and rerun persistence regressions.",
+                ],
+                "residual_risks": [
+                    "SQL Server requires encryption unsupported by this machine.", "",
+                ],
+            }},
+            loop_state_path=Path("README.loop.md"), rerun_available=True,
+        )
+        rendered = render_run_review(review, RunReviewAction.RERUN_REMAINING)
+        self.assertIn("What to do next", rendered)
+        self.assertIn("Approve fixture-only reopening under docs/TDD/README.md.", rendered)
+        self.assertIn("Provide a working SQL test environment", rendered)
+        self.assertIn("SQL Server requires encryption unsupported by this machine.", rendered)
+        self.assertLess(rendered.index("What to do next"), rendered.index("Selected action"))
+
+    def test_recovery_guidance_uses_latest_failure_and_sanitizes_controls(self) -> None:
+        review = build_run_review(
+            [Issue("0002", "Failed", Path("0002.md"), False)],
+            {"0002": {"status": "FAILED", "passes": [
+                {"result": {"status": "FAIL", "fix_list": ["Old instructions"]}},
+                {"result": {
+                    "status": "FAIL", "fix_list": ["Repair fixture\x1b[2J", "", None],
+                    "residual_risks": ["Fixture unavailable"],
+                }},
+            ]}},
+            loop_state_path=Path("README.loop.md"), rerun_available=True,
+        )
+        rendered = render_run_review(review, RunReviewAction.RERUN_REMAINING)
+        self.assertIn("Repair fixture", rendered)
+        self.assertIn("Fixture unavailable", rendered)
+        self.assertNotIn("Old instructions", rendered)
+        self.assertNotIn("\x1b", rendered)
+
+    def test_missing_recovery_instructions_are_explicit(self) -> None:
+        rendered = self._rendered_blocked_summary("Unknown failure.")
+        self.assertIn("No specific recovery steps were recorded", rendered)
+
     def test_devloop_repeats_an_attempt_only_after_explicit_rerun(self) -> None:
         parser = mock.Mock()
         args = mock.Mock()

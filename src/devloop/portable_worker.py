@@ -206,7 +206,7 @@ class PortableWorkerRuntimeBridge:
 
     def show_screen(self, content: str) -> None:
         self._raise_if_stopping()
-        self._send(WorkerMessageKind.SAFE_OUTPUT, {"content": content})
+        self._send(WorkerMessageKind.SCREEN, {"content": content})
 
     def update_run_context(self, context: PortableRunContext) -> None:
         self._raise_if_stopping()

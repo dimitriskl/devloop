@@ -305,6 +305,11 @@ class PortableSessionSnapshot:
     updated_at: float = 0.0
     recovery_available: bool = False
     unavailable_from_status: PortableSessionStatus | None = None
+    current_screen: str = ""
+
+    @property
+    def latest_activity(self) -> str:
+        return self.current_screen or (self.activity[-1] if self.activity else "")
 
     @property
     def in_history(self) -> bool:
@@ -2462,6 +2467,7 @@ class PortableSessionSupervisor:
                 safe_diagnostics = {
                     WorkerMessageKind.ACTIVITY,
                     WorkerMessageKind.SAFE_OUTPUT,
+                    WorkerMessageKind.SCREEN,
                     WorkerMessageKind.HEARTBEAT,
                 }
                 if kind not in (
@@ -2576,6 +2582,11 @@ class PortableSessionSupervisor:
                         *snapshot.activity,
                         _safe_protocol_display(_payload_text(frame, "message")),
                     )[-100:],
+                )
+            elif kind is WorkerMessageKind.SCREEN:
+                updated = replace(
+                    snapshot,
+                    current_screen=_safe_protocol_display(_payload_text(frame, "content")),
                 )
             elif kind is WorkerMessageKind.SAFE_OUTPUT:
                 updated = replace(
@@ -2832,7 +2843,9 @@ class PortableSessionSupervisor:
             self._snapshots[session_id] = updated
             if kind is WorkerMessageKind.INPUT_REQUEST:
                 self._release_execution_capacity(updated)
-            else:
+            elif kind is not WorkerMessageKind.SCREEN:
+                # Animated screen frames are transient presentation, not history
+                # or durable catalog checkpoints.
                 self._persist_snapshot(updated)
             if kind in {
                 WorkerMessageKind.COMPLETION,

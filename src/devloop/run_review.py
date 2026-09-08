@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from .issue_pack import Issue
 from .portable_workflow import IssueStatus, parse_issue_status
 from .subprocess_utils import EXECUTION_BUDGET_EXPIRY_RETURNCODE
 from .terminal_text import compact_terminal_text, sanitize_terminal_text
-
 
 REVIEW_SCREEN_PATH = "Dev Loop > Completion Review"
 REVIEW_SUCCESS_HEADING = "WORKFLOW FINISHED - SUCCESS"
@@ -42,6 +42,8 @@ class IssueReviewItem:
     title: str
     status: IssueStatus
     detail: str = ""
+    recovery_actions: tuple[str, ...] = ()
+    blocker_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,7 @@ def render_run_review(review: RunReview, selected_action: RunReviewAction) -> st
         "Issue review",
     ]
     lines.extend(_render_issue_item(item) for item in review.issues)
+    lines.extend(_render_recovery_guidance(review))
     lines.extend(("", "Review conclusion"))
     if review.remaining_count == 0:
         lines.append("All selected issues were completed successfully.")
@@ -152,6 +155,33 @@ def render_run_review(review: RunReview, selected_action: RunReviewAction) -> st
     return "\n".join(lines)
 
 
+def _render_recovery_guidance(review: RunReview) -> list[str]:
+    if not review.remaining_count:
+        return []
+    lines = [
+        "", "What to do next",
+        "Resolve the recorded blockers before rerunning the unfinished issues.",
+    ]
+    for item in review.issues:
+        if item.status in {IssueStatus.COMPLETED, IssueStatus.WAITING_ON_DEPENDENCY}:
+            continue
+        lines.append(f"{item.issue_number}: {item.title}")
+        if item.recovery_actions:
+            lines.append("Latest attempt requested:")
+            lines.extend(f"- {action}" for action in item.recovery_actions)
+        else:
+            lines.append(
+                "No specific recovery steps were recorded. Review this issue's "
+                "details and saved loop state before rerunning."
+            )
+        if item.blocker_evidence:
+            lines.append("Supporting diagnostics from the latest attempt:")
+            lines.extend(f"- {evidence}" for evidence in item.blocker_evidence)
+    if any(item.status is IssueStatus.WAITING_ON_DEPENDENCY for item in review.issues):
+        lines.append("Dependent issues can proceed after their prerequisites complete.")
+    return lines
+
+
 def _build_issue_review(issue: Issue, raw_state: Any) -> IssueReviewItem:
     state = raw_state if isinstance(raw_state, dict) else {}
     status = (
@@ -167,7 +197,27 @@ def _build_issue_review(issue: Issue, raw_state: Any) -> IssueReviewItem:
         title=compact_terminal_text(issue.title, max_length=120),
         status=status,
         detail=_issue_detail(status, state),
+        recovery_actions=_issue_recovery_values(state, "fix_list"),
+        blocker_evidence=_issue_recovery_values(state, "residual_risks"),
     )
+
+
+def _issue_recovery_values(state: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    values = state.get(key)
+    if not isinstance(values, list):
+        passes = state.get("passes", [])
+        if isinstance(passes, list):
+            for entry in reversed(passes):
+                result = entry.get("result") if isinstance(entry, dict) else None
+                if isinstance(result, dict) and result.get("status") != "PASS":
+                    values = result.get(key)
+                    break
+    if not isinstance(values, list):
+        return ()
+    return tuple(dict.fromkeys(
+        normalized for value in values
+        if isinstance(value, str) and (normalized := _normalize_issue_detail(value))
+    ))
 
 
 def _issue_detail(status: IssueStatus, state: Mapping[str, Any]) -> str:
@@ -240,7 +290,8 @@ def _selected_action_summary(
     if selected_action is RunReviewAction.RERUN_REMAINING:
         issue_label = _counted_issue(review.remaining_count)
         return (
-            f"Press Enter to rerun only the {review.remaining_count} "
+            "Resolve the blockers above first. Press Enter to rerun only "
+            f"the {review.remaining_count} "
             f"unfinished {issue_label}. "
             "Completed issues remain skipped."
         )
