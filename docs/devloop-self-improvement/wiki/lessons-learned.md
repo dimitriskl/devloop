@@ -176,8 +176,8 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
 - Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round, including after a run is resumed.
-- Evidence: July runs exhausted retries on unchanged platform and database prerequisites. In `.compiler-runs/20260908-125258-context.md`, dynamic-query-delta-timestamp Issue 0002 blocker-resolution rounds 4 and 5 both verified existing fixes but remained blocked by SQL connectivity and pending locked-fixture approval; Issues 0003-0005 stayed dependency-waiting.
-- Action: Persist a normalized blocker fingerprint with its relevant environment, repository, contract, and approval state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries and resumed runs until that state or guidance changes. Surface the exact pending operator actions instead of asking another coder to reapply existing fixes.
+- Evidence: `.compiler-runs/20260908-133742-context.md` records an unfinished rerun at 13:13 after dynamic-query-delta-timestamp Issue 0002 exhausted five blocker-resolution rounds. Five additional rounds ended BLOCKED by 13:37; each reported existing fixes, no production/test edits, two SQL skips, and three relay fixture failures with reopening approval pending. Issues 0003-0005 remained dependency-waiting.
+- Action: Persist a normalized blocker fingerprint with its relevant environment, repository, contract, and approval state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries, resumes, and unfinished reruns until relevant state or corrective guidance changes. A rerun request alone does not establish restored prerequisites or satisfy a separate explicit approval requirement. Surface the pending operator actions before repeating unchanged tests and builds.
 - Last seen: 2026-09-08
 
 ## Validate Every Component Of Derived Data
