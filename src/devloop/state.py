@@ -19,6 +19,7 @@ from .codex_runner import (
 )
 from .issue_pack import Issue
 from .issue_scheduler import SchedulingPhase
+from .operator_verification import OperatorVerification
 from .portable_execution_backend import (
     ExecutionBackendId,
     RunWideBlocker,
@@ -1542,6 +1543,9 @@ def result_summary(result: RoleResult) -> dict[str, Any]:
         "findings": result.findings,
         "fix_list": result.fix_list,
         "residual_risks": result.residual_risks,
+        "operator_verification": (
+            result.operator_verification.to_dict() if result.operator_verification else None
+        ),
     }
 
 
@@ -1554,6 +1558,7 @@ def role_result_from_state(data: dict[str, Any]) -> RoleResult:
         findings=state_string_list(data.get("findings")),
         fix_list=state_string_list(data.get("fix_list")),
         residual_risks=state_string_list(data.get("residual_risks")),
+        operator_verification=OperatorVerification.parse(data.get("operator_verification")),
     )
 
 

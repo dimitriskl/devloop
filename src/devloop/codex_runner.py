@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from .issue_pack import Issue
+from .operator_verification import OperatorVerification
 from .portable_execution_backend import (
     ActivityCallback,
     ExecutionBackend,
@@ -120,6 +121,7 @@ class RoleResult:
     # something the agent reported, and it is deliberately absent from
     # ``result_to_dict`` so no provenance ever reaches an agent's prompt.
     provenance: StepAttemptProvenance | None = None
+    operator_verification: OperatorVerification | None = None
 
     @classmethod
     def from_message(
@@ -150,6 +152,13 @@ class RoleResult:
         if status not in {"PASS", "FAIL", "BLOCKED"}:
             status = "BLOCKED"
 
+        try:
+            verification = OperatorVerification.parse(data.get("operator_verification"))
+        except ValueError as error:
+            return cls(
+                status="BLOCKED", summary=f"Invalid operator verification request: {error}",
+                raw_message=message, provenance=provenance,
+            )
         return cls(
             status=status,
             summary=str(data.get("summary", "")),
@@ -160,6 +169,7 @@ class RoleResult:
             residual_risks=list_of_strings(data.get("residual_risks")),
             raw_message=message,
             provenance=provenance,
+            operator_verification=verification,
         )
 
 
@@ -644,6 +654,9 @@ def result_to_dict(result: RoleResult | None) -> dict[str, Any]:
         "findings": result.findings,
         "fix_list": result.fix_list,
         "residual_risks": result.residual_risks,
+        "operator_verification": (
+            result.operator_verification.to_dict() if result.operator_verification else None
+        ),
     }
 
 

@@ -67,6 +67,20 @@ Precedence: {{STEP_GUIDANCE_PRECEDENCE}}
 - Include exact file paths and line references when possible.
 - Do not modify code.
 
+## External verification
+
+If an already authorized .NET test gate cannot execute in the worker environment,
+return `BLOCKED` with `operator_verification`: `kind: "DOTNET_TEST"`, verified
+repository-relative `.csproj` `project_path`, `test_filter`, positive integer
+`expected_tests`, and a non-secret `reason`. Inspect the actual tests to determine
+these values. The runner executes the gate automatically under the session account,
+without another authorization or separate-terminal command, keeps this step open,
+and resumes after all expected tests pass with zero skips. Do not request
+deployment, installation, arbitrary commands or newly unauthorized data writes.
+Use `null` otherwise. Consume matching operator evidence in Step Guidance; do not
+repeat the same sandbox-incompatible gate or treat MCP connectivity as test proof.
+Implementation changes still require appropriate fresh verification.
+
 ## Required Final Response
 
 Return only JSON matching this shape:
@@ -79,6 +93,7 @@ Return only JSON matching this shape:
   "verification_commands": ["command run by reviewer, if any"],
   "findings": [],
   "fix_list": [],
-  "residual_risks": []
+  "residual_risks": [],
+  "operator_verification": null
 }
 ```

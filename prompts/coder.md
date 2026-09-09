@@ -97,10 +97,28 @@ Return only JSON matching this shape:
   "verification_commands": ["command that was run"],
   "findings": [],
   "fix_list": [],
-  "residual_risks": []
+  "residual_risks": [],
+  "operator_verification": null
 }
 ```
 
 Use `BLOCKED` when you cannot continue because of missing input, environment, or
 an unresolved external dependency. Use `FAIL` only when you intentionally leave
 known implementation issues for a later coder pass.
+
+When a required .NET test gate cannot execute in this worker's restricted
+environment, inspect the actual test project, filter and expected test count.
+Return `BLOCKED` with `operator_verification` set to an object containing
+`kind: "DOTNET_TEST"`, the repository-relative `.csproj` `project_path`,
+`test_filter`, positive integer `expected_tests`, and a non-secret `reason`.
+Use this only for an already authorized test gate, never to request deployment,
+installation, arbitrary commands, or tests whose data writes need new permission.
+The runner keeps this step open, executes the gate under the session account without
+another authorization prompt, and resumes you when the tests pass with zero skips.
+Do not ask the user to run a separate-terminal command or restart Dev Loop.
+The command builds
+and runs `dotnet test --no-restore`; it does not alter connection or encryption settings.
+Use `null` otherwise. Never claim success from skipped tests or MCP connectivity.
+If Step Guidance contains verified operator evidence for the same source inputs,
+consume that evidence and continue implementation. Changes still require their
+own relevant verification and the normal independent review and QA gates.

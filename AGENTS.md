@@ -127,6 +127,14 @@ Do not commit secrets or machine-specific config. `.gitignore` excludes `.env*`,
 
 ## Managed Shell Safety
 
+Authorized typed `DOTNET_TEST` verification gates are executed automatically by
+the user-launched Dev Loop session under its existing account, for the entire
+session, without another authorization prompt or a separate-terminal command.
+Keep these tests in the session's owned process tree with Pause/Cancel and
+validated results. This covers existing test gates; it does not authorize
+arbitrary commands, deployment, installation, or new database-write scope.
+The managed agent shell restrictions below still apply to agent-run commands.
+
 Do not launch commands through an approval-backed or escalated managed shell in
 this repository. On Windows, that execution boundary can take over the user's
 visible PowerShell session and leave it at a raw prompt when the managed turn is

@@ -108,6 +108,7 @@ class PortableSessionStartupAction(str, Enum):
 
 class SessionEventRenderTarget(str, Enum):
     SNAPSHOT = "SNAPSHOT"
+    ACTIONS = "ACTIONS"
     HISTORY = "HISTORY"
     RELINK = "RELINK"
 
@@ -815,6 +816,8 @@ class PortableApplicationShell(App[None]):
             )
 
     def _session_event_render_target(self) -> SessionEventRenderTarget:
+        if self._session_actions_active:
+            return SessionEventRenderTarget.ACTIONS
         if self._session_history_active:
             return SessionEventRenderTarget.HISTORY
         if self._relink_session_id is not None:
@@ -903,7 +906,7 @@ class PortableApplicationShell(App[None]):
             "Enter Select | Esc Back to Sessions"
         )
 
-    def _show_session_actions(self) -> None:
+    def _show_session_actions(self, *, selected_id: str | None = None) -> None:
         assert self._active_session_id is not None
         snapshot = self._session_snapshots[self._active_session_id]
         self._session_actions_active = True
@@ -935,7 +938,11 @@ class PortableApplicationShell(App[None]):
         }:
             menu.add_option(Option("Cancel Session", id=SESSION_CANCEL_ID))
         menu.add_option(Option("Back to Session", id=SESSION_ACTIONS_BACK_ID))
-        menu.highlighted = 0
+        menu.highlighted = next(
+            (index for index in range(menu.option_count)
+             if menu.get_option_at_index(index).id == selected_id),
+            0,
+        )
         menu.focus()
         self.query_one("#portable-detail", Static).update(
             "Session Lifecycle\n\n"
@@ -1334,6 +1341,20 @@ class PortableApplicationShell(App[None]):
             self.bell()
         if snapshot.status.terminal:
             self.operation_result = snapshot.result
+        if event_render_target is SessionEventRenderTarget.ACTIONS:
+            self._render_session_tabs()
+            if snapshot.session_id == self._active_session_id and (
+                previous is None
+                or (previous.status, previous.recovery_available, previous.in_history)
+                != (snapshot.status, snapshot.recovery_available, snapshot.in_history)
+            ):
+                menu = self.query_one("#portable-navigation", OptionList)
+                selected_id = (
+                    menu.get_option_at_index(menu.highlighted).id
+                    if menu.highlighted is not None else None
+                )
+                self._show_session_actions(selected_id=selected_id)
+            return
         if event_render_target is SessionEventRenderTarget.HISTORY:
             self._refresh_sessions_menu()
             self._show_session_history()

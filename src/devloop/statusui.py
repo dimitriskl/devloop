@@ -6,6 +6,8 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping, TextIO
@@ -1520,6 +1522,25 @@ class IssueDashboard:
                 self._enabled = False
             self._opened = False
             self._rendered_lines = 0
+
+    @contextmanager
+    def suspend_updates(self) -> Iterator[None]:
+        """Let a waiting screen own the display without advancing the role timer."""
+        was_animating = self._thread is not None
+        self._stop_animation()
+        started = self._clock()
+        completed = False
+        try:
+            yield
+            completed = True
+        finally:
+            duration = max(0.0, self._clock() - started)
+            with self._lock:
+                self._started_at += duration
+                if self._last_activity_at is not None:
+                    self._last_activity_at += duration
+            if completed and was_animating:
+                self._start_animation()
 
     def _start_animation(self) -> None:
         if not self._enabled or self._thread is not None:

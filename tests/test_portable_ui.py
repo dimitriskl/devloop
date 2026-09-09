@@ -167,12 +167,13 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.intents: list[PortableSessionIntent] = []
                 self.current = running
+                self.events: list[PortableSessionEvent] = []
 
             def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
                 return (self.current,)
 
-            def try_next_event(self) -> None:
-                return None
+            def try_next_event(self) -> PortableSessionEvent | None:
+                return self.events.pop(0) if self.events else None
 
             def handle_intent(
                 self,
@@ -206,11 +207,24 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             menu.highlighted = 1
             await pilot.press("enter", "f9")
             await pilot.pause()
+            await pilot.press("down")
+            supervisor.current = replace(running, current_screen="Live progress update")
+            supervisor.events.append(PortableSessionEvent(supervisor.current))
+            await pilot.pause()
             actions = tuple(
                 str(menu.get_option_at_index(index).prompt)
                 for index in range(menu.option_count)
             )
-            await pilot.press("enter")
+            self.assertEqual(menu.highlighted, 1)
+            self.assertTrue(app._session_actions_active)
+            supervisor.current = replace(
+                supervisor.current, status=PortableSessionStatus.WAITING_FOR_INPUT,
+            )
+            supervisor.events.append(PortableSessionEvent(supervisor.current))
+            await pilot.pause()
+            self.assertEqual(menu.highlighted, 1)
+            self.assertEqual(str(menu.get_option_at_index(1).prompt), "Force Stop")
+            await pilot.press("up", "enter")
             await pilot.pause()
 
         self.assertEqual(

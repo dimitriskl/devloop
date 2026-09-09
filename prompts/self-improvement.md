@@ -76,7 +76,8 @@ Return only JSON matching this shape:
   "verification_commands": ["manual inspection or command used"],
   "findings": ["lessons added or updated"],
   "fix_list": [],
-  "residual_risks": []
+  "residual_risks": [],
+  "operator_verification": null
 }
 ```
 

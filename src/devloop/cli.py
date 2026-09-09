@@ -30,6 +30,7 @@ from .model_catalog import (
     CatalogDiscoveryError,
     ModelCatalog,
 )
+from .operator_handoff import OperatorHandoff
 from .portable_execution_backend import (
     BackendModelCatalogAccess,
     BackendModelCatalogLoader,
@@ -1616,6 +1617,7 @@ def run_fresh_portable_issue(
         activity_progress=activity_progress,
         initial_fix_list=initial_fix_list,
         attempt_label=attempt_label,
+        state_writer=state_writer,
     )
 
     def record_checkpoint(checkpoint: PortableWorkflowCheckpoint) -> None:
@@ -1925,6 +1927,7 @@ class _PortableConsoleRoleRunner:
         activity_progress: str,
         initial_fix_list: list[str],
         attempt_label: str | None,
+        state_writer: LoopStateWriter,
     ) -> None:
         self._runner = runner
         self._issue = issue
@@ -1934,6 +1937,7 @@ class _PortableConsoleRoleRunner:
         self._initial_fix_list = list(initial_fix_list)
         self._attempt_label = attempt_label
         self._development_started = False
+        self._handoff = OperatorHandoff(runner, state_writer, dashboard.suspend_updates)
 
     def run_role(self, **arguments: Any) -> RoleResult:
         role = str(arguments["role"])
@@ -1963,7 +1967,7 @@ class _PortableConsoleRoleRunner:
             arguments["attempt_label"] = self._attempt_label
         arguments["activity_callback"] = self._dashboard.notify_activity
         try:
-            result = self._runner.run_role(**arguments)
+            result = self._handoff.run_role(arguments)
         except BaseException:
             self._dashboard.close(f"{display_name} interrupted.")
             raise

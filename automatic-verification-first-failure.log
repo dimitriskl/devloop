@@ -1,0 +1,67 @@
+........F
+================================== FAILURES ===================================
+___ test_submitted_feature_locks_every_discovered_component_before_analysis ___
+
+tmp_path = WindowsPath('E:/devloop-recovery-20260905/.tmp-test-session-n5he3cn8/pytest/test_submitted_feature_locks_e0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000243BAC5BFE0>
+
+    def test_submitted_feature_locks_every_discovered_component_before_analysis(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repository = tmp_path / "project"
+        repository.mkdir()
+        config = ApplicationConfig.resolve(
+            repository,
+            platform="linux",
+            environment={
+                "XDG_CONFIG_HOME": str(tmp_path / "config"),
+                "XDG_DATA_HOME": str(tmp_path / "data"),
+            },
+            home=tmp_path / "home",
+        )
+    
+        def request_clarification(
+            self: AnalysisComponentRunner,
+            **kwargs: object,
+        ) -> AnalysisTurnOutput:
+            return AnalysisTurnOutput(
+                AnalysisResponseKind.CLARIFICATION,
+                ExecutionThreadId("thread-analysis-001"),
+                ExecutionTurnId("turn-analysis-001"),
+                "Which users need this feature?",
+                None,
+                (),
+            )
+    
+        monkeypatch.setattr(AnalysisComponentRunner, "run_turn", request_clarification)
+    
+>       result = AnalysisWorkflowService(config).start("Build a feature.")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\codexcli\test_analysis_workflow.py:110: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\devloop\application\analysis.py:93: in __init__
+    registry = installed_component_registry()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def installed_component_registry() -> ComponentRegistry:
+        registry = ComponentRegistry()
+        discovered = tuple(
+            sorted(
+                entry_points().select(group=STEP_COMPONENT_ENTRY_POINT_GROUP),
+                key=lambda item: item.name,
+            )
+        )
+        if not discovered:
+>           raise ComponentRegistryError("No installed Workflow Step Components were discovered.")
+E           devloop.components.contracts.ComponentRegistryError: No installed Workflow Step Components were discovered.
+
+src\devloop\components\builtin.py:45: ComponentRegistryError
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-n5he3cn8
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/codexcli/test_analysis_workflow.py::test_submitted_feature_locks_every_discovered_component_before_analysis
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 8 passed, 51 deselected in 3.36s

@@ -314,6 +314,13 @@ Blocker Resolution. `--blocked-retry-max-passes` remains accepted for command
 compatibility, but an additional attempt always consumes exactly one workflow
 pass.
 
+For authorized .NET tests that cannot execute in the restricted worker,
+Dev Loop keeps the active step open and runs the specified test gate automatically
+under the session's account, without another authorization or terminal command.
+It resumes after verifying that every expected test passed with zero skips.
+Pause and Cancel stop the owned test process tree. See
+[external verification](docs/operator-verification.md).
+
 After a real run, Dev Loop compiles the most important durable lessons into its
 own self-improvement wiki at `docs/devloop-self-improvement/wiki/`. The role
 agents read that wiki by default. Use `--no-self-improvement-wiki` to skip both

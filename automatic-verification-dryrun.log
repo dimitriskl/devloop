@@ -1,0 +1,31 @@
+Selected issues: 0003
+Loop state: E:\devloop-recovery-20260905\.tmp-auto-verification-dryrun-51dc5fa98e374d37bbd72a57130d8247\portable-direct-run-defaults\issues\README.loop.md
+SCHEDULER � NORMAL SCHEDULING � 1 ready � 0 waiting � next 0003
+
+[0003] Issue 0003: Publish and Verify the Cross-Platform Shorthand Contract
+[dry-run] Wrote E:\devloop-recovery-20260905\.tmp-auto-verification-dryrun-51dc5fa98e374d37bbd72a57130d8247\portable-direct-run-defaults\issues\.loop.logs\0003-development-9c30a1c0-57b4-4cf6-8b6d-a568dac11e01-coder-dry-run.prompt.md
+[dry-run] Wrote E:\devloop-recovery-20260905\.tmp-auto-verification-dryrun-51dc5fa98e374d37bbd72a57130d8247\portable-direct-run-defaults\issues\.loop.logs\0003-security-review-e7f9d3a2-1b64-48c5-9d20-6a7b8c9d0e02-reviewer-dry-run.prompt.md
+[dry-run] Wrote E:\devloop-recovery-20260905\.tmp-auto-verification-dryrun-51dc5fa98e374d37bbd72a57130d8247\portable-direct-run-defaults\issues\.loop.logs\0003-final-review-3a8c1e5f-92d7-4b60-a134-5e6f7a8b9c03-reviewer-dry-run.prompt.md
+[dry-run] Wrote E:\devloop-recovery-20260905\.tmp-auto-verification-dryrun-51dc5fa98e374d37bbd72a57130d8247\portable-direct-run-defaults\issues\.loop.logs\0003-qa-b4d6f8a0-23c5-47e9-8a12-3c4d5e6f7a04-qa-dry-run.prompt.md
+[0003] Dry run prompts rendered.
+SCHEDULER � COMPLETE � 0 ready � 0 waiting � next none
+Dev loop finished.
+Dev Loop > Completion Review
+
+WORKFLOW FINISHED - ATTENTION REQUIRED
+Completed: 0/1    Remaining: 1
+
+Issue review
+SKIPPED    0003  Issue 0003: Publish and Verify the Cross-Platform Shorthand Contract
+
+What to do next
+Resolve the recorded blockers before rerunning the unfinished issues.
+0003: Issue 0003: Publish and Verify the Cross-Platform Shorthand Contract
+No specific recovery steps were recorded. Review this issue's details and saved loop state before rerunning.
+
+Review conclusion
+1 issue remains. Review the saved loop state before starting another run.
+Loop state: E:\devloop-recovery-20260905\.tmp-auto-verification-dryrun-51dc5fa98e374d37bbd72a57130d8247\portable-direct-run-defaults\issues\README.loop.md
+
+Selected action
+Press Enter to exit. The unfinished issue state is saved for a later run.

@@ -10,9 +10,27 @@
     "verification_commands",
     "findings",
     "fix_list",
-    "residual_risks"
+    "residual_risks",
+    "operator_verification"
   ],
   "properties": {
+    "operator_verification": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "project_path", "test_filter", "expected_tests", "reason"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["DOTNET_TEST"] },
+            "project_path": { "type": "string" },
+            "test_filter": { "type": "string" },
+            "expected_tests": { "type": "integer", "minimum": 1 },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
+    },
     "status": {
       "type": "string",
       "enum": ["PASS", "FAIL", "BLOCKED"]

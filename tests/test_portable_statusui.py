@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import queue
 import unittest
 
 from devloop.portable_runtime import (
@@ -32,6 +33,35 @@ class InteractiveBuffer(io.StringIO):
 
 
 class PortableStatusUiTests(unittest.TestCase):
+    def test_external_wait_owns_screen_and_excludes_wait_from_role_duration(self) -> None:
+        bridge = PortableRuntimeBridge()
+        timestamp = [0.0]
+        with portable_runtime_session(bridge):
+            dashboard = IssueDashboard(
+                issue_number="0003", issue_title="External SQL verification",
+                position=1, total=3, frame_seconds=0.01, clock=lambda: timestamp[0],
+            )
+            dashboard.begin_role(Stage.DEVELOPMENT, 1)
+            try:
+                timestamp[0] = 2.0
+                with dashboard.suspend_updates():
+                    try:
+                        while True:
+                            bridge.next_event(timeout=0)
+                    except queue.Empty:
+                        pass
+                    bridge.show_screen("Run the operator command; this step will resume.")
+                    event = bridge.next_event(timeout=1)
+                    self.assertIn("operator command", event.content)
+                    with self.assertRaises(queue.Empty):
+                        bridge.next_event(timeout=0.05)
+                    timestamp[0] = 102.0
+                timestamp[0] = 103.0
+                dashboard.finish_role(Stage.DEVELOPMENT, "PASS")
+                self.assertEqual(dashboard._stage_durations[Stage.DEVELOPMENT], 3.0)
+            finally:
+                dashboard.close()
+
     @staticmethod
     def delivery_progress() -> WorkflowProgress:
         return project_workflow_progress(
