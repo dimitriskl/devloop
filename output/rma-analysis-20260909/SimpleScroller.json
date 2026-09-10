@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "url": "https://api.entersoft.gr/api/rpc/SimpleScroller/WEB_Scrolls/fnky_EshopRMA",
+  "retrievedUtc": "2026-09-09T08:42:00.757447+00:00",
+  "errorType": "TimeoutError",
+  "responseBytesRead": 0,
+  "responseTruncated": false,
+  "parseableJson": false
+}

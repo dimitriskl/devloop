@@ -1,0 +1,13 @@
+{
+  "method": "GET",
+  "url": "https://api.entersoft.gr/api/rpc/FetchOdsTableInfo/CSFunkyIncomingRMA",
+  "retrievedUtc": "2026-09-09T08:42:01.017439+00:00",
+  "httpStatus": 404,
+  "responseBytesRead": 99,
+  "responseTruncated": false,
+  "response": {
+    "MessageID": "invalid-table-id",
+    "UserMessage": "invalid table id: CSFunkyIncomingRMA",
+    "Messages": []
+  }
+}

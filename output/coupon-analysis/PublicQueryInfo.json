@@ -1,0 +1,10 @@
+{
+  "method": "GET",
+  "url": "https://api.entersoft.gr/api/rpc/PublicQueryInfo/ESFIVoucher/ESFIVoucher_Def",
+  "httpStatus": 404,
+  "response": {
+    "MessageID": "invalid-public-query",
+    "UserMessage": "invalid public query: ESFIVoucher/ESFIVoucher_Def",
+    "Messages": []
+  }
+}

@@ -1,0 +1,944 @@
+{
+  "source": "https://eswebapi-next.azurewebsites.net/swagger/docs/api3.0",
+  "retrievedUtc": "2026-09-09T08:41:41.877786+00:00",
+  "paths": {
+    "/api/rpc/FetchOdsTableInfo/{routeId}": {
+      "get": {
+        "tags": [
+          "ESObjectDefinitionRepository"
+        ],
+        "operationId": "ESRPC_FetchOdsTableInfo",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ESOdsTableInfo"
+            }
+          }
+        }
+      }
+    },
+    "/api/rpc/SimpleScrollerRootTable/{routeId}": {
+      "get": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "operationId": "ESRPC_SimpleScrollerRootTable",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/System.Data.DataTable"
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "operationId": "ESRPC_SimpleScrollerRootTable",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/System.Data.DataTable"
+            }
+          }
+        }
+      }
+    },
+    "/api/rpc/SimpleScroller/{routeId}": {
+      "get": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "Get a SimpleScroller data rows",
+        "operationId": "ESRPC_SimpleScroller",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/System.Data.DataSet"
+            }
+          }
+        },
+        "x-ms-summary": "Get a SimpleScroller data rows"
+      },
+      "post": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "Post call to get a SimpleScroller's data rows",
+        "operationId": "ESRPC_SimpleScroller",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/System.Data.DataSet"
+            }
+          }
+        },
+        "x-ms-summary": "Post call to get a SimpleScroller's data rows"
+      }
+    },
+    "/api/rpc/PublicQueryInfo/{routeId}": {
+      "get": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "PublicQueryInfo",
+        "description": "PublicQueryInfo",
+        "operationId": "ESRPC_PublicQueryInfo",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/System.Data.DataSet"
+            }
+          }
+        }
+      }
+    },
+    "/api/rpc/PublicQueryLayout/{routeId}": {
+      "get": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "Get a Public Query's Layout",
+        "description": "Get a Public Query's Layout",
+        "operationId": "ESRPC_PublicQueryLayout",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQLayout"
+            }
+          }
+        },
+        "x-ms-summary": "Get the Layout for the given Public Query"
+      }
+    },
+    "/api/rpc/MultiPublicQuery/": {
+      "post": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "operationId": "ESRPC_MultiPublicQuery",
+        "consumes": [
+          "application/json",
+          "application/x-www-form-urlencoded",
+          "text/plain"
+        ],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "params",
+            "in": "body",
+            "description": "Params..",
+            "required": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Entersoft.Web.Api.Models.MultiPublicQuery"
+              }
+            },
+            "x-ms-summary": "Params."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/api/rpc/PublicQuery/{routeId}": {
+      "get": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "PublicQuery",
+        "description": "PublicQuery",
+        "operationId": "ESRPC_PublicQuery",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQResult"
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "operationId": "ESRPC_PublicQuery",
+        "consumes": [
+          "application/json",
+          "application/x-www-form-urlencoded",
+          "text/plain"
+        ],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "routeId",
+            "in": "path",
+            "description": "The Primary Key as either external Code or the internal unique identifier.",
+            "required": true,
+            "type": "string",
+            "x-ms-summary": "The Primary Key as either external Code or the internal unique identifier",
+            "x-ms-url-encoding": "single"
+          },
+          {
+            "name": "params",
+            "in": "body",
+            "description": "Params..",
+            "required": true,
+            "schema": {
+              "type": "object"
+            },
+            "x-ms-summary": "Params."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQResult"
+            }
+          }
+        }
+      }
+    },
+    "/api/rpc/ScrollerCommand/": {
+      "post": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "ScrollerCommand",
+        "description": "ScrollerCommand",
+        "operationId": "ESRPC_ScrollerCommand",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "ScrollerCommand",
+            "in": "body",
+            "description": "ScrollerCommand TBD",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ScrollerCommandRequest"
+            },
+            "x-ms-summary": "Scrollercommand."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ScrollerCommandResponse"
+            }
+          }
+        }
+      }
+    },
+    "/api/rpc/ExecuteScrollerCommand/": {
+      "post": {
+        "tags": [
+          "ESPlatformServices"
+        ],
+        "summary": "Execute a Scroller Automation Command",
+        "description": "Execute a Scroller Automation Command",
+        "operationId": "ESRPC_ExecuteScrollerCommand",
+        "consumes": [],
+        "produces": [
+          "application/json",
+          "text/plain"
+        ],
+        "parameters": [
+          {
+            "name": "ESScrollerCommand",
+            "in": "body",
+            "description": "ESScrollerCommand TBD",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ESScrollerCommandIn"
+            },
+            "x-ms-summary": "Esscrollercommand."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/Entersoft.Web.Api.Models.ESScrollerCommandOut"
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Entersoft.Web.Api.Models.ScrollerCommandResponse": {
+      "type": "object",
+      "properties": {
+        "ScrollerDataset": {
+          "$ref": "#/definitions/System.Data.DataSet"
+        },
+        "TargetDatasets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/System.Data.DataSet"
+          }
+        },
+        "Variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESOdsTableInfo": {
+      "type": "object",
+      "properties": {
+        "Role": {
+          "enum": [
+            "NONE",
+            "KNOWLEDGE",
+            "MASTER",
+            "TRANSACTIONAL"
+          ],
+          "type": "string"
+        },
+        "ModuleID": {
+          "type": "string"
+        },
+        "ModuleName": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "GID": {
+          "format": "uuid",
+          "type": "string",
+          "example": "00000000-0000-0000-0000-000000000000"
+        },
+        "DBTableName": {
+          "type": "string"
+        },
+        "Flags": {
+          "enum": [
+            "None",
+            "RecordInfo",
+            "DeletionInfo",
+            "Inactivable",
+            "CompanyDependent",
+            "NotForSave",
+            "ForInvestigate",
+            "AutomaticStateTransition",
+            "Aggregate",
+            "DoNotRemoveRowsOnFKeyChanged",
+            "UDef",
+            "SecurityItem",
+            "HasAttachments",
+            "HasCalendar",
+            "HasProperties",
+            "RLSProtectable",
+            "MustReload",
+            "SyncSupport",
+            "HasNotes",
+            "HasPreviewAbility",
+            "CountrySpecific",
+            "HasWordTags"
+          ],
+          "type": "string"
+        },
+        "TableType": {
+          "type": "string"
+        },
+        "Columns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Entersoft.Web.Api.Models.ESOdsColumnInfo"
+          }
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESOdsColumnInfo": {
+      "type": "object",
+      "properties": {
+        "ID": {
+          "type": "string"
+        },
+        "GID": {
+          "format": "uuid",
+          "type": "string",
+          "example": "00000000-0000-0000-0000-000000000000"
+        },
+        "TableID": {
+          "type": "string"
+        },
+        "TableGID": {
+          "format": "uuid",
+          "type": "string",
+          "example": "00000000-0000-0000-0000-000000000000"
+        },
+        "DBColumnName": {
+          "type": "string"
+        },
+        "AllowEQUC": {
+          "type": "boolean"
+        },
+        "Size": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "ODSType": {
+          "type": "string"
+        },
+        "NetType": {
+          "type": "string"
+        },
+        "Precision": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Nullable": {
+          "type": "boolean"
+        },
+        "ChoiceType": {
+          "type": "string"
+        },
+        "Flags": {
+          "enum": [
+            "Default",
+            "Persistent",
+            "Copiable",
+            "HistoryOn",
+            "CodeBehaviour",
+            "Unique",
+            "ForeignField",
+            "Caption",
+            "ConcurrencyCheck",
+            "NotForGRIDShow",
+            "LockedToDefValue",
+            "UDef",
+            "SecurityItem",
+            "EQUC_GR",
+            "EQUC_EN",
+            "ImageIndex16x16",
+            "ImageIndex32x32",
+            "NotForGlobalModify",
+            "HasCases",
+            "Multilingual"
+          ],
+          "type": "string"
+        },
+        "HelpTxt": {
+          "type": "string"
+        },
+        "SeqNum": {
+          "format": "int32",
+          "type": "integer"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESPQLayout": {
+      "type": "object",
+      "properties": {
+        "Filter": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQLayoutFilter"
+          }
+        },
+        "Param": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQLayoutParam"
+          }
+        },
+        "DefaultValue": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQLayoutDefaultValue"
+          }
+        },
+        "EnumItem": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQLayoutEnumItem"
+          }
+        },
+        "LayoutColumn": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Entersoft.Web.Api.Models.ESPQLayoutColumn"
+          }
+        },
+        "FormatingCondition": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "FormatStyle": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESPQLayoutFilter": {
+      "type": "object",
+      "properties": {
+        "ID": {
+          "type": "string"
+        },
+        "Caption": {
+          "type": "string"
+        },
+        "QueryID": {
+          "type": "string"
+        },
+        "RootTable": {
+          "type": "string"
+        },
+        "SelectedMasterTable": {
+          "type": "string"
+        },
+        "SelectedMasterField": {
+          "type": "string"
+        },
+        "TotalRow": {
+          "type": "string"
+        },
+        "ColumnHeaders": {
+          "type": "string"
+        },
+        "ColumnSetHeaders": {
+          "type": "string"
+        },
+        "ColumnSetRowCount": {
+          "type": "string"
+        },
+        "ColumnSetHeaderLines": {
+          "type": "string"
+        },
+        "HeaderLines": {
+          "type": "string"
+        },
+        "GroupByBoxVisible": {
+          "type": "string"
+        },
+        "FilterLineVisible": {
+          "type": "string"
+        },
+        "PreviewRow": {
+          "type": "string"
+        },
+        "PreviewRowMember": {
+          "type": "string"
+        },
+        "PreviewRowLines": {
+          "type": "string"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESPQLayoutParam": {
+      "type": "object",
+      "properties": {
+        "ID": {
+          "type": "string"
+        },
+        "AA": {
+          "type": "string"
+        },
+        "Caption": {
+          "type": "string"
+        },
+        "Tooltip": {
+          "type": "string"
+        },
+        "ControlType": {
+          "type": "string"
+        },
+        "ParameterType": {
+          "type": "string"
+        },
+        "Precision": {
+          "type": "string"
+        },
+        "MultiValued": {
+          "type": "string"
+        },
+        "Visible": {
+          "type": "string"
+        },
+        "Required": {
+          "type": "string"
+        },
+        "ODSTag": {
+          "type": "string"
+        },
+        "Tags": {
+          "type": "string"
+        },
+        "Visibility": {
+          "type": "string"
+        },
+        "InvQueryID": {
+          "type": "string"
+        },
+        "InvSelectedMasterTable": {
+          "type": "string"
+        },
+        "InvSelectedMasterField": {
+          "type": "string"
+        },
+        "InvTableMappings": {
+          "type": "string"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESPQLayoutDefaultValue": {
+      "type": "object",
+      "properties": {
+        "fParamID": {
+          "type": "string"
+        },
+        "Value": {
+          "type": "string"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESPQLayoutEnumItem": {
+      "type": "object",
+      "properties": {
+        "fParamID": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "Caption": {
+          "type": "string"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESPQLayoutColumn": {
+      "type": "object",
+      "properties": {
+        "fFilterID": {
+          "type": "string"
+        },
+        "ColName": {
+          "type": "string"
+        },
+        "AA": {
+          "type": "string"
+        },
+        "Caption": {
+          "type": "string"
+        },
+        "FormatString": {
+          "type": "string"
+        },
+        "Width": {
+          "type": "string"
+        },
+        "ODSTag": {
+          "type": "string"
+        },
+        "Visible": {
+          "type": "string"
+        },
+        "ColumnSetRow": {
+          "type": "string"
+        },
+        "ColumnSetColumn": {
+          "type": "string"
+        },
+        "RowSpan": {
+          "type": "string"
+        },
+        "ColSpan": {
+          "type": "string"
+        },
+        "AggregateFunction": {
+          "type": "string"
+        },
+        "TextAlignment": {
+          "type": "string"
+        },
+        "EditType": {
+          "type": "string"
+        },
+        "DataTypeName": {
+          "type": "string"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ScrollerCommandRequest": {
+      "type": "object",
+      "properties": {
+        "ScrollerID": {
+          "type": "string"
+        },
+        "CommandID": {
+          "type": "string"
+        },
+        "CommandParams": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "UnboundVariables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "ScrollerParams": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "ScrollerDataset": {
+          "$ref": "#/definitions/System.Data.DataSet"
+        },
+        "ScrollerDatasetJson": {
+          "type": "string"
+        },
+        "RequiresTransaction": {
+          "type": "boolean"
+        },
+        "OnlyPrepareTargetDatasets": {
+          "type": "boolean"
+        },
+        "ReturnTargetDatasets": {
+          "type": "boolean"
+        },
+        "ReturnScrollerDataset": {
+          "type": "boolean"
+        },
+        "ReturnEntersoftDatasets": {
+          "type": "boolean"
+        },
+        "ScrollerCommandID": {
+          "type": "string",
+          "readOnly": true
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESScrollerCommandOut": {
+      "type": "object",
+      "properties": {
+        "ScrollerDataset": {
+          "type": "object"
+        },
+        "TargetDatasets": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "Variables": {
+          "type": "object"
+        }
+      }
+    },
+    "Entersoft.Web.Api.Models.ESScrollerCommandIn": {
+      "required": [
+        "ScrollerID",
+        "CommandID"
+      ],
+      "type": "object",
+      "properties": {
+        "ScrollerParams": {
+          "type": "object"
+        },
+        "ScrollerDataset": {
+          "type": "object"
+        },
+        "ScrollerDatasetJson": {
+          "type": "string"
+        },
+        "RequiresTransaction": {
+          "type": "boolean"
+        },
+        "OnlyPrepareTargetDatasets": {
+          "type": "boolean"
+        },
+        "ReturnTargetDatasets": {
+          "type": "boolean"
+        },
+        "ReturnScrollerDataset": {
+          "type": "boolean"
+        },
+        "ReturnEntersoftDatasets": {
+          "type": "boolean"
+        },
+        "ScrollerID": {
+          "type": "string"
+        },
+        "CommandID": {
+          "type": "string"
+        },
+        "CommandParams": {
+          "type": "object"
+        },
+        "UnboundVariables": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

@@ -346,6 +346,7 @@ _WORKER_PAYLOAD_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                 "cancel_key",
                 "shortcuts",
                 "history",
+                "initial_value",
             }
         ),
     ),
@@ -584,7 +585,7 @@ def _validate_json_value(value: Any, *, depth: int) -> None:
 
 def _validate_input_request(payload: Mapping[str, Any]) -> None:
     request_kind = payload.get("request_kind")
-    if request_kind not in {"CHOICE", "TEXT", "APPROVAL"}:
+    if request_kind not in {"CHOICE", "TEXT", "REPLY", "APPROVAL"}:
         raise PortableProtocolError("Worker input request kind is unsupported.")
     request_id = payload.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not request_id):
@@ -594,8 +595,17 @@ def _validate_input_request(payload: Mapping[str, Any]) -> None:
         not isinstance(generation, int) or isinstance(generation, bool) or generation < 1
     ):
         raise PortableProtocolError("Worker input request generation must be positive.")
-    if request_kind == "TEXT" and not isinstance(payload.get("prompt"), str):
+    if request_kind in {"TEXT", "REPLY"} and not isinstance(payload.get("prompt"), str):
         raise PortableProtocolError("Worker text input request requires a prompt.")
+    if not isinstance(payload.get("initial_value", ""), str):
+        raise PortableProtocolError("Worker input initial value must be text.")
+    if request_kind == "REPLY" and payload.get("initial_value"):
+        from .issue_reply import IssueReply
+
+        try:
+            IssueReply.decode(payload["initial_value"])
+        except ValueError as error:
+            raise PortableProtocolError("Worker reply draft is invalid.") from error
     if request_kind in {"CHOICE", "APPROVAL"}:
         if not isinstance(payload.get("options"), list) or not isinstance(
             payload.get("default_key"), str

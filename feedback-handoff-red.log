@@ -1,0 +1,177 @@
+FF
+================================== FAILURES ===================================
+___ test_saved_failure_reaches_real_prompt_and_worker_protocol[7957-coder] ____
+
+tmp_path = WindowsPath('E:/devloop-recovery-20260905/.tmp-test-session-ny3k016b/pytest/test_saved_failure_reaches_rea0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DD783117C0>
+role = 'coder', feedback_size = 7957
+
+    @pytest.mark.parametrize("role", ["coder", "reviewer", "qa"])
+    @pytest.mark.parametrize("feedback_size", [7957, 17000])
+    def test_saved_failure_reaches_real_prompt_and_worker_protocol(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str, feedback_size: int,
+    ) -> None:
+        """Replay the failed-receipt handoff through the real prompt and protocol boundaries."""
+        backend = Mock()
+        backend.backend_id = ExecutionBackendId.CODEX_CLI
+        backend.invoke.return_value = StepAttemptResult(
+            process=subprocess.CompletedProcess(["fake-backend"], 0, "", ""),
+            message=json.dumps({"status": "FAIL", "summary": "Concrete repair needed"}),
+        )
+        runner = CodexRunner(
+            bundle=BundleContext.from_file(Path(codex_runner.__file__).resolve()),
+            repo_root=tmp_path,
+            prd_path=tmp_path / "prd.md",
+            issues_index=tmp_path / "README.md",
+            preset=Preset(name="feedback", required_docs=[], roles={}),
+            execution_backend=backend,
+            dry_run=False,
+            use_self_improvement_wiki=False,
+        )
+        issue = Issue("0003", "Repair SQL tests", tmp_path / "0003.md", False)
+        record = {
+            "repository": str(tmp_path),
+            "source_fingerprint": "same-source",
+            "gate": {
+                "kind": "DOTNET_TEST", "project_path": "tests.csproj",
+                "test_filter": "ClassName=Tests", "expected_tests": 6, "reason": "SQL gate",
+            },
+        }
+        writer = SimpleNamespace(
+            state={operator_handoff.STATE_KEY: {json.dumps(["0003", role, 1]): record}},
+        )
+        handoff = OperatorHandoff(runner, writer)
+        feedback = "Automatic verification FAILED\nTRX: verification.trx\n" + "x" * feedback_size
+        feedback += "\nTableExistsAsync missing setup; repair the mock."
+        monkeypatch.setattr(handoff, "_wait", Mock(side_effect=VerificationFailed(feedback)))
+        monkeypatch.setattr(operator_handoff, "source_fingerprint", lambda _: "same-source")
+        output = io.StringIO()
+        bridge = PortableWorkerRuntimeBridge(
+            "feedback-replay", command_stream=io.StringIO(), event_stream=output,
+        )
+        monkeypatch.setattr(operator_handoff, "active_portable_runtime", lambda: bridge)
+        guidance = "G" * MAX_STEP_GUIDANCE_CHARACTERS
+    
+>       result = handoff.run_role({
+            "role": role, "issue": issue, "pass_number": 1, "step_instance_id": role,
+            "step_guidance": guidance,
+        })
+
+tests\test_verification_feedback_handoff.py:70: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\devloop\operator_handoff.py:131: in run_role
+    result = self.runner.run_role(**arguments)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\devloop\codex_runner.py:267: in run_role
+    prompt = self.build_prompt(
+src\devloop\codex_runner.py:597: in build_prompt
+    StepGuidance(step_guidance).text
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<string>:5: in __init__
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = StepGuidance(text='GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG...xxxxxxxxxxxxxxxx\nTableExistsAsync missing setup; repair the mock.', review_state=<GuidanceReviewState.READY: 'READY'>)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str):
+            raise ValueError("Step Guidance must be text.")
+        if len(self.text) > MAX_STEP_GUIDANCE_CHARACTERS:
+>           raise ValueError(
+                "Step Guidance cannot exceed "
+                f"{MAX_STEP_GUIDANCE_CHARACTERS} characters before redaction."
+            )
+E           ValueError: Step Guidance cannot exceed 4000 characters before redaction.
+
+src\devloop\step_configuration.py:173: ValueError
+__ test_saved_failure_reaches_real_prompt_and_worker_protocol[7957-reviewer] __
+
+tmp_path = WindowsPath('E:/devloop-recovery-20260905/.tmp-test-session-ny3k016b/pytest/test_saved_failure_reaches_rea1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001DD78313D70>
+role = 'reviewer', feedback_size = 7957
+
+    @pytest.mark.parametrize("role", ["coder", "reviewer", "qa"])
+    @pytest.mark.parametrize("feedback_size", [7957, 17000])
+    def test_saved_failure_reaches_real_prompt_and_worker_protocol(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str, feedback_size: int,
+    ) -> None:
+        """Replay the failed-receipt handoff through the real prompt and protocol boundaries."""
+        backend = Mock()
+        backend.backend_id = ExecutionBackendId.CODEX_CLI
+        backend.invoke.return_value = StepAttemptResult(
+            process=subprocess.CompletedProcess(["fake-backend"], 0, "", ""),
+            message=json.dumps({"status": "FAIL", "summary": "Concrete repair needed"}),
+        )
+        runner = CodexRunner(
+            bundle=BundleContext.from_file(Path(codex_runner.__file__).resolve()),
+            repo_root=tmp_path,
+            prd_path=tmp_path / "prd.md",
+            issues_index=tmp_path / "README.md",
+            preset=Preset(name="feedback", required_docs=[], roles={}),
+            execution_backend=backend,
+            dry_run=False,
+            use_self_improvement_wiki=False,
+        )
+        issue = Issue("0003", "Repair SQL tests", tmp_path / "0003.md", False)
+        record = {
+            "repository": str(tmp_path),
+            "source_fingerprint": "same-source",
+            "gate": {
+                "kind": "DOTNET_TEST", "project_path": "tests.csproj",
+                "test_filter": "ClassName=Tests", "expected_tests": 6, "reason": "SQL gate",
+            },
+        }
+        writer = SimpleNamespace(
+            state={operator_handoff.STATE_KEY: {json.dumps(["0003", role, 1]): record}},
+        )
+        handoff = OperatorHandoff(runner, writer)
+        feedback = "Automatic verification FAILED\nTRX: verification.trx\n" + "x" * feedback_size
+        feedback += "\nTableExistsAsync missing setup; repair the mock."
+        monkeypatch.setattr(handoff, "_wait", Mock(side_effect=VerificationFailed(feedback)))
+        monkeypatch.setattr(operator_handoff, "source_fingerprint", lambda _: "same-source")
+        output = io.StringIO()
+        bridge = PortableWorkerRuntimeBridge(
+            "feedback-replay", command_stream=io.StringIO(), event_stream=output,
+        )
+        monkeypatch.setattr(operator_handoff, "active_portable_runtime", lambda: bridge)
+        guidance = "G" * MAX_STEP_GUIDANCE_CHARACTERS
+    
+>       result = handoff.run_role({
+            "role": role, "issue": issue, "pass_number": 1, "step_instance_id": role,
+            "step_guidance": guidance,
+        })
+
+tests\test_verification_feedback_handoff.py:70: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\devloop\operator_handoff.py:131: in run_role
+    result = self.runner.run_role(**arguments)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\devloop\codex_runner.py:267: in run_role
+    prompt = self.build_prompt(
+src\devloop\codex_runner.py:597: in build_prompt
+    StepGuidance(step_guidance).text
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<string>:5: in __init__
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = StepGuidance(text='GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG...xxxxxxxxxxxxxxxx\nTableExistsAsync missing setup; repair the mock.', review_state=<GuidanceReviewState.READY: 'READY'>)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str):
+            raise ValueError("Step Guidance must be text.")
+        if len(self.text) > MAX_STEP_GUIDANCE_CHARACTERS:
+>           raise ValueError(
+                "Step Guidance cannot exceed "
+                f"{MAX_STEP_GUIDANCE_CHARACTERS} characters before redaction."
+            )
+E           ValueError: Step Guidance cannot exceed 4000 characters before redaction.
+
+src\devloop\step_configuration.py:173: ValueError
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-ny3k016b
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/test_verification_feedback_handoff.py::test_saved_failure_reaches_real_prompt_and_worker_protocol[7957-coder]
+FAILED tests/test_verification_feedback_handoff.py::test_saved_failure_reaches_real_prompt_and_worker_protocol[7957-reviewer]
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 2 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+2 failed in 0.60s

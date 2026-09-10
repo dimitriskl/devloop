@@ -17,6 +17,43 @@ from devloop.portable_sessions import PortableWorkflowOperation
 
 
 class PortableDirectRunTests(unittest.TestCase):
+    def test_reply_start_opens_saved_question_before_provider_preflight(self) -> None:
+        from devloop.issue_reply import IssueReply, issue_reply_context
+        from devloop.state import LoopStateWriter
+
+        for submit in (False, True):
+            with self.subTest(submit=submit), tempfile.TemporaryDirectory() as raw:
+                repository = Path(raw)
+                self._initialize_repository(repository)
+                prd = self._write_prd_package(repository, issue_count=1)
+                writer = LoopStateWriter(prd.parent / "issues" / "README.md")
+                writer.state["issues"] = {
+                    "0001": {"status": "BLOCKED", "fix_list": ["Which recovery contract?"]},
+                }
+                writer.flush()
+                bridge = PortableRuntimeBridge()
+                answer = IssueReply("Use the existing contract.").encode() if submit else ""
+                with (
+                    portable_runtime_session(bridge),
+                    mock.patch.object(bridge, "read_reply", return_value=answer) as editor,
+                    mock.patch.object(
+                        cli, "resolve_run_workflow_with_repair",
+                        side_effect=RuntimeError("preflight boundary reached"),
+                    ) as preflight,
+                    mock.patch.object(cli.CodexRunner, "run_role") as agent,
+                    mock.patch.dict(os.environ, {"DEVLOOP_UI_MODE": "application"}),
+                ):
+                    if submit:
+                        with self.assertRaisesRegex(RuntimeError, "preflight boundary"):
+                            cli.main(["--prd", str(prd), "--reply"])
+                    else:
+                        self.assertEqual(cli.main(["--prd", str(prd), "--reply"]), 1)
+                        preflight.assert_not_called()
+                    agent.assert_not_called()
+                self.assertIn("Which recovery contract?", editor.call_args.args[0])
+                context, _ = issue_reply_context(prd.parent / "issues" / ".loop.logs", "0001")
+                self.assertEqual("Use the existing contract." in context, submit)
+
     def test_default_full_run_schedules_prerequisites_before_index_position(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repository = Path(raw)

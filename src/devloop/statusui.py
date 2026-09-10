@@ -1542,6 +1542,14 @@ class IssueDashboard:
             if completed and was_animating:
                 self._start_animation()
 
+    def resume_updates(self) -> None:
+        """Restore the active role after verification without resetting its duration."""
+        with self._lock:
+            self._activity = "Continuing after automatic verification."
+            self._last_activity_at = self._clock()
+            self._render_locked()
+        self._start_animation()
+
     def _start_animation(self) -> None:
         if not self._enabled or self._thread is not None:
             return

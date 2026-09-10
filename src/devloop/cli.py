@@ -56,11 +56,13 @@ from .portable_workflow import (
     preflight_step_execution_settings,
     refresh_resumable_execution_preferences,
 )
+from .reply_review import reply_to_issue
 from .run_review import (
     RunReview,
     RunReviewAction,
     build_run_review,
     render_run_review,
+    replyable_issues,
     run_review_options,
 )
 from .self_improvement_wiki import (
@@ -364,11 +366,7 @@ def choose_run_review_action(
     if not interactive:
         render_app_screen(render_run_review(review, RunReviewAction.EXIT))
         return RunReviewAction.EXIT
-    default_action = (
-        RunReviewAction.RERUN_REMAINING
-        if review.rerun_available
-        else RunReviewAction.EXIT
-    )
+    default_action = RunReviewAction(options[0][0])
     selected = choose_menu_option(
         options,
         default_key=default_action.value,
@@ -517,6 +515,8 @@ def _run_devloop_attempt(
     partial_work_context: PortablePartialWorkContext | None = None,
 ) -> int | DevLoopAttemptResult:
 
+    if args.reply and (args.non_interactive or args.dry_run):
+        parser.error("--reply requires an interactive run without --dry-run")
     if args.self_improvement_max_lessons < 1:
         parser.error("--self-improvement-max-lessons must be at least 1")
     if args.blocked_retry_rounds < 0:
@@ -677,6 +677,18 @@ def _run_devloop_attempt(
         use_self_improvement_wiki=args.self_improvement_wiki,
         partial_work_context=partial_work_context,
     )
+
+    if args.reply:
+        args.reply = False
+        saved_review = build_run_review(
+            selected_source_issues, state_writer.state.get("issues", {}),
+            loop_state_path=state_writer.board_path, rerun_available=True,
+        )
+        if not replyable_issues(saved_review):
+            parser.error("No saved blocked or failed issue is available to reply to.")
+        if not reply_to_issue(saved_review, runner.log_root):
+            return DevLoopAttemptResult(1, RunReviewAction.EXIT)
+        state_writer.reset_scheduler_retry_budget(saved_review.remaining_issue_numbers)
 
     try:
         if args.dry_run:
@@ -978,10 +990,16 @@ def _run_devloop_attempt(
             and args.blocked_retry_rounds > 0
         ),
     )
-    review_action = choose_run_review_action(
-        review,
-        interactive=not args.non_interactive and not args.dry_run,
-    )
+    while True:
+        review_action = choose_run_review_action(
+            review,
+            interactive=not args.non_interactive and not args.dry_run,
+        )
+        if review_action is not RunReviewAction.REPLY:
+            break
+        if reply_to_issue(review, runner.log_root):
+            review_action = RunReviewAction.RERUN_REMAINING
+            break
     if review_action is RunReviewAction.RERUN_REMAINING:
         state_writer.reset_scheduler_retry_budget(
             review.remaining_issue_numbers
@@ -1055,6 +1073,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--start-issue", help="Issue number or filename prefix to start from.")
+    parser.add_argument(
+        "--reply", action="store_true",
+        help="Open a saved issue's reply editor before starting further agent attempts.",
+    )
     parser.add_argument("--max-passes", type=int, default=3, help="Maximum coder passes per issue.")
     parser.add_argument("--blocked-retry-rounds", type=int, default=DEFAULT_BLOCKER_RESOLUTION_PASSES, help="Maximum fair Blocker Resolution passes per ready issue, capped at 5. Default: 5.")
     parser.add_argument("--blocked-retry-max-passes", type=int, default=1, help="Deprecated compatibility option; each Blocker Resolution attempt always consumes one workflow pass.")
@@ -1937,7 +1959,19 @@ class _PortableConsoleRoleRunner:
         self._initial_fix_list = list(initial_fix_list)
         self._attempt_label = attempt_label
         self._development_started = False
-        self._handoff = OperatorHandoff(runner, state_writer, dashboard.suspend_updates)
+        self._handoff = OperatorHandoff(
+            runner, state_writer, dashboard.suspend_updates,
+            resume_output=self._resume_role_output,
+        )
+
+    def _resume_role_output(self, arguments: dict[str, Any]) -> None:
+        from .portable_runtime import publish_active_session_status
+
+        publish_active_session_status(
+            stage=f"{arguments['step_display_name']} · pass {arguments['pass_number']}",
+            active_issue=self._issue.number,
+        )
+        self._dashboard.resume_updates()
 
     def run_role(self, **arguments: Any) -> RoleResult:
         role = str(arguments["role"])

@@ -1,0 +1,23 @@
+FF                                                                       [100%]
+================================== FAILURES ===================================
+___________ test_reply_launcher_preserves_argument_boundaries[True] ___________
+tests\test_reply_launcher.py:59: in test_reply_launcher_preserves_argument_boundaries
+    assert arguments == [
+E   AssertionError: assert ['--prd', 'E:...'r', 'e', ...] == ['--prd', 'E:...d', '--reply']
+E     
+E     At index 2 diff: '-' != '--reply'
+E     Left contains 6 more items, first extra item: '-'
+E     Use -v to get more diff
+__________ test_reply_launcher_preserves_argument_boundaries[False] ___________
+tests\test_reply_launcher.py:59: in test_reply_launcher_preserves_argument_boundaries
+    assert arguments == [
+E   AssertionError: assert ['--prd', 'E:...stamp.md', ''] == ['--prd', 'E:...timestamp.md']
+E     
+E     Left contains one more item: ''
+E     Use -v to get more diff
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-0rh5_yzf
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/test_reply_launcher.py::test_reply_launcher_preserves_argument_boundaries[True]
+FAILED tests/test_reply_launcher.py::test_reply_launcher_preserves_argument_boundaries[False]
+2 failed in 2.52s

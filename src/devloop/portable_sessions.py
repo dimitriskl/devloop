@@ -268,6 +268,7 @@ class PortableSessionIntent:
 class PortableSessionInputKind(str, Enum):
     CHOICE = "CHOICE"
     TEXT = "TEXT"
+    REPLY = "REPLY"
     APPROVAL = "APPROVAL"
 
 
@@ -280,6 +281,7 @@ class PortableSessionInputRequest:
     options: tuple[tuple[str, str], ...] = ()
     default_key: str = ""
     cancel_key: str | None = None
+    initial_value: str = ""
 
 
 @dataclass(frozen=True)
@@ -2727,6 +2729,7 @@ class PortableSessionSupervisor:
                         kind=request_kind,
                         request_id=request_id,
                         generation=request_generation,
+                        initial_value=_payload_text(frame, "initial_value"),
                         prompt=_safe_protocol_display(
                             _payload_text(frame, "prompt")
                         ),

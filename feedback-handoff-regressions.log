@@ -1,0 +1,60 @@
+.................................................Fs..................... [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+================================== FAILURES ===================================
+_ CodexCommandSettingsTests.test_connection_retries_consume_one_attempt_execution_budget _
+
+self = <test_codex_runner.CodexCommandSettingsTests testMethod=test_connection_retries_consume_one_attempt_execution_budget>
+
+    def test_connection_retries_consume_one_attempt_execution_budget(self) -> None:
+        runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner.repo_root = root
+            runner.log_root = root / ".loop.logs"
+            runner.ensure_log_root()
+            retryable = codex_cli.subprocess.CompletedProcess(
+                ["codex"],
+                1,
+                stdout="",
+                stderr="failed to connect to websocket\n",
+            )
+            successful = codex_cli.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout='{"status":"PASS"}\n',
+                stderr="",
+            )
+            with mock.patch.object(
+                codex_cli,
+                "CODEX_CONNECTION_RETRY_DELAY_SECONDS",
+                0.15,
+            ), mock.patch.object(
+                codex_cli,
+                "run_streaming_codex_command",
+                side_effect=(retryable, retryable, successful),
+            ) as execute:
+                result = codex_cli.run_codex_exec_with_connection_retries(
+                    command=["codex"],
+                    prompt="Implement the issue.",
+                    stdout_path=runner.log_root / "stdout.jsonl",
+                    stderr_path=runner.log_root / "stderr.txt",
+                    cwd=root,
+                    write_log=runner.write_log_text,
+                    execution_budget=ExecutionBudget(
+                        timeout_seconds=0.2,
+                        checkpoint_seconds=0.2,
+                    ),
+                )
+    
+>       self.assertEqual(execute.call_count, 2)
+E       AssertionError: 1 != 2
+
+tests\test_codex_runner.py:360: AssertionError
+---------------------------- Captured stdout call -----------------------------
+codex exec connection failed on attempt 1; retrying in 0.15 seconds.
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-cc_ny439
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/test_codex_runner.py::CodexCommandSettingsTests::test_connection_retries_consume_one_attempt_execution_budget
+1 failed, 151 passed, 1 skipped in 153.04s (0:02:33)

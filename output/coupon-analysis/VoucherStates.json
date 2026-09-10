@@ -1,0 +1,45 @@
+{
+  "method": "GET",
+  "url": "https://api.entersoft.gr/api/rpc/FetchStdZoom/ESFIZVoucherState",
+  "httpStatus": 200,
+  "response": {
+    "Page": -1,
+    "PageSize": -1,
+    "Count": 4,
+    "Table": "ESFIZVoucherState",
+    "Rows": [
+      {
+        "Code": "1",
+        "Description": "Αρχικό",
+        "AlternativeDescription": null,
+        "Inactive": 0,
+        "CountryID": "GR",
+        "Display": "1 / Αρχικό"
+      },
+      {
+        "Code": "2",
+        "Description": "Ενεργό",
+        "AlternativeDescription": null,
+        "Inactive": 0,
+        "CountryID": "GR",
+        "Display": "2 / Ενεργό"
+      },
+      {
+        "Code": "3",
+        "Description": "Χρησιμοποιήθηκε",
+        "AlternativeDescription": null,
+        "Inactive": 0,
+        "CountryID": "GR",
+        "Display": "3 / Χρησιμοποιήθηκε"
+      },
+      {
+        "Code": "4",
+        "Description": "Ακυρώθηκε",
+        "AlternativeDescription": null,
+        "Inactive": 0,
+        "CountryID": "GR",
+        "Display": "4 / Ακυρώθηκε"
+      }
+    ]
+  }
+}

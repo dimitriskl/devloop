@@ -1,0 +1,18 @@
+........F
+================================== FAILURES ===================================
+___ test_submitted_feature_locks_every_discovered_component_before_analysis ___
+tests\codexcli\test_analysis_workflow.py:110: in test_submitted_feature_locks_every_discovered_component_before_analysis
+    result = AnalysisWorkflowService(config).start("Build a feature.")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\devloop\application\analysis.py:93: in __init__
+    registry = installed_component_registry()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\devloop\components\builtin.py:45: in installed_component_registry
+    raise ComponentRegistryError("No installed Workflow Step Components were discovered.")
+E   devloop.components.contracts.ComponentRegistryError: No installed Workflow Step Components were discovered.
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-qp0838mf
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/codexcli/test_analysis_workflow.py::test_submitted_feature_locks_every_discovered_component_before_analysis
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 8 passed, 51 deselected in 5.52s

@@ -1,0 +1,191 @@
+FF                                                                       [100%]
+================================== FAILURES ===================================
+___ test_console_handoff_restores_dashboard_before_resuming_backend[False] ____
+
+tmp_path = WindowsPath('E:/devloop-recovery-20260905/.tmp-test-session-ins_7g51/pytest/test_console_handoff_restores_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000019E6129ABA0>
+failed = False
+
+    @pytest.mark.parametrize("failed", [False, True])
+    def test_console_handoff_restores_dashboard_before_resuming_backend(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool,
+    ) -> None:
+        bridge = PortableRuntimeBridge()
+        with portable_runtime_session(bridge):
+            dashboard = IssueDashboard(
+                issue_number="0003", issue_title="Verification", position=1, total=3,
+                frame_seconds=60,
+            )
+            runner = SimpleNamespace(repo_root=tmp_path, run_role=Mock())
+            writer = SimpleNamespace(state={})
+            issue = Issue("0003", "Verification", tmp_path / "0003.md", False)
+            console = _PortableConsoleRoleRunner(
+                runner=runner, issue=issue, dashboard=dashboard, progress="", activity_progress="",
+                initial_fix_list=[], attempt_label=None, state_writer=writer,
+            )
+            record = {
+                "repository": str(tmp_path), "source_fingerprint": "source",
+                "gate": {"kind": "DOTNET_TEST", "project_path": "tests.csproj",
+                         "test_filter": "ClassName=Tests", "expected_tests": 12, "reason": "SQL"},
+            }
+            writer.state[operator_handoff.STATE_KEY] = {json.dumps(["0003", "dev", 1]): record}
+            monkeypatch.setattr(operator_handoff, "source_fingerprint", lambda _: "source")
+    
+            def verify(_record):
+                bridge.show_screen("Verification finished: 12 tests")
+                if failed:
+                    raise VerificationFailed("Failed test needs repair")
+                return "12 passed, zero skipped"
+    
+            monkeypatch.setattr(console._handoff, "_wait", verify)
+    
+            def resumed(**kwargs):
+                events = []
+                while (event := bridge.try_next_event()) is not None:
+                    events.append(event)
+                screens = [event.content for event in events if event.content]
+                assert "WORKING" in screens[-1]
+                assert dashboard._thread is not None and dashboard._thread.is_alive()
+                assert dashboard._statuses[Stage.DEVELOPMENT].value == "WORKING"
+                return RoleResult(status="FAIL", summary="Continue repair")
+    
+            runner.run_role.side_effect = resumed
+            try:
+>               console.run_role(
+                    role="coder", role_adapter="coder", step_display_name="Development",
+                    step_instance_id="dev", issue=issue, pass_number=1,
+                )
+
+tests\test_verification_feedback_handoff.py:78: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\devloop\cli.py:1970: in run_role
+    result = self._handoff.run_role(arguments)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\devloop\operator_handoff.py:136: in run_role
+    result = self.runner.run_role(**arguments)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\unittest\mock.py:1139: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\unittest\mock.py:1143: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\unittest\mock.py:1204: in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+kwargs = {'activity_callback': <bound method IssueDashboard.notify_activity of <devloop.statusui.IssueDashboard object at 0x000...on-ins_7g51/pytest/test_console_handoff_restores_0/0003.md'), completed=False, dependencies=()), 'pass_number': 1, ...}
+events = [PortableRuntimeEvent(kind=<PortableRuntimeEventKind.SCREEN_UPDATED: 'SCREEN_UPDATED'>, request_id=0, options=(), defa...rompt='', input_history=(), shortcuts=(), content='Verification finished: 12 tests', is_error=False, run_context=None)]
+event = None
+screens = ['\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\nCURRENT ISSUE \xb7 0003 \xb7 1/3 \xb7 2 rem...\\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500', 'Verification finished: 12 tests']
+@py_assert0 = 'WORKING', @py_assert3 = 'Verification finished: 12 tests'
+@py_assert2 = False
+@py_format5 = "'WORKING' in 'Verification finished: 12 tests'"
+
+    def resumed(**kwargs):
+        events = []
+        while (event := bridge.try_next_event()) is not None:
+            events.append(event)
+        screens = [event.content for event in events if event.content]
+>       assert "WORKING" in screens[-1]
+E       AssertionError: assert 'WORKING' in 'Verification finished: 12 tests'
+
+tests\test_verification_feedback_handoff.py:71: AssertionError
+____ test_console_handoff_restores_dashboard_before_resuming_backend[True] ____
+
+tmp_path = WindowsPath('E:/devloop-recovery-20260905/.tmp-test-session-ins_7g51/pytest/test_console_handoff_restores_1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000019E6129B710>
+failed = True
+
+    @pytest.mark.parametrize("failed", [False, True])
+    def test_console_handoff_restores_dashboard_before_resuming_backend(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool,
+    ) -> None:
+        bridge = PortableRuntimeBridge()
+        with portable_runtime_session(bridge):
+            dashboard = IssueDashboard(
+                issue_number="0003", issue_title="Verification", position=1, total=3,
+                frame_seconds=60,
+            )
+            runner = SimpleNamespace(repo_root=tmp_path, run_role=Mock())
+            writer = SimpleNamespace(state={})
+            issue = Issue("0003", "Verification", tmp_path / "0003.md", False)
+            console = _PortableConsoleRoleRunner(
+                runner=runner, issue=issue, dashboard=dashboard, progress="", activity_progress="",
+                initial_fix_list=[], attempt_label=None, state_writer=writer,
+            )
+            record = {
+                "repository": str(tmp_path), "source_fingerprint": "source",
+                "gate": {"kind": "DOTNET_TEST", "project_path": "tests.csproj",
+                         "test_filter": "ClassName=Tests", "expected_tests": 12, "reason": "SQL"},
+            }
+            writer.state[operator_handoff.STATE_KEY] = {json.dumps(["0003", "dev", 1]): record}
+            monkeypatch.setattr(operator_handoff, "source_fingerprint", lambda _: "source")
+    
+            def verify(_record):
+                bridge.show_screen("Verification finished: 12 tests")
+                if failed:
+                    raise VerificationFailed("Failed test needs repair")
+                return "12 passed, zero skipped"
+    
+            monkeypatch.setattr(console._handoff, "_wait", verify)
+    
+            def resumed(**kwargs):
+                events = []
+                while (event := bridge.try_next_event()) is not None:
+                    events.append(event)
+                screens = [event.content for event in events if event.content]
+                assert "WORKING" in screens[-1]
+                assert dashboard._thread is not None and dashboard._thread.is_alive()
+                assert dashboard._statuses[Stage.DEVELOPMENT].value == "WORKING"
+                return RoleResult(status="FAIL", summary="Continue repair")
+    
+            runner.run_role.side_effect = resumed
+            try:
+>               console.run_role(
+                    role="coder", role_adapter="coder", step_display_name="Development",
+                    step_instance_id="dev", issue=issue, pass_number=1,
+                )
+
+tests\test_verification_feedback_handoff.py:78: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\devloop\cli.py:1970: in run_role
+    result = self._handoff.run_role(arguments)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\devloop\operator_handoff.py:136: in run_role
+    result = self.runner.run_role(**arguments)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\unittest\mock.py:1139: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\unittest\mock.py:1143: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\unittest\mock.py:1204: in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+kwargs = {'activity_callback': <bound method IssueDashboard.notify_activity of <devloop.statusui.IssueDashboard object at 0x000...on-ins_7g51/pytest/test_console_handoff_restores_1/0003.md'), completed=False, dependencies=()), 'pass_number': 1, ...}
+events = [PortableRuntimeEvent(kind=<PortableRuntimeEventKind.SCREEN_UPDATED: 'SCREEN_UPDATED'>, request_id=0, options=(), defa...None, prompt='', input_history=(), shortcuts=(), content='Failed test needs repair', is_error=False, run_context=None)]
+event = None
+screens = ['\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\nCURRENT ISSUE \xb7 0003 \xb7 1/3 \xb7 2 rem...\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500', 'Verification finished: 12 tests', 'Failed test needs repair']
+@py_assert0 = 'WORKING', @py_assert3 = 'Failed test needs repair'
+@py_assert2 = False, @py_format5 = "'WORKING' in 'Failed test needs repair'"
+
+    def resumed(**kwargs):
+        events = []
+        while (event := bridge.try_next_event()) is not None:
+            events.append(event)
+        screens = [event.content for event in events if event.content]
+>       assert "WORKING" in screens[-1]
+E       AssertionError: assert 'WORKING' in 'Failed test needs repair'
+
+tests\test_verification_feedback_handoff.py:71: AssertionError
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-ins_7g51
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/test_verification_feedback_handoff.py::test_console_handoff_restores_dashboard_before_resuming_backend[False]
+FAILED tests/test_verification_feedback_handoff.py::test_console_handoff_restores_dashboard_before_resuming_backend[True]
+2 failed, 7 deselected in 1.26s

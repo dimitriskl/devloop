@@ -1,0 +1,103 @@
+{
+  "method": "GET",
+  "url": "https://api.entersoft.gr/api/rpc/SimpleScroller/ESFIVoucher/ESFIVoucher_Def",
+  "httpStatus": 200,
+  "sampleOnly": true,
+  "samplingLimit": 50,
+  "rowSummaries": [
+    {
+      "path": "root.ESFIVoucher",
+      "rowsReceived": 50,
+      "columns": [
+        "ADCode",
+        "ADRegistrationDate",
+        "ADTotalValue",
+        "Barcode",
+        "CashAccountCode",
+        "Code",
+        "Current_Value",
+        "D4UAccessID",
+        "Description",
+        "DiscVoucherPercentage",
+        "DiscVoucherValue",
+        "ESUCreated",
+        "ExpirationDate",
+        "Flag3",
+        "GID",
+        "GiftVoucherClosedValue",
+        "GiftVoucherValue",
+        "Inactive",
+        "Printed",
+        "PromotionProfileCode",
+        "RegistrationDate",
+        "TradeAccountInfo",
+        "VoucherState",
+        "VoucherType",
+        "fCompanyCode",
+        "login_date"
+      ],
+      "sample": [
+        {
+          "VoucherType": 0,
+          "RegistrationDate": "2026-09-02T21:00:00",
+          "ExpirationDate": "2027-09-02T21:00:00",
+          "DiscVoucherValue": 6.0,
+          "DiscVoucherPercentage": 0.0,
+          "Inactive": 0,
+          "Printed": 0,
+          "VoucherState": "2 / Ενεργό",
+          "fCompanyCode": "001",
+          "PromotionProfileCode": "CT6-2027"
+        },
+        {
+          "VoucherType": 0,
+          "RegistrationDate": "2026-09-02T21:00:00",
+          "ExpirationDate": "2027-09-02T21:00:00",
+          "DiscVoucherValue": 6.0,
+          "DiscVoucherPercentage": 0.0,
+          "Inactive": 0,
+          "Printed": 0,
+          "VoucherState": "2 / Ενεργό",
+          "fCompanyCode": "001",
+          "PromotionProfileCode": "CT6-2027"
+        },
+        {
+          "VoucherType": 0,
+          "RegistrationDate": "2026-09-02T21:00:00",
+          "ExpirationDate": "2027-09-02T21:00:00",
+          "DiscVoucherValue": 6.0,
+          "DiscVoucherPercentage": 0.0,
+          "Inactive": 0,
+          "Printed": 0,
+          "VoucherState": "2 / Ενεργό",
+          "fCompanyCode": "001",
+          "PromotionProfileCode": "CT6-2027"
+        },
+        {
+          "VoucherType": 0,
+          "RegistrationDate": "2026-09-02T21:00:00",
+          "ExpirationDate": "2027-09-02T21:00:00",
+          "DiscVoucherValue": 6.0,
+          "DiscVoucherPercentage": 0.0,
+          "Inactive": 0,
+          "Printed": 0,
+          "VoucherState": "2 / Ενεργό",
+          "fCompanyCode": "001",
+          "PromotionProfileCode": "CT6-2027"
+        },
+        {
+          "VoucherType": 0,
+          "RegistrationDate": "2026-09-02T21:00:00",
+          "ExpirationDate": "2027-09-02T21:00:00",
+          "DiscVoucherValue": 6.0,
+          "DiscVoucherPercentage": 0.0,
+          "Inactive": 0,
+          "Printed": 0,
+          "VoucherState": "2 / Ενεργό",
+          "fCompanyCode": "001",
+          "PromotionProfileCode": "CT6-2027"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "destination": "E:\\LocalCode\\eConnectorV2\\docs\\eshop\\Rma-Dev\\EBS-LIVE-20260909",
+  "verifiedFiles": [
+    "EBS-LIVE-FINDINGS.md",
+    "VIEW-COLUMNS.md",
+    "Swagger.json",
+    "PublicQueryInfo.json",
+    "PublicQueryLayout.json",
+    "SimpleScroller.json",
+    "StagingTableInfo.json",
+    "verification.json"
+  ],
+  "utc": "2026-09-09T08:52:16.1108353Z"
+}

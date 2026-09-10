@@ -1,0 +1,43 @@
+{
+  "verifiedUtc": "2026-09-09T08:46:15.2522143Z",
+  "columnCount": 66,
+  "questionCoverage": 9,
+  "sourceXmlSha256": "CC28C72E65DBBFE061B5D502D58A696CCE05914045DAD0E5E00440041B18BDC6",
+  "files": [
+    {
+      "name": "EBS-LIVE-FINDINGS.md",
+      "sha256": "CF9C4BE4D2E2E3AEC9741B755F6A6EFBB1A992CCAB7861A87A933473961D1D42",
+      "bytes": 14187
+    },
+    {
+      "name": "PublicQueryInfo.json",
+      "sha256": "3624EAD838259A524CB219BC2480811E523B2A716F0BC759EAF7A082C47435D7",
+      "bytes": 44444
+    },
+    {
+      "name": "PublicQueryLayout.json",
+      "sha256": "9B85B471E7C68A7E7C0B67977092D6DBE26A2828A53B57E0E680DA048506EC6F",
+      "bytes": 44446
+    },
+    {
+      "name": "SimpleScroller.json",
+      "sha256": "64A26E0352898257FC61450BC5B1C312FC00B01009050441045A37D8717E1160",
+      "bytes": 282
+    },
+    {
+      "name": "StagingTableInfo.json",
+      "sha256": "2F57500D9359B6082B732921F74C8F7736BD252C0ADCB28E43F502CB0537F0DA",
+      "bytes": 383
+    },
+    {
+      "name": "Swagger.json",
+      "sha256": "48C4678DB1584D47736AC8D3A22D78B66B486EEDD9B199C99EA491A63328D477",
+      "bytes": 25060
+    },
+    {
+      "name": "VIEW-COLUMNS.md",
+      "sha256": "4B31968D1AE5678CD2C00AEC42D0983BC9EC0A20A2338AC85815267755322228",
+      "bytes": 4092
+    }
+  ]
+}

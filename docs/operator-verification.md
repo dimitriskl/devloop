@@ -33,19 +33,36 @@ the request identity, report hash and source fingerprint. Git-visible .NET sourc
 build and configuration files and local appsettings in their directories are
 hashed; ignored build output and test results are excluded. This fingerprint
 does not certify external database state, environment variables or SDK identity.
-Changed source inputs create a fresh request and automatic execution. Failed or
-incomplete results return a diagnostic with the result directory through the normal
-blocked workflow; the handoff never spins on an unchanged failure or asks for a
-manual terminal command. A paused incomplete gate runs again on resume, while
-accepted evidence on unchanged inputs is reused. Successful verification and
-lifecycle interruptions do not consume issue retry rounds.
+Changed source inputs create a fresh request and automatic execution. Executed
+failures are returned to the active agent with test counters, failure details, and
+TRX/log paths. Development repairs the failure and requests verification again;
+Review/QA reports FAIL so the existing workflow routes the findings to Development.
+The failed receipt is reused after pause, restart, or a scheduler retry, giving the
+agent a repair turn before any unchanged test rerun. A claimed PASS after a repair
+is independently verified against the failed gate before it can complete the step.
+An unchanged failed gate or an attempt to substitute a different gate returns FAIL
+without another test execution. The pending failure must be resolved first.
+
+Failure feedback checks request identity, source fingerprint, and TRX hash before
+sharing redacted diagnostics. Build failures without a TRX use the bounded tail of
+their verification log. Missing/corrupt evidence is never treated as test-failure
+feedback; unresolved evidence and process-launch failures remain blockers.
+A paused incomplete gate runs again on resume, while accepted evidence
+on unchanged inputs is reused. Successful verification and lifecycle interruptions
+do not consume issue retry rounds.
 
 After accepted evidence arrives, the runner invokes the same workflow step with
-the evidence in Step Guidance. It retains the current issue and pass and uses a
+the evidence in Automatic Verification Evidence. It retains the current issue and pass and uses a
 new log label. The worker continues implementation; independent review and QA
 still run. This feature does not mark an issue complete merely because a preflight
 passed. A worker that repeatedly requests the identical already-verified gate
 without source changes is reported as blocked rather than looping paid model calls.
+
+Verification evidence uses its own prompt section, preserving user Step Guidance
+and its 4,000-character limit. Long test failures retain their details in the
+prompt; the session screen shows a preview within the protocol's 8,192-character
+limit. Failed sessions show diagnostics without presenting their last working
+screen as live progress.
 
 The result contract is nullable for ordinary outcomes. For an external test gate:
 
@@ -63,3 +80,6 @@ The worker must inspect the actual project/tests to supply those values; the
 example is not a default. Unsupported blockers still use the existing blocked
 workflow. Automatic operator handoff currently supports `.csproj` test gates,
 not arbitrary commands, deployment, installations or permission requests.
+
+Local repair-path validation is recorded in
+[verification-repair-validation.md](verification-repair-validation.md).

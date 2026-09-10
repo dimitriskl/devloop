@@ -1,0 +1,123 @@
+......F.................................................F
+================================== FAILURES ===================================
+____ test_failed_session_prioritizes_diagnostic_over_frozen_working_screen ____
+
+    def test_failed_session_prioritizes_diagnostic_over_frozen_working_screen() -> None:
+        async def check() -> None:
+            supervisor = SimpleNamespace(
+                list_sessions=lambda: (), try_next_event=lambda: None, shutdown=lambda: None,
+            )
+            app = PortableApplicationShell(PortableRuntimeBridge(), session_supervisor=supervisor)
+            snapshot = PortableSessionSnapshot(
+                session_id="failed-feedback", checkout=Path.cwd(),
+                status=PortableSessionStatus.FAILED, result=1,
+                current_screen="WORKING Development elapsed 01:44:24",
+                diagnostics=("Step Guidance cannot exceed 4000 characters before redaction.",),
+            )
+            async with app.run_test(size=(120, 34)):
+                app._active_session_id = snapshot.session_id
+                app._show_session_snapshot(snapshot)
+                detail = str(app.query_one("#portable-detail", Static).render())
+                assert "Status: FAILED" in detail
+                assert snapshot.diagnostics[0] in detail
+                assert snapshot.current_screen not in detail
+                assert "Session ended" in detail
+>       asyncio.run(check())
+
+tests\test_verification_feedback_handoff.py:112: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\Dimitris\AppData\Local\Programs\Python\Python312\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_verification_feedback_handoff.py:97: in check
+    app = PortableApplicationShell(PortableRuntimeBridge(), session_supervisor=supervisor)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = PortableApplicationShell(title='PortableApplicationShell', classes={'-dark-mode'}, pseudo_classes={'focus', 'nocolor', 'dark'})
+bridge = <devloop.portable_runtime.PortableRuntimeBridge object at 0x000002D37B8551C0>
+operation = None
+
+    def __init__(
+        self,
+        bridge: PortableRuntimeBridge,
+        operation: Callable[[], int] | None = None,
+        *,
+        session_supervisor: PortableSessionController | None = None,
+        session_launch: PortableSessionLaunch | None = None,
+        startup_action: PortableSessionStartupAction = PortableSessionStartupAction.SHOW_SESSIONS,
+        session_target_resolver: PortableSessionTargetController | None = None,
+        attention_bell: bool | None = None,
+    ) -> None:
+        super().__init__()
+        if operation is None and (session_supervisor is None or session_launch is None):
+>           raise ValueError(
+                "PortableApplicationShell requires an operation or session launch."
+            )
+E           ValueError: PortableApplicationShell requires an operation or session launch.
+
+src\devloop\portable_ui\app.py:542: ValueError
+_ CodexCommandSettingsTests.test_connection_retries_consume_one_attempt_execution_budget _
+
+self = <test_codex_runner.CodexCommandSettingsTests testMethod=test_connection_retries_consume_one_attempt_execution_budget>
+
+    def test_connection_retries_consume_one_attempt_execution_budget(self) -> None:
+        runner = codex_runner.CodexRunner.__new__(codex_runner.CodexRunner)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner.repo_root = root
+            runner.log_root = root / ".loop.logs"
+            runner.ensure_log_root()
+            retryable = codex_cli.subprocess.CompletedProcess(
+                ["codex"],
+                1,
+                stdout="",
+                stderr="failed to connect to websocket\n",
+            )
+            successful = codex_cli.subprocess.CompletedProcess(
+                ["codex"],
+                0,
+                stdout='{"status":"PASS"}\n',
+                stderr="",
+            )
+            with mock.patch.object(
+                codex_cli,
+                "CODEX_CONNECTION_RETRY_DELAY_SECONDS",
+                0.15,
+            ), mock.patch.object(
+                codex_cli,
+                "run_streaming_codex_command",
+                side_effect=(retryable, retryable, successful),
+            ) as execute:
+                result = codex_cli.run_codex_exec_with_connection_retries(
+                    command=["codex"],
+                    prompt="Implement the issue.",
+                    stdout_path=runner.log_root / "stdout.jsonl",
+                    stderr_path=runner.log_root / "stderr.txt",
+                    cwd=root,
+                    write_log=runner.write_log_text,
+                    execution_budget=ExecutionBudget(
+                        timeout_seconds=0.2,
+                        checkpoint_seconds=0.2,
+                    ),
+                )
+    
+>       self.assertEqual(execute.call_count, 2)
+E       AssertionError: 1 != 2
+
+tests\test_codex_runner.py:360: AssertionError
+---------------------------- Captured stdout call -----------------------------
+codex exec connection failed on attempt 1; retrying in 0.15 seconds.
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-i6p9pssy
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/test_verification_feedback_handoff.py::test_failed_session_prioritizes_diagnostic_over_frozen_working_screen
+FAILED tests/test_codex_runner.py::CodexCommandSettingsTests::test_connection_retries_consume_one_attempt_execution_budget
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 2 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+2 failed, 55 passed in 148.50s (0:02:28)

@@ -85,9 +85,13 @@ these values. The runner executes the gate automatically under the session accou
 without another authorization or separate-terminal command, keeps this step open,
 and resumes after all expected tests pass with zero skips. Do not request
 deployment, installation, arbitrary commands or newly unauthorized data writes.
-Use `null` otherwise. Consume matching operator evidence in Step Guidance; do not
+Use `null` otherwise. Consume matching operator evidence in Automatic Verification Evidence; do not
 repeat the same sandbox-incompatible gate or treat MCP connectivity as test proof.
 Implementation changes still require appropriate fresh verification.
+If Automatic Verification Evidence contains failed automatic verification, report FAIL with its
+concrete test findings and log/report paths. The workflow sends this evidence to
+Development for repair. Keep QA read-only and do not request an unchanged failing
+gate again or ask the user to run it manually.
 
 ## Required Final Response
 

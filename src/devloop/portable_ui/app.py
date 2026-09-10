@@ -16,6 +16,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
+from .reply_screen import IssueReplyScreen
+
 from ..logo import render_logo
 from ..portable_presentation import (
     PortableActivity,
@@ -31,18 +33,6 @@ from ..portable_runtime import (
     portable_runtime_session,
     route_worker_output,
 )
-from ..portable_sessions import (
-    PortableSessionController,
-    PortableSessionIntent,
-    PortableSessionIntentKind,
-    PortableSessionInputKind,
-    PortableSessionLaunch,
-    PortableSessionSnapshot,
-    PortableSessionStatus,
-    PortableSessionSupervisor,
-    PortableWorktreeLeaseConflict,
-    PortableWorkflowOperation,
-)
 from ..portable_session_targets import (
     ExistingCheckoutTarget,
     NewWorktreeTarget,
@@ -51,11 +41,22 @@ from ..portable_session_targets import (
     PortableSessionTargetResolver,
     SavedWorktreeTarget,
 )
+from ..portable_sessions import (
+    PortableSessionController,
+    PortableSessionInputKind,
+    PortableSessionIntent,
+    PortableSessionIntentKind,
+    PortableSessionLaunch,
+    PortableSessionSnapshot,
+    PortableSessionStatus,
+    PortableSessionSupervisor,
+    PortableWorkflowOperation,
+    PortableWorktreeLeaseConflict,
+)
+from ..portable_version import PORTABLE_VERSION
 from ..run_review import REVIEW_SCREEN_PATH, REVIEW_SUCCESS_HEADING
 from ..subprocess_utils import terminate_active_process_trees
 from ..terminal_text import compact_terminal_text, sanitize_terminal_text
-from ..portable_version import PORTABLE_VERSION
-
 
 MINIMUM_TERMINAL_COLUMNS = 80
 MINIMUM_TERMINAL_ROWS = 24
@@ -545,6 +546,7 @@ class PortableApplicationShell(App[None]):
         self._bridge = bridge
         self._operation = operation
         self._session_supervisor = session_supervisor
+        self._reply_request_key: tuple[str, str, int] | None = None
         self._session_launch = session_launch
         self._startup_action = startup_action
         self._session_target_resolver = (
@@ -1535,6 +1537,10 @@ class PortableApplicationShell(App[None]):
             context_lines.append(f"Result: {snapshot.result}")
         if snapshot.input_request is not None and snapshot.input_request.prompt:
             context_lines.extend(("", snapshot.input_request.prompt))
+        elif snapshot.status is PortableSessionStatus.FAILED:
+            context_lines.append("Session ended. The last working screen is no longer live.")
+            if snapshot.progress.stage:
+                context_lines.append(f"Last recorded stage: {snapshot.progress.stage}")
         elif snapshot.latest_activity:
             context_lines.append(f"Latest activity: {snapshot.latest_activity}")
         if snapshot.diagnostics:
@@ -1553,6 +1559,11 @@ class PortableApplicationShell(App[None]):
             preserve_newlines=True,
         )
         self.query_one("#portable-detail", Static).update(safe_detail)
+        if (
+            snapshot.input_request is not None
+            and snapshot.input_request.kind is PortableSessionInputKind.REPLY
+        ):
+            self._show_session_reply(snapshot)
         if (
             snapshot.input_request is not None
             and snapshot.input_request.kind is PortableSessionInputKind.TEXT
@@ -1575,7 +1586,11 @@ class PortableApplicationShell(App[None]):
             activity.write(
                 sanitize_terminal_text(line, preserve_newlines=True)
             )
-        if snapshot.current_screen and snapshot.input_request is None:
+        if (
+            snapshot.current_screen
+            and snapshot.input_request is None
+            and snapshot.status is not PortableSessionStatus.FAILED
+        ):
             activity.write(sanitize_terminal_text(snapshot.current_screen, preserve_newlines=True))
         rejection = self._session_input_rejections.get(snapshot.session_id)
         self.query_one("#portable-status", Static).update(
@@ -1889,11 +1904,46 @@ class PortableApplicationShell(App[None]):
         if confirmed:
             self._apply_session_lifecycle(kind)
 
+    def _show_session_reply(self, snapshot: PortableSessionSnapshot) -> None:
+        request = snapshot.input_request
+        assert request is not None
+        key = (snapshot.session_id, request.request_id, request.generation)
+        if self._reply_request_key == key:
+            return
+        self._reply_request_key = key
+        self.push_screen(
+            IssueReplyScreen(request.prompt, request.initial_value),
+            lambda value: self._finish_session_reply(key, value or ""),
+        )
+
+    def _finish_session_reply(self, key: tuple[str, str, int], value: str) -> None:
+        # Keep the presented identity while delayed activity frames drain. An old
+        # snapshot must not reopen an editor for a reply already submitted.
+        snapshot = self._session_snapshots.get(key[0])
+        request = snapshot.input_request if snapshot is not None else None
+        if request is None or (request.request_id, request.generation) != key[1:]:
+            self._reject_stale_session_input()
+            return
+        self._provide_session_input(
+            value, session_id=key[0], request_id=key[1], request_generation=key[2],
+        )
+        if key[0] in self._session_input_rejections:
+            self._reply_request_key = None
+            self._show_session_reply(replace(
+                snapshot, input_request=replace(request, initial_value=value),
+            ))
+
     def _handle_runtime_event(self, event: PortableRuntimeEvent) -> None:
         if event.kind is PortableRuntimeEventKind.CHOICE_REQUESTED:
             self._show_choice(event)
         elif event.kind is PortableRuntimeEventKind.INPUT_REQUESTED:
             self._show_input(event)
+        elif event.kind is PortableRuntimeEventKind.REPLY_REQUESTED:
+            self._active_request_id = event.request_id
+            self.push_screen(
+                IssueReplyScreen(event.prompt, event.initial_value),
+                lambda value: self._respond(event.request_id, value or "", "Reply editor closed"),
+            )
         elif event.kind is PortableRuntimeEventKind.INTERACTION_COMPLETED:
             self._finish_interaction_transition(event.request_id)
         elif event.kind is PortableRuntimeEventKind.RUN_CONTEXT_UPDATED:
@@ -2624,11 +2674,11 @@ def run_portable_sessions_application(
     startup_action: PortableSessionStartupAction = PortableSessionStartupAction.SHOW_SESSIONS,
 ) -> int:
     """Open Sessions or execute the session explicitly supplied by the CLI."""
+    from ..interactive_runner import find_resume_candidates
     from ..portable_session_catalog import (
         PortableResumeCandidate,
         PortableSessionCatalog,
     )
-    from ..interactive_runner import find_resume_candidates
 
     bridge = PortableRuntimeBridge()
     catalog = PortableSessionCatalog()

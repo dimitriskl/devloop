@@ -33,6 +33,7 @@ from .portable_runtime import (
 from .portable_sessions import (
     PortablePartialWorkContext,
     PortableRecoveryData,
+    PortableSessionInputKind,
     PortableWorkflowOperation,
     record_relink_receipt,
 )
@@ -138,6 +139,15 @@ class PortableWorkerRuntimeBridge:
         return selected
 
     def read_line(self, prompt: str, *, history: Sequence[str] = ()) -> str:
+        return self._read_text(prompt, PortableSessionInputKind.TEXT, history=history)
+
+    def read_reply(self, prompt: str, *, initial_value: str = "") -> str:
+        return self._read_text(prompt, PortableSessionInputKind.REPLY, initial_value=initial_value)
+
+    def _read_text(
+        self, prompt: str, kind: PortableSessionInputKind, *,
+        history: Sequence[str] = (), initial_value: str = "",
+    ) -> str:
         self._raise_if_stopping()
         request_id = str(uuid.uuid4())
         request_generation = next(self._request_generations)
@@ -146,9 +156,10 @@ class PortableWorkerRuntimeBridge:
             {
                 "request_id": request_id,
                 "request_generation": request_generation,
-                "request_kind": "TEXT",
+                "request_kind": kind.value,
                 "prompt": prompt,
                 "history": list(history),
+                "initial_value": initial_value,
             },
         )
         return self._read_user_input(

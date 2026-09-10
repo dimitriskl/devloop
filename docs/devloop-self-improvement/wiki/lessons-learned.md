@@ -8,9 +8,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: Dev Loop startup, authenticated backends, cross-platform and release workflows
 - Lesson: Detect mandatory gates that require credentials, network access, another operating system, writable user storage, recording, or publication authority before starting a long issue pack.
-- Evidence: `.compiler-runs/20260908-154105-context.md` records dynamic-query-delta-timestamp Issue 0002 QA distinguishing 16 fresh SQL skips from an inspected historical TRX with 325 passes and zero skips. Issue 0003 then reported successful read-only SQL probes but zero executed persistence tests and two skips because its SqlClient environment could not support required encryption.
-- Action: Preflight the actual gate's database client, connectivity, and encryption support; a separate read-only probe or another role's success does not prove that environment works. Retain fresh executed/skipped counts separately from historical artifacts. For unavailable gates, preserve encryption settings, provide an operator action with a non-secret workspace result log, and keep fresh execution unverified.
-- Last seen: 2026-09-08
+- Evidence: `.compiler-runs/20260909-120435-context.md` records Issue 0003 requesting a six-test gate after worker SQL encryption skips. The request's recorded `result.json` points to a TRX with six executed, four passed, two failed, and zero not-executed tests; the failures report strict-mock setup errors, not encryption errors.
+- Action: Preflight the actual gate's client and environment; separate read-only probes and historical passes do not establish fresh execution. Preserve encryption settings. Route already-authorized typed `DOTNET_TEST` gates through the owning session with Pause/Cancel and validated results; use a separate-terminal handoff only for gates outside that authorization. Reclassify blockers from the returned executed, failed, and skipped counts before requesting more environment work.
+- Last seen: 2026-09-09
 
 ## Execute Database Security Contracts
 
@@ -174,11 +174,11 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Retry Equivalent Blockers Only After State Changes
 
-- Applies to: blocked retry rounds, resumed runs, role-output validation, external prerequisites and long-running issue packs
-- Lesson: A fresh Codex attempt is useful only when the blocker may be transient or the retry has new corrective context; an unchanged external or output-contract failure should not consume every retry round, including after a run is resumed.
-- Evidence: `.compiler-runs/20260908-133742-context.md` records five additional Issue 0002 retries with unchanged SQL and fixture blockers. In `.compiler-runs/20260908-154105-context.md`, Issue 0002 completed at 15:22, but Issue 0003's initial attempt and all five retries ended BLOCKED by 15:41 with zero SQL tests executed and two encryption-related skips each; only blocker documentation changed, and Issues 0004-0005 remained waiting.
-- Action: Persist a normalized blocker fingerprint with its relevant environment, repository, contract, and approval state; after one equivalent retry, suppress structured blockers and timeout-only variants across retries, resumes, and unfinished reruns until relevant state or corrective guidance changes. Documentation-only updates, a rerun request, or another issue's completion do not establish restored prerequisites or satisfy separate explicit approval requirements. Surface the pending operator actions before repeating unchanged tests and builds.
-- Last seen: 2026-09-08
+- Applies to: blocked retry rounds, resumed runs, required user clarification and automatic verification
+- Lesson: Fresh attempts cannot resolve an unanswered contract decision or an unchanged gate failure; preserve the blocker across retries and resumes until relevant evidence or guidance changes.
+- Evidence: `.compiler-runs/20260909-120435-context.md` records Issue 0003 repeating a strict-mock gate failure. `.compiler-runs/20260909-181154-context.md` records Issue 0004 exhausting another five retries after the earlier five: one attempt documented the proposal, but the required decision remained unanswered and Issue 0005 stayed waiting.
+- Action: Surface one precise required clarification and pause dependent work; never invent the missing contract. Persist a blocker fingerprint across reruns and resume dependent execution only when the answer or corrective evidence arrives; explanatory replies and proposal-only edits do not resolve an approval blocker. For failed gates, resolve the report through `result.json`, inspect its sibling log, and feed the concrete failure into coder rework; a rerun request alone does not establish a fix.
+- Last seen: 2026-09-09
 
 ## Validate Every Component Of Derived Data
 
@@ -464,6 +464,30 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: coder rework, dependency injection, test fixtures and repository test-lock policies
 - Lesson: A new production dependency can turn existing unit fixtures into real database callers when constructor defaults bypass their mocks; new tests alone will miss those regressions.
-- Evidence: `.compiler-runs/20260908-125258-context.md` records three Issue 0002 relay fixtures reaching real SQL through a new validator, with reopening approval pending. In `.compiler-runs/20260908-154105-context.md`, review reported strict-validator fixture coverage and QA recorded 47 passing Node tests with no skips using `--no-build`; fresh test-project compilation remained blocked by the vendor feed.
-- Action: Inspect every construction site and the actual fixture lock status before introducing a dependency. Supply controlled collaborators in editable fixtures while preserving assertions, resolve any explicitly required reopening approval early, and run existing affected tests as well as new boundary tests. On resume, inspect current fixtures and gate evidence before repeating an old fix or approval request; distinguish passing existing assemblies from fresh test-project compilation.
-- Last seen: 2026-09-08
+- Evidence: `.compiler-runs/20260908-125258-context.md` records Issue 0002 fixtures reaching real SQL through a new validator. For the September 9 Issue 0003 gate, `.loop.logs/operator-verifications/28628807-8d55-4b9b-9f19-96b8177d4438/result.json` selects `88f86367bf5a40f1871e4cb748711fa5/verification.trx`: four prepared-dataset cases pass, while both disabled-legacy cases fail on an unconfigured strict `IDynamicTableService.TableExistsAsync` invocation.
+- Action: Inspect construction sites, actual collaborator calls, and fixture lock status when adding runtime dependencies. Cover strict setups for enabled, disabled, and legacy branches while preserving behavioral assertions; resolve explicitly required reopening approval before editing locked tests. Rerun the exact failing cases and the full requested gate after repair. On resume, use current evidence and distinguish existing-assembly passes from fresh compilation.
+- Last seen: 2026-09-09
+
+## Bind Verification Reuse To Current Source Inputs
+
+- Applies to: managed `DOTNET_TEST` gates, reviewer and QA handoffs, resumed runs
+- Lesson: Reuse supplied passing evidence only when its gate and source inputs still match; worker-local skips neither invalidate matching evidence nor justify accepting a stale pass.
+- Evidence: `.compiler-runs/20260909-161239-context.md`, Issue 0003 QA verification request records a source-fingerprint mismatch against the prior passing SQL result. The final QA result accepts replacement request `c3e47007-61fd-4b18-834f-349677e53147` for current inputs, with two passed and zero skipped, without repeating that SQL gate.
+- Action: Validate the requested project, filter, expected count, source fingerprint and result counters before reuse. Obtain fresh session-owned verification on a mismatch; otherwise carry the validated evidence into later roles and run only their remaining checks. Keep isolated-database proof separate from deployed acceptance.
+- Last seen: 2026-09-09
+
+## Test Crashes Between Data Commit And Progress Persistence
+
+- Applies to: coder, reviewer, QA, batched initialization and recovery across separate databases
+- Lesson: Recovery tests that fail after checkpoint persistence do not prove recovery from termination between a committed batch and its separately saved progress. Later updates or deletes can prevent reconstructing that progress from current rows.
+- Evidence: `.compiler-runs/20260909-161239-context.md`, Issue 0004 development and retry results report Store commits preceding application progress writes. Two operator SQL recovery cases passed with zero skips, but injected failure after progress persistence; the uncovered crash window kept the issue blocked.
+- Action: Trace each commit and checkpoint boundary, then test termination before checkpoint persistence, restart and intervening synchronization. Verify durable progress as well as row preservation. Resolve the approved atomic receipt or transaction contract before implementation; passing tests at a later boundary do not close this gap.
+- Last seen: 2026-09-09
+
+## Make Required Decisions Concrete And Plain
+
+- Applies to: agent clarification, explicitly required design approval and resumed attempts
+- Lesson: Explain the observed failure, proposed change and requested scope in plain language before asking for a required decision; a request for explanation is not approval.
+- Evidence: `.compiler-runs/20260909-181154-context.md`, Issue 0004 results from 18:00 through 18:11 record a documented proposal and a reply requesting a plain-English explanation. The results identify an explicit issue prerequisite requiring a decision before implementation; the proposal remained unapproved.
+- Action: Complete authorized analysis and record a reviewable proposal first. Ask one concise question identifying what implementation and testing would cover, who controls installation, and the exact instruction requiring approval. Carry the pending decision across resumes; do not impose a new approval step when existing authorization already covers the work.
+- Last seen: 2026-09-09

@@ -1,0 +1,10 @@
+{
+  "method": "GET",
+  "url": "https://api.entersoft.gr/api/rpc/FetchOdsMasterRelationsInfo/ESFIVoucherPromotionProfile",
+  "httpStatus": 404,
+  "response": {
+    "MessageID": "invalid-column-id",
+    "UserMessage": "invalid column id: ESFIVoucherPromotionProfile",
+    "Messages": []
+  }
+}

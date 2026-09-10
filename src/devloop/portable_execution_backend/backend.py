@@ -161,6 +161,7 @@ class StepAttemptRequest:
     activity_context: str = ""
     activity_callback: ActivityCallback | None = None
     run_wide_blocker_policy: RunWideBlockerPolicy = RunWideBlockerPolicy.REPORT
+    image_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

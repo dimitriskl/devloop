@@ -32,6 +32,7 @@ UNANNOTATED_BUDGET_EXPIRY_PATTERN = re.compile(
 
 
 class RunReviewAction(str, Enum):
+    REPLY = "reply"
     RERUN_REMAINING = "rerun_remaining"
     EXIT = "exit"
 
@@ -94,6 +95,8 @@ def build_run_review(
 
 def run_review_options(review: RunReview) -> tuple[tuple[str, str], ...]:
     options: list[tuple[str, str]] = []
+    if replyable_issues(review):
+        options.append((RunReviewAction.REPLY.value, "Reply to an issue (text / images / files)"))
     if review.rerun_available:
         issue_label = _counted_issue(review.remaining_count)
         options.append(
@@ -104,6 +107,13 @@ def run_review_options(review: RunReview) -> tuple[tuple[str, str], ...]:
         )
     options.append((RunReviewAction.EXIT.value, "Exit Dev Loop"))
     return tuple(options)
+
+
+def replyable_issues(review: RunReview) -> tuple[IssueReviewItem, ...]:
+    return tuple(item for item in review.issues if item.status in {
+        IssueStatus.BLOCKED, IssueStatus.FAILED, IssueStatus.WAITING_FOR_INPUT,
+        IssueStatus.CHANGES_REQUESTED,
+    })
 
 
 def render_run_review(review: RunReview, selected_action: RunReviewAction) -> str:
@@ -160,7 +170,11 @@ def _render_recovery_guidance(review: RunReview) -> list[str]:
         return []
     lines = [
         "", "What to do next",
-        "Resolve the recorded blockers before rerunning the unfinished issues.",
+        (
+            "Choose Reply to an issue to answer here, or resolve the blockers before rerunning."
+            if replyable_issues(review)
+            else "Resolve the recorded blockers before rerunning the unfinished issues."
+        ),
     ]
     for item in review.issues:
         if item.status in {IssueStatus.COMPLETED, IssueStatus.WAITING_ON_DEPENDENCY}:
@@ -287,6 +301,8 @@ def _selected_action_summary(
     review: RunReview,
     selected_action: RunReviewAction,
 ) -> str:
+    if selected_action is RunReviewAction.REPLY:
+        return "Press Enter to answer an issue, attach supporting files, and continue."
     if selected_action is RunReviewAction.RERUN_REMAINING:
         issue_label = _counted_issue(review.remaining_count)
         return (

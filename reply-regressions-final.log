@@ -1,0 +1,15 @@
+........................................................................ [ 33%]
+...............................................Fs....................... [ 66%]
+.......................................................................  [100%]
+================================== FAILURES ===================================
+_ CodexCommandSettingsTests.test_connection_retries_consume_one_attempt_execution_budget _
+tests\test_codex_runner.py:360: in test_connection_retries_consume_one_attempt_execution_budget
+    self.assertEqual(execute.call_count, 2)
+E   AssertionError: 1 != 2
+---------------------------- Captured stdout call -----------------------------
+codex exec connection failed on attempt 1; retrying in 0.15 seconds.
+Portable test evidence retained at: E:\devloop-recovery-20260905\.tmp-test-session-lrb12_tc
+Operator installation gates were not run; their required evidence remains open.
+=========================== short test summary info ===========================
+FAILED tests/test_codex_runner.py::CodexCommandSettingsTests::test_connection_retries_consume_one_attempt_execution_budget
+1 failed, 213 passed, 1 skipped in 129.27s (0:02:09)

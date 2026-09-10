@@ -1,0 +1,10 @@
+{
+  "request_id": "28628807-8d55-4b9b-9f19-96b8177d4438",
+  "result": "FAIL",
+  "simulated_backend_invocations": 1,
+  "feedback_characters": 7959,
+  "actual_receipt_identity_and_report_hash": "validated",
+  "source_identity": "frozen to saved snapshot for replay; live source changed after initial read-only validation",
+  "authenticated_agents_launched": 0,
+  "sql_gates_launched": 0
+}

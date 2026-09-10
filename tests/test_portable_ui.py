@@ -3713,7 +3713,7 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("WAITING    0003", review_log)
             self.assertIn("waiting on 0002", review_log)
 
-    async def test_completion_review_defaults_to_rerun_unfinished_issues(
+    async def test_completion_review_defaults_to_reply_for_blocked_issues(
         self,
     ) -> None:
         bridge = PortableRuntimeBridge()
@@ -3736,7 +3736,7 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
             menu = app.query_one("#portable-navigation", OptionList)
             for _ in range(20):
                 await pilot.pause()
-                if menu.option_count == 2:
+                if menu.option_count == 3:
                     break
 
             self.assertEqual(menu.highlighted, 0)
@@ -3752,10 +3752,10 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 selected_actions,
-                [RunReviewAction.RERUN_REMAINING],
+                [RunReviewAction.REPLY],
             )
             self.assertIn(
-                "Press Enter to rerun only the 1 unfinished issue",
+                "Press Enter to answer an issue",
                 str(app.query_one("#portable-detail", Static).render()),
             )
 

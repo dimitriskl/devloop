@@ -122,6 +122,7 @@ class RunReviewTests(unittest.TestCase):
         self.assertEqual(
             run_review_options(review),
             (
+                (RunReviewAction.REPLY.value, "Reply to an issue (text / images / files)"),
                 (RunReviewAction.RERUN_REMAINING.value, "Rerun 2 unfinished issues"),
                 (RunReviewAction.EXIT.value, "Exit Dev Loop"),
             ),

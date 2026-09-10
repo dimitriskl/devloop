@@ -1,0 +1,83 @@
+**********************
+PowerShell transcript start
+Start time: 20260909132717
+Username: DEV02-PC\Dimitris
+RunAs User: DEV02-PC\Dimitris
+Configuration Name: 
+Machine: DEV02-PC (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -WorkingDirectory ~
+Process ID: 20128
+PSVersion: 7.6.5
+PSEdition: Core
+GitCommitId: 7.6.5
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+Transcript started, output file is E:\devloop-recovery-20260905\feedback-handoff-live.log
+
+**********************
+PowerShell transcript end
+End time: 20260909172345
+**********************
+**********************
+PowerShell transcript start
+Start time: 20260909174515
+Username: DEV02-PC\Dimitris
+RunAs User: DEV02-PC\Dimitris
+Configuration Name: 
+Machine: DEV02-PC (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -WorkingDirectory ~
+Process ID: 20128
+PSVersion: 7.6.5
+PSEdition: Core
+GitCommitId: 7.6.5
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+Transcript started, output file is E:\devloop-recovery-20260905\feedback-handoff-live.log
+               [--start-issue START_ISSUE] [--reply] [--max-passes MAX_PASSES]
+               [--blocked-retry-rounds BLOCKED_RETRY_ROUNDS] [--blocked-retry-max-passes BLOCKED_RETRY_MAX_PASSES]
+               [--no-blocked-retry] [--dry-run] [--plain] [--codex CODEX] [--sandbox SANDBOX]
+               [--approval-policy {never,on-request,untrusted,on-failure}]
+               [--self-improvement-wiki-path SELF_IMPROVEMENT_WIKI_PATH]
+               [--self-improvement-max-lessons SELF_IMPROVEMENT_MAX_LESSONS] [--self-improvement-wiki |
+               --no-self-improvement-wiki] [--create-worktree] [--no-worktree] [--worktree-path WORKTREE_PATH]
+               [--branch-name BRANCH_NAME] [--non-interactive]
+devloop: error: unrecognized arguments: - - r e p l y
+**********************
+PowerShell transcript end
+End time: 20260909174516
+**********************
+**********************
+PowerShell transcript start
+Start time: 20260909174919
+Username: DEV02-PC\Dimitris
+RunAs User: DEV02-PC\Dimitris
+Configuration Name: 
+Machine: DEV02-PC (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -WorkingDirectory ~
+Process ID: 20128
+PSVersion: 7.6.5
+PSEdition: Core
+GitCommitId: 7.6.5
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+Transcript started, output file is E:\devloop-recovery-20260905\feedback-handoff-live.log
+
+**********************
+PowerShell transcript end
+End time: 20260909175208
+**********************

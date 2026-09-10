@@ -17,6 +17,7 @@ from .portable_protocol import validated_portable_approval_decisions
 class PortableRuntimeEventKind(str, Enum):
     CHOICE_REQUESTED = "CHOICE_REQUESTED"
     INPUT_REQUESTED = "INPUT_REQUESTED"
+    REPLY_REQUESTED = "REPLY_REQUESTED"
     INTERACTION_COMPLETED = "INTERACTION_COMPLETED"
     RUN_CONTEXT_UPDATED = "RUN_CONTEXT_UPDATED"
     SCREEN_UPDATED = "SCREEN_UPDATED"
@@ -54,6 +55,7 @@ class PortableRuntimeEvent:
     content: str = ""
     is_error: bool = False
     run_context: PortableRunContext | None = None
+    initial_value: str = ""
 
 
 class PortableRuntimeBridge:
@@ -113,6 +115,17 @@ class PortableRuntimeBridge:
             return None
 
     def read_line(self, prompt: str, *, history: Sequence[str] = ()) -> str:
+        return self._read_text(prompt, PortableRuntimeEventKind.INPUT_REQUESTED, history=history)
+
+    def read_reply(self, prompt: str, *, initial_value: str = "") -> str:
+        return self._read_text(
+            prompt, PortableRuntimeEventKind.REPLY_REQUESTED, initial_value=initial_value,
+        )
+
+    def _read_text(
+        self, prompt: str, kind: PortableRuntimeEventKind, *,
+        history: Sequence[str] = (), initial_value: str = "",
+    ) -> str:
         request_id = next(self._request_ids)
         response: Queue[tuple[_PortableInteractionKind, str]] = Queue()
         with self._response_lock:
@@ -121,10 +134,11 @@ class PortableRuntimeBridge:
             self._responses[request_id] = response
         self._event_queue.put(
             PortableRuntimeEvent(
-                kind=PortableRuntimeEventKind.INPUT_REQUESTED,
+                kind=kind,
                 request_id=request_id,
                 prompt=prompt,
                 input_history=tuple(history),
+                initial_value=initial_value,
             )
         )
         interaction, value = response.get()

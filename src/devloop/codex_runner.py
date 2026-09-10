@@ -12,12 +12,14 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any
 
 from .issue_pack import Issue
+from .issue_reply import issue_reply_context
 from .operator_verification import OperatorVerification
 from .portable_execution_backend import (
     ActivityCallback,
@@ -130,7 +132,7 @@ class RoleResult:
         *,
         backend: ExecutionBackendId | None = None,
         provenance: StepAttemptProvenance | None = None,
-    ) -> "RoleResult":
+    ) -> RoleResult:
         """Parse one attempt's role result, naming the backend that produced it.
 
         ``backend`` is what keeps a refusal summary honest in a mixed-backend
@@ -261,9 +263,11 @@ class CodexRunner:
         skill_paths: Iterable[str] | None = None,
         agent_paths: Iterable[str] | None = None,
         step_guidance: str | None = None,
+        verification_evidence: str = "",
     ) -> RoleResult:
         partial_work_context = getattr(self, "_partial_work_context", None)
         self._partial_work_context = None
+        user_reply_context, image_paths = issue_reply_context(self.log_root, issue.number)
         prompt = self.build_prompt(
             role=role,
             issue=issue,
@@ -280,8 +284,10 @@ class CodexRunner:
             skill_paths=skill_paths,
             agent_paths=agent_paths,
             step_guidance=step_guidance,
+            verification_evidence=verification_evidence,
             execution_budget=execution_budget,
             partial_work_context=partial_work_context,
+            user_reply_context=user_reply_context,
         )
 
         logs = _attempt_log_paths(
@@ -318,6 +324,7 @@ class CodexRunner:
                     pass_number=pass_number,
                 ),
                 activity_callback=activity_callback,
+                image_paths=image_paths,
             )
         )
         process = result.process
@@ -466,7 +473,11 @@ class CodexRunner:
         run_context_path: Path | None = None,
     ) -> RoleResult:
         compiler_repo_root = compiler_repo_root or self.repo_root
-        log_root = self.log_root if compiler_repo_root == self.repo_root else wiki_root.parent / ".compiler-runs"
+        log_root = (
+            self.log_root
+            if compiler_repo_root == self.repo_root
+            else wiki_root.parent / ".compiler-runs"
+        )
         log_root.mkdir(parents=True, exist_ok=True)
         prompt = self.build_self_improvement_prompt(
             state_path=state_path,
@@ -544,6 +555,8 @@ class CodexRunner:
         step_guidance: str | None = None,
         execution_budget: ExecutionBudget | None = None,
         partial_work_context: PortablePartialWorkContext | None = None,
+        verification_evidence: str = "",
+        user_reply_context: str = "",
     ) -> str:
         role_config = self.preset.roles.get(role, {})
         execution_role = role_adapter or role
@@ -605,6 +618,14 @@ class CodexRunner:
             "TIMESTAMP": datetime.now().isoformat(timespec="seconds"),
         }
         prompt = render_template(self.bundle.prompts / template_name, values)
+        prompt += user_reply_context
+        if verification_evidence:
+            prompt += (
+                "\n\n## Automatic Verification Evidence\n\n"
+                "Test evidence for this attempt; apply the External verification rules.\n\n"
+                + redact_persisted_evidence(verification_evidence)
+                + "\n"
+            )
         if partial_work_context is not None and partial_work_context.has_content:
             return f"{prompt.rstrip()}\n\n{partial_work_context.to_prompt()}\n"
         return prompt

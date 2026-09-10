@@ -119,6 +119,11 @@ Do not ask the user to run a separate-terminal command or restart Dev Loop.
 The command builds
 and runs `dotnet test --no-restore`; it does not alter connection or encryption settings.
 Use `null` otherwise. Never claim success from skipped tests or MCP connectivity.
-If Step Guidance contains verified operator evidence for the same source inputs,
+If Automatic Verification Evidence contains verified operator evidence for the same source inputs,
 consume that evidence and continue implementation. Changes still require their
 own relevant verification and the normal independent review and QA gates.
+If Automatic Verification Evidence contains failed automatic verification, inspect the actual test
+failure and repair its cause. Request the same gate again after the repair; do not
+substitute a different filter or weaken assertions to avoid it. The runner requires
+fresh passing evidence before accepting completion and will not repeatedly execute
+an unchanged failing gate. Report a concrete remaining blocker if repair is unavailable.

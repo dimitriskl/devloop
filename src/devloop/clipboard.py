@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[bytes]"]
 
@@ -22,8 +23,33 @@ _WINDOWS_SCRIPT = (
 )
 
 
-def _default_runner(command: Sequence[str]) -> "subprocess.CompletedProcess[bytes]":
-    return subprocess.run(list(command), capture_output=True, check=False)
+def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        list(command), capture_output=True, check=False, stdin=subprocess.DEVNULL, timeout=10,
+    )
+
+
+def read_windows_clipboard(
+    *, runner: Runner | None = None, platform_name: str | None = None,
+) -> tuple[tuple[Path, ...], str]:
+    """Read file-drop objects or plain text after an explicit paste action."""
+    if not (platform_name or sys.platform).startswith("win"):
+        return (), ""
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$files = @([System.Windows.Forms.Clipboard]::GetFileDropList()); "
+        "$text = [System.Windows.Forms.Clipboard]::GetText(); "
+        "ConvertTo-Json -Compress -InputObject @{files=$files; text=$text}"
+    )
+    result = (runner or _default_runner)(
+        ["powershell.exe", "-NoProfile", "-STA", "-Command", script],
+    )
+    if result.returncode != 0:
+        raise ValueError("Cannot read the clipboard. Try again or paste a file path.")
+    value = json.loads(result.stdout.decode("utf-8-sig"))
+    return tuple(Path(path) for path in value["files"]), value["text"]
 
 
 def capture_clipboard_image(
@@ -37,11 +63,15 @@ def capture_clipboard_image(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"clipboard-{uuid.uuid4().hex}.png"
 
-    if platform_name.startswith("win"):
-        return _capture_windows(dest, runner)
-    if platform_name.startswith("darwin"):
-        return _capture_macos(dest, runner)
-    return _capture_linux(dest, runner)
+    try:
+        if platform_name.startswith("win"):
+            return _capture_windows(dest, runner)
+        if platform_name.startswith("darwin"):
+            return _capture_macos(dest, runner)
+        return _capture_linux(dest, runner)
+    except subprocess.TimeoutExpired:
+        print("Clipboard capture timed out. Try again or attach a file path.", file=sys.stderr)
+        return None
 
 
 def _capture_windows(dest: Path, runner: Runner) -> Path | None:

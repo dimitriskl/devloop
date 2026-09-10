@@ -26,6 +26,7 @@ from devloop.portable_workflow import (
     default_portable_workflow,
 )
 from devloop.state import LoopStateWriter
+from devloop.verification_feedback import VerificationFailed, raise_for_failed_verification
 
 
 @pytest.fixture
@@ -47,21 +48,24 @@ def gate() -> OperatorVerification:
     )
 
 
-def report(path: Path, *, skipped: bool = False) -> None:
-    passed = 0 if skipped else 2
+def report(path: Path, *, skipped: bool = False, total: int = 2) -> None:
+    passed = 0 if skipped else total
     outcome = "NotExecuted" if skipped else "Passed"
+    names = ("one", "two", *(f"case{index}" for index in range(2, total)))[:total]
+    results = "".join(
+        f'<UnitTestResult testId="{name}" outcome="{outcome}"/>' for name in names
+    )
     path.write_text(
         '<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">'
-        f'<ResultSummary outcome="Completed"><Counters total="2" executed="{passed}" '
-        f'passed="{passed}" failed="0" notExecuted="{2 - passed}"/></ResultSummary>'
-        f'<Results><UnitTestResult testId="one" outcome="{outcome}"/>'
-        f'<UnitTestResult testId="two" outcome="{outcome}"/></Results></TestRun>'
+        f'<ResultSummary outcome="Completed"><Counters total="{total}" executed="{passed}" '
+        f'passed="{passed}" failed="0" notExecuted="{total - passed}"/></ResultSummary>'
+        f"<Results>{results}</Results></TestRun>"
     )
 
 
-def receipt(record: dict, directory: Path, *, skipped: bool = False) -> None:
+def receipt(record: dict, directory: Path, *, skipped: bool = False, total: int = 2) -> None:
     trx = directory / verification.REPORT_FILE
-    report(trx, skipped=skipped)
+    report(trx, skipped=skipped, total=total)
     verification.write_json(
         directory / verification.RECEIPT_FILE,
         {
@@ -72,6 +76,279 @@ def receipt(record: dict, directory: Path, *, skipped: bool = False) -> None:
             "report_sha256": hashlib.sha256(trx.read_bytes()).hexdigest(),
         },
     )
+
+
+def failed_receipt(record: dict, directory: Path) -> None:
+    receipt(record, directory)
+    path = directory / verification.REPORT_FILE
+    path.write_text(path.read_text().replace(
+        'executed="2" passed="2" failed="0"', 'executed="2" passed="0" failed="2"'
+    ).replace('outcome="Passed"/>', 'outcome="Failed"><Output><ErrorInfo>'
+              '<Message>Moq.MockException: TableExistsAsync has no setup; '
+              'Password=secret-value</Message>'
+              '</ErrorInfo></Output></UnitTestResult>'))
+    result_path = directory / verification.RECEIPT_FILE
+    result = verification.read_json(result_path)
+    result.update(exit_code=1, report_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    verification.write_json(result_path, result)
+
+
+def test_saved_test_failure_reaches_coder_before_retest_and_repair_is_verified(
+    repository: Path, gate: OperatorVerification, monkeypatch
+) -> None:
+    handoff, runner, writer, arguments = setup_handoff(repository, gate)
+    key = json.dumps(["0003", "development", 1])
+    record = handoff._create_request(key, gate, arguments)
+    failed_receipt(record, handoff._directory(record))
+    executions = []
+
+    def repair(**kwargs):
+        assert not executions
+        assert "TableExistsAsync" in kwargs["verification_evidence"]
+        assert "secret-value" not in kwargs["verification_evidence"]
+        (repository / "Tests.cs").write_text("class Repaired {}")
+        return RoleResult(status="PASS", summary="Repaired missing mock setup")
+
+    def execute(request_path, **kwargs):
+        executions.append(request_path)
+        receipt(verification.read_json(request_path), request_path.parent)
+        return 0
+
+    runner.run_role.side_effect = repair
+    monkeypatch.setattr(verification, "execute_request", execute)
+    result = OperatorHandoff(runner, writer).run_role(arguments)
+    assert result.status == "PASS"
+    assert result.summary == "Repaired missing mock setup"
+    assert "2 passed, zero skipped" in result.verification_commands[-1]
+    assert runner.run_role.call_count == 1
+    assert len(executions) == 1
+
+
+def test_claimed_repair_that_still_fails_returns_to_worker_instead_of_passing(
+    repository: Path, gate: OperatorVerification, monkeypatch
+) -> None:
+    handoff, runner, _, arguments = setup_handoff(repository, gate)
+    record = handoff._create_request(json.dumps(["0003", "development", 1]), gate, arguments)
+    failed_receipt(record, handoff._directory(record))
+
+    def worker(**kwargs):
+        if runner.run_role.call_count == 1:
+            (repository / "Tests.cs").write_text("class StillBroken {}")
+            return RoleResult(status="PASS")
+        assert "TableExistsAsync" in kwargs["verification_evidence"]
+        return RoleResult(status="FAIL", summary="Repair incomplete")
+
+    def execute(request_path, **kwargs):
+        failed_receipt(verification.read_json(request_path), request_path.parent)
+        return 1
+
+    runner.run_role.side_effect = worker
+    execution = Mock(side_effect=execute)
+    monkeypatch.setattr(verification, "execute_request", execution)
+    result = handoff.run_role(arguments)
+    assert result.status == "FAIL"
+    assert result.summary == "Repair incomplete"
+    assert execution.call_count == 1
+    assert runner.run_role.call_count == 2
+
+
+@pytest.mark.parametrize("response", ["PASS", "same-gate", "different-gate"])
+def test_worker_cannot_bypass_failed_gate_or_repeat_it_without_changes(
+    repository: Path, gate: OperatorVerification, monkeypatch, response: str
+) -> None:
+    handoff, runner, _, arguments = setup_handoff(repository, gate)
+    requested_gate = gate
+    if response == "different-gate":
+        requested_gate = OperatorVerification.parse(gate.to_dict() | {"test_filter": "Other"})
+
+    def worker(**kwargs):
+        if runner.run_role.call_count == 1:
+            return RoleResult(status="BLOCKED", operator_verification=gate)
+        if response == "different-gate":
+            (repository / "Tests.cs").write_text("class Changed {}")
+        return RoleResult(
+            status="PASS" if response == "PASS" else "BLOCKED",
+            operator_verification=None if response == "PASS" else requested_gate,
+        )
+
+    def execute(request_path, **kwargs):
+        failed_receipt(verification.read_json(request_path), request_path.parent)
+        return 1
+
+    execution = Mock(side_effect=execute)
+    runner.run_role.side_effect = worker
+    monkeypatch.setattr(verification, "execute_request", execution)
+    assert handoff.run_role(arguments).status == "FAIL"
+    assert runner.run_role.call_count == 2
+    assert execution.call_count == 1
+
+
+def test_worker_may_raise_an_undercounted_expectation_on_an_otherwise_equal_gate(
+    repository: Path, gate: OperatorVerification, monkeypatch
+) -> None:
+    """A filter matching more tests than declared must stay recoverable.
+
+    Raising ``expected_tests`` on a gate that is otherwise identical strengthens
+    what the gate demands, so unlike a weaker filter it is no way around the
+    failure. Discarding it instead deadlocks the issue: the worker cannot make
+    ``executed`` match a wrong expectation without deleting real tests.
+    """
+    corrected = OperatorVerification.parse(gate.to_dict() | {"expected_tests": 3})
+    handoff, runner, _, arguments = setup_handoff(repository, gate)
+
+    def worker(**kwargs):
+        if runner.run_role.call_count == 1:
+            return RoleResult(status="BLOCKED", operator_verification=gate)
+        if runner.run_role.call_count == 2:
+            return RoleResult(status="BLOCKED", operator_verification=corrected)
+        return RoleResult(status="PASS", summary="Implementation completed")
+
+    def execute(request_path, **kwargs):
+        # The filter matches three tests however many the worker declared.
+        receipt(verification.read_json(request_path), request_path.parent, total=3)
+        return 0
+
+    runner.run_role.side_effect = worker
+    execution = Mock(side_effect=execute)
+    monkeypatch.setattr(verification, "execute_request", execution)
+    result = handoff.run_role(arguments)
+    assert result.status == "PASS"
+    assert "3 passed, zero skipped" in runner.run_role.call_args.kwargs["verification_evidence"]
+    assert runner.run_role.call_count == 3
+    assert execution.call_count == 2
+
+
+def test_worker_cannot_lower_a_failed_expectation_to_match_fewer_tests(
+    repository: Path, gate: OperatorVerification, monkeypatch
+) -> None:
+    """Lowering ``expected_tests`` weakens the gate, so it stays a bypass."""
+    weakened = OperatorVerification.parse(gate.to_dict() | {"expected_tests": 1})
+    handoff, runner, _, arguments = setup_handoff(repository, gate)
+
+    def worker(**kwargs):
+        if runner.run_role.call_count == 1:
+            return RoleResult(status="BLOCKED", operator_verification=gate)
+        return RoleResult(status="BLOCKED", operator_verification=weakened)
+
+    def execute(request_path, **kwargs):
+        receipt(verification.read_json(request_path), request_path.parent, total=1)
+        return 0
+
+    runner.run_role.side_effect = worker
+    execution = Mock(side_effect=execute)
+    monkeypatch.setattr(verification, "execute_request", execution)
+    assert handoff.run_role(arguments).status == "FAIL"
+    assert runner.run_role.call_count == 2
+    assert execution.call_count == 1
+
+
+def test_pause_during_repair_replays_failure_without_reexecuting_tests(
+    repository: Path, gate: OperatorVerification, monkeypatch
+) -> None:
+    handoff, runner, writer, arguments = setup_handoff(repository, gate)
+    record = handoff._create_request(json.dumps(["0003", "development", 1]), gate, arguments)
+    failed_receipt(record, handoff._directory(record))
+    execute = Mock(side_effect=AssertionError("Must give the saved failure to the worker"))
+    monkeypatch.setattr(verification, "execute_request", execute)
+    runner.run_role.side_effect = PortableRuntimeStopped("Paused during repair")
+    with pytest.raises(PortableRuntimeStopped):
+        handoff.run_role(arguments.copy())
+    runner.run_role.side_effect = [RoleResult(status="FAIL", summary="Needs source repair")]
+    result = OperatorHandoff(runner, writer).run_role(arguments.copy())
+    assert result.status == "FAIL"
+    assert "TableExistsAsync" in runner.run_role.call_args.kwargs["verification_evidence"]
+    assert "TableExistsAsync" in result.fix_list[-1]
+    assert not execute.called
+
+
+@pytest.mark.parametrize("failed_role", ["reviewer", "qa"])
+def test_failed_review_gate_routes_evidence_to_development_and_retests(
+    repository: Path, gate: OperatorVerification, monkeypatch, failed_role: str
+) -> None:
+    handoff, runner, _, _ = setup_handoff(repository, gate)
+    issue = Issue("0003", "SQL implementation", repository / "issue.md", False)
+    issue.path.write_text("# SQL implementation\n")
+    repairing = False
+    executions = []
+
+    def worker(**arguments):
+        nonlocal repairing
+        if arguments["role"] == failed_role and arguments["pass_number"] == 1:
+            if "Automatic verification FAILED" in (arguments.get("verification_evidence") or ""):
+                return RoleResult(status="FAIL", summary="Test repair required")
+            return RoleResult(status="BLOCKED", operator_verification=gate)
+        if arguments["role"] == "coder" and arguments["pass_number"] == 2 and not repairing:
+            assert "TableExistsAsync" in "\n".join(arguments["fix_list"])
+            repairing = True
+            (repository / "Tests.cs").write_text("class Repaired {}")
+            return RoleResult(status="BLOCKED", operator_verification=gate)
+        return RoleResult(status="PASS")
+
+    def execute(request_path, **kwargs):
+        record = verification.read_json(request_path)
+        executions.append(record)
+        if repairing:
+            receipt(record, request_path.parent)
+            return 0
+        failed_receipt(record, request_path.parent)
+        return 1
+
+    class Adapter:
+        def run_role(self, **arguments):
+            return handoff.run_role(arguments)
+
+    runner.run_role.side_effect = worker
+    monkeypatch.setattr(verification, "execute_request", execute)
+    execution = PortableWorkflowExecutor(
+        default_portable_workflow(), default_portable_component_catalog(), Adapter()
+    ).run(issue, pass_number=1, max_passes=2)
+    assert execution.issue_status is IssueStatus.COMPLETED
+    assert len(executions) == 2
+    assert not any(attempt.outcome is StepOutcome.BLOCKED for attempt in execution.attempts)
+    assert any(attempt.outcome is StepOutcome.CHANGES_REQUESTED for attempt in execution.attempts)
+
+
+@pytest.mark.parametrize("change", ["request", "hash", "source", "escape"])
+def test_failed_evidence_must_match_request_and_current_sources(
+    repository: Path, gate: OperatorVerification, change: str
+) -> None:
+    handoff, _, _, arguments = setup_handoff(repository, gate)
+    record = handoff._create_request("key", gate, arguments)
+    directory = handoff._directory(record)
+    failed_receipt(record, directory)
+    path = directory / verification.RECEIPT_FILE
+    result = verification.read_json(path)
+    if change == "request":
+        result["request_id"] = "wrong"
+    elif change == "hash":
+        result["report_sha256"] = "wrong"
+    elif change == "source":
+        (repository / "Tests.cs").write_text("class Changed {}")
+    else:
+        result["report_path"] = "../outside.trx"
+    verification.write_json(path, result)
+    with pytest.raises(ValueError) as raised:
+        raise_for_failed_verification(record, directory)
+    assert not isinstance(raised.value, VerificationFailed)
+
+
+def test_build_failure_without_trx_is_returned_as_repair_feedback(
+    repository: Path, gate: OperatorVerification
+) -> None:
+    handoff, _, _, arguments = setup_handoff(repository, gate)
+    record = handoff._create_request("key", gate, arguments)
+    directory = handoff._directory(record)
+
+    def build_failure(command, checkout, output):
+        (output / "verification.log").write_text("error CS1002: ; expected; Password=hidden")
+        return 1
+
+    assert verification.execute_request(
+        directory / verification.REQUEST_FILE, run_command=build_failure
+    ) == 1
+    with pytest.raises(VerificationFailed, match="CS1002") as raised:
+        raise_for_failed_verification(record, directory)
+    assert "hidden" not in str(raised.value)
 
 
 def setup_handoff(repository: Path, gate: OperatorVerification) -> tuple:
@@ -115,7 +392,7 @@ def test_authorized_gate_executes_without_operator_interaction(
     assert handoff.run_role(arguments).status == "PASS"
     assert execute_mock.call_count == 1
     assert runner.run_role.call_count == 2
-    assert "2 passed, zero skipped" in runner.run_role.call_args.kwargs["step_guidance"]
+    assert "2 passed, zero skipped" in runner.run_role.call_args.kwargs["verification_evidence"]
     assert not runtime.choose.called
 
 
@@ -141,9 +418,11 @@ def test_automatic_failure_returns_blocker_without_prompt_or_repeated_execution(
     runtime = Mock()
     monkeypatch.setattr(operator_handoff, "active_portable_runtime", lambda: runtime)
     result = handoff.run_role(arguments)
-    assert result.status == "BLOCKED"
+    repairable = failure in {"skipped", "exit"}
+    assert result.status == ("FAIL" if repairable else "BLOCKED")
     assert result.fix_list
-    assert execution.call_count == runner.run_role.call_count == 1
+    assert execution.call_count == 1
+    assert runner.run_role.call_count == (2 if repairable else 1)
     assert not runtime.wait_for_retry.called
     assert not runtime.choose.called
 
@@ -285,7 +564,7 @@ def test_execution_replaces_screen_then_resumes_same_step(
     assert first.kwargs["step_attempt_id"] == second.kwargs["step_attempt_id"] == "stable-attempt"
     assert first.kwargs["pass_number"] == second.kwargs["pass_number"] == 1
     assert "Keep scope." in second.kwargs["step_guidance"]
-    assert "2 passed, zero skipped" in second.kwargs["step_guidance"]
+    assert "2 passed, zero skipped" in second.kwargs["verification_evidence"]
     assert len(writer.state[operator_handoff.STATE_KEY]) == 1
 
 

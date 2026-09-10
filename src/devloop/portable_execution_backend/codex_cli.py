@@ -614,6 +614,8 @@ class CodexCliExecutionBackend(ExecutionBackend):
             message_path=request.message_path,
             execution_settings=request.execution_settings,
         )
+        for image_path in request.image_paths:
+            command[-1:-1] = ["-i", str(image_path)]
         process = run_codex_exec_with_connection_retries(
             command=command,
             prompt=request.prompt,

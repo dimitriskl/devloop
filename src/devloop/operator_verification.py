@@ -26,6 +26,7 @@ class VerificationKind(str, Enum):
 REQUEST_FILE = "request.json"
 RECEIPT_FILE = "result.json"
 REPORT_FILE = "verification.trx"
+TRX_NAMESPACE = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 MAX_REPORT_BYTES = 20 * 1024 * 1024
 GIT_INSPECTION_TIMEOUT_SECONDS = 30
 SOURCE_EXTENSIONS = frozenset(
@@ -212,15 +213,19 @@ def dotnet_command(request: dict[str, Any], directory: Path) -> list[str]:
     ]
 
 
-def validate_report(report: Path, expected: int) -> None:
+def read_report(report: Path) -> ET.Element:
     if report.stat().st_size > MAX_REPORT_BYTES:
         raise ValueError("TRX exceeds the size limit.")
     data = report.read_bytes()
     # Do not permit entities/DTDs, including UTF-16 encoded declarations.
     if b"<!DOCTYPE" in data.replace(b"\0", b"").upper():
         raise ValueError("TRX must not contain a DTD.")
-    root = ET.fromstring(data)
-    ns = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+    return ET.fromstring(data)
+
+
+def validate_report(report: Path, expected: int) -> None:
+    root = read_report(report)
+    ns = TRX_NAMESPACE
     counters = root.find(f"{ns}ResultSummary/{ns}Counters")
     results = root.findall(f"{ns}Results/{ns}UnitTestResult")
     if counters is None:
