@@ -38,7 +38,7 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["devloop*"]
+include = ["devloop*", "devloopv2*"]
 
 [tool.setuptools.package-data]
 "devloop.workflows" = ["*.json"]

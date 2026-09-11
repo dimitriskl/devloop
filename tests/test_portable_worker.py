@@ -9,7 +9,11 @@ from typing import Any
 from unittest import mock
 
 from devloop import cli
-from devloop.portable_protocol import PortableProtocolError, PortableProtocolFrame
+from devloop.portable_protocol import (
+    MAX_PORTABLE_PROTOCOL_TEXT_CHARACTERS,
+    PortableProtocolError,
+    PortableProtocolFrame,
+)
 from devloop.portable_runtime import PortableRuntimeStopped, portable_runtime_session
 from devloop.portable_worker import PortableWorkerRuntimeBridge
 from devloop.statusui import Stage
@@ -243,6 +247,28 @@ class PortableWorkerRuntimeBridgeTests(unittest.TestCase):
             for line in event_stream.getvalue().splitlines()
         ]
         self.assertEqual(sequences, [1, 2])
+
+    def test_write_output_chunks_content_over_the_protocol_text_limit(self) -> None:
+        event_stream = io.StringIO()
+        bridge = PortableWorkerRuntimeBridge(
+            "session-oversized-output",
+            command_stream=io.StringIO(),
+            event_stream=event_stream,
+        )
+        oversized = "a" * (MAX_PORTABLE_PROTOCOL_TEXT_CHARACTERS * 2 + 5)
+
+        bridge.write_output(oversized, is_error=False)
+
+        frames = [json.loads(line) for line in event_stream.getvalue().splitlines()]
+        self.assertEqual([frame["kind"] for frame in frames], ["SAFE_OUTPUT"] * 3)
+        self.assertEqual([frame["sequence"] for frame in frames], [1, 2, 3])
+        self.assertEqual(
+            "".join(frame["payload"]["content"] for frame in frames), oversized
+        )
+        for frame in frames[:-1]:
+            self.assertEqual(
+                len(frame["payload"]["content"]), MAX_PORTABLE_PROTOCOL_TEXT_CHARACTERS
+            )
 
 
 if __name__ == "__main__":

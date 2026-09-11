@@ -29,20 +29,13 @@ $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
 else {
     "$pythonPath$([IO.Path]::PathSeparator)$env:PYTHONPATH"
 }
-$env:DEVLOOP_UI_MODE = if (
-    -not [Console]::IsInputRedirected -and
-    -not [Console]::IsOutputRedirected
-) {
-    'application'
-}
-else {
-    'plain'
-}
+# Dev Loop has a single interactive mode; there is no redirected-output variant.
+$env:DEVLOOP_UI_MODE = 'application'
 
 if ($Help) {
-    & $python -B -m devloop @RemainingArgs --help
+    & $python -B -m devloopv2 @RemainingArgs --help
     exit $LASTEXITCODE
 }
 
-& $python -B -m devloop @RemainingArgs
+& $python -B -m devloopv2 @RemainingArgs
 exit $LASTEXITCODE

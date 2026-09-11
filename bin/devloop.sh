@@ -19,12 +19,9 @@ if [ ! -x "$PYTHON_BIN" ]; then
   exit 1
 fi
 export PYTHONPATH="$BUNDLE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-if [[ -t 0 && -t 1 ]]; then
-  export DEVLOOP_UI_MODE=application
-else
-  export DEVLOOP_UI_MODE=plain
-fi
+# Dev Loop has a single interactive mode; there is no redirected-output variant.
+export DEVLOOP_UI_MODE=application
 
-exec "$PYTHON_BIN" -B -m devloop "$@"
+exec "$PYTHON_BIN" -B -m devloopv2 "$@"
 
 

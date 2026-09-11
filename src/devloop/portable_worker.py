@@ -16,6 +16,7 @@ from typing import Any, BinaryIO, TextIO
 
 from .portable_protocol import (
     MAX_PORTABLE_PROTOCOL_FRAME_BYTES,
+    MAX_PORTABLE_PROTOCOL_TEXT_CHARACTERS,
     PORTABLE_PROTOCOL_VERSION,
     PortableApprovalDecision,
     PortableProtocolError,
@@ -239,10 +240,11 @@ class PortableWorkerRuntimeBridge:
         self._send(WorkerMessageKind.STATUS, payload)
 
     def write_output(self, content: str, *, is_error: bool) -> None:
-        if content:
+        limit = MAX_PORTABLE_PROTOCOL_TEXT_CHARACTERS
+        for start in range(0, len(content), limit):
             self._send(
                 WorkerMessageKind.SAFE_OUTPUT,
-                {"content": content, "is_error": is_error},
+                {"content": content[start : start + limit], "is_error": is_error},
             )
 
     def set_content_size(self, columns: int, rows: int) -> None:
@@ -894,4 +896,7 @@ def _capture_durable_checkpoint(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # os._exit bypasses interpreter finalization: the control-reader daemon
+    # thread stays blocked on stdin, and letting normal shutdown run into it
+    # crashes the process on Windows instead of exiting with main()'s code.
+    os._exit(main())
