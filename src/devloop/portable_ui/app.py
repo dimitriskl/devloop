@@ -97,6 +97,10 @@ SESSION_FORGET_ID = "__session_forget__"
 SESSION_ACTIONS_BACK_ID = "__session_actions_back__"
 SESSION_ACTION_CONFIRM_ID = "__session_action_confirm__"
 SESSION_ACTION_CANCEL_ID = "__session_action_cancel__"
+_SLASH_COMMANDS = (
+    ("/close", "Close Dev Loop"),
+    ("/exit", "Exit Dev Loop"),
+)
 STALE_SESSION_INPUT_MESSAGE = (
     "INPUT NOT SENT: That selection no longer belongs to the active input request."
 )
@@ -431,6 +435,22 @@ class PortableApplicationShell(App[None]):
         border: solid #ffffff;
     }
 
+    #portable-slash-commands {
+        display: none;
+        height: auto;
+        max-height: 4;
+        margin: 0 1;
+        border: solid #ffffff;
+        background: #000000;
+        color: #ffffff;
+    }
+
+    #portable-slash-commands > .option-list--option-highlighted {
+        background: #ffffff;
+        color: #000000;
+        text-style: bold;
+    }
+
     #portable-status {
         height: 1;
         padding: 0 1;
@@ -631,6 +651,7 @@ class PortableApplicationShell(App[None]):
                         markup=False,
                         max_lines=100,
                     )
+                    yield OptionList(id="portable-slash-commands")
                     yield PortableRequestInput(id="portable-input")
             yield Static("STARTING", id="portable-status")
             yield Static(
@@ -2057,6 +2078,7 @@ class PortableApplicationShell(App[None]):
             key: sanitize_terminal_text(label, preserve_newlines=False)
             for key, label in event.options
         }
+        self._hide_slash_command_menu()
         input_widget = self.query_one("#portable-input", Input)
         input_widget.display = False
         menu = self.query_one("#portable-navigation", OptionList)
@@ -2094,6 +2116,7 @@ class PortableApplicationShell(App[None]):
         self._shortcut_commands = {}
         self._input_history = event.input_history
         self._input_history_position = len(self._input_history)
+        self._hide_slash_command_menu()
         self.query_one("#portable-navigation", OptionList).display = False
         input_widget = self.query_one("#portable-input", Input)
         input_widget.placeholder = event.prompt
@@ -2106,6 +2129,83 @@ class PortableApplicationShell(App[None]):
             "Enter Confirm | Up/Down History | Alt+V Screenshot | Esc Cancel"
         )
 
+    @on(Input.Changed, "#portable-input")
+    def refresh_slash_command_menu(self, event: Input.Changed) -> None:
+        input_widget = event.input
+        if not input_widget.display:
+            return
+        matching_commands = self._matching_slash_commands(event.value)
+        menu = self.query_one("#portable-slash-commands", OptionList)
+        if not matching_commands:
+            self._hide_slash_command_menu()
+            self.query_one("#portable-actions", Static).update(
+                "Enter Confirm | Up/Down History | Alt+V Screenshot | Esc Cancel"
+            )
+            return
+        selected_id = (
+            menu.get_option_at_index(menu.highlighted).id
+            if menu.highlighted is not None and menu.highlighted < menu.option_count
+            else None
+        )
+        menu.clear_options()
+        menu.add_options(
+            [
+                Option(f"{command:<8} {description}", id=command)
+                for command, description in matching_commands
+            ]
+        )
+        menu.highlighted = next(
+            (
+                index
+                for index, (command, _description) in enumerate(matching_commands)
+                if command == selected_id
+            ),
+            0,
+        )
+        menu.display = True
+        self.query_one("#portable-actions", Static).update(
+            "Enter Run command | Up/Down Choose | Esc Close menu"
+        )
+
+    @staticmethod
+    def _matching_slash_commands(value: str) -> tuple[tuple[str, str], ...]:
+        query = value.casefold()
+        if not query.startswith("/"):
+            return ()
+        return tuple(
+            (command, description)
+            for command, description in _SLASH_COMMANDS
+            if command.startswith(query)
+        )
+
+    def _hide_slash_command_menu(self) -> bool:
+        menu = self.query_one("#portable-slash-commands", OptionList)
+        was_visible = menu.display
+        menu.display = False
+        menu.clear_options()
+        return was_visible
+
+    def _selected_slash_command(self, value: str) -> str | None:
+        normalized = value.strip().casefold()
+        matching_commands = self._matching_slash_commands(normalized)
+        if not matching_commands:
+            return None
+        if any(command == normalized for command, _description in matching_commands):
+            return normalized
+        menu = self.query_one("#portable-slash-commands", OptionList)
+        highlighted = menu.highlighted
+        if highlighted is None or highlighted >= len(matching_commands):
+            return matching_commands[0][0]
+        return matching_commands[highlighted][0]
+
+    def _run_selected_slash_command(self, value: str) -> bool:
+        command = self._selected_slash_command(value)
+        if command is None:
+            return False
+        self._hide_slash_command_menu()
+        self.action_request_stop()
+        return True
+
     def on_key(self, event: events.Key) -> None:
         input_widget = self.query_one("#portable-input", Input)
         if self.focused is not input_widget or not input_widget.display:
@@ -2116,6 +2216,17 @@ class PortableApplicationShell(App[None]):
             ):
                 event.prevent_default()
                 event.stop()
+            return
+        slash_commands = self.query_one("#portable-slash-commands", OptionList)
+        if slash_commands.display and event.key in {"up", "down"}:
+            highlighted = slash_commands.highlighted or 0
+            direction = -1 if event.key == "up" else 1
+            slash_commands.highlighted = max(
+                0,
+                min(slash_commands.option_count - 1, highlighted + direction),
+            )
+            event.prevent_default()
+            event.stop()
             return
         if event.key == "up" and self._input_history:
             self._input_history_position = max(
@@ -2267,8 +2378,15 @@ class PortableApplicationShell(App[None]):
         option_label = self._option_labels.get(option_id, option_id)
         self._respond(request_id, option_id, f"Accepted: {option_label}")
 
+    @on(OptionList.OptionSelected, "#portable-slash-commands")
+    def select_slash_command(self, event: OptionList.OptionSelected) -> None:
+        if isinstance(event.option.id, str):
+            self._run_selected_slash_command(event.option.id)
+
     @on(Input.Submitted, "#portable-input")
     def submit_input(self, event: Input.Submitted) -> None:
+        if self._run_selected_slash_command(event.value):
+            return
         if self._session_supervisor is not None and self._relink_session_id is not None:
             event.input.display = False
             self._submit_relink(event.value)
@@ -2346,6 +2464,13 @@ class PortableApplicationShell(App[None]):
         self._respond(request_id, event.value, "Input accepted")
 
     def action_back(self) -> None:
+        if self._hide_slash_command_menu():
+            input_widget = self.query_one("#portable-input", Input)
+            input_widget.focus()
+            self.query_one("#portable-actions", Static).update(
+                "Enter Confirm | Up/Down History | Alt+V Screenshot | Esc Cancel"
+            )
+            return
         if self._session_supervisor is not None:
             if self._relink_session_id is not None:
                 session_id = self._relink_session_id
@@ -2615,6 +2740,7 @@ class PortableApplicationShell(App[None]):
         request_id = self._active_request_id
         if request_id is None or not input_widget.display:
             return
+        self._hide_slash_command_menu()
         input_widget.display = False
         self._respond(request_id, "/paste", "Attaching screenshot")
 

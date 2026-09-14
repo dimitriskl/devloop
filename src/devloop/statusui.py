@@ -79,6 +79,22 @@ _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _DELIVERY_STAGES = (Stage.DEVELOPMENT, Stage.REVIEW, Stage.QA)
 _STATUS_FIELD_WIDTH = max(len(status.value) for status in DashboardStatus) + 2
 _STAGE_FIELD_WIDTH = max(len(stage.value) for stage in _DELIVERY_STAGES)
+_CODEX_UPDATE_PREFIX = "Codex update: "
+_GENERIC_CODEX_ACTIVITY = frozenset(
+    {
+        "Codex is reasoning about the task.",
+        "Running a repository command.",
+        "Repository command finished.",
+        "Applying repository file changes.",
+        "Repository file changes applied.",
+        "Using an external tool.",
+        "External tool call finished.",
+        "Searching the web.",
+        "Web search finished.",
+        "Updating the execution plan.",
+        "Execution plan updated.",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -125,6 +141,7 @@ class WorkflowProgressActivity:
     event_freshness_seconds: float
     safe_text: str
     attempt_elapsed_seconds: float = 0.0
+    detail_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -171,6 +188,7 @@ def project_workflow_progress(
     active_elapsed_seconds: float = 0.0,
     event_freshness_seconds: float = 0.0,
     activity: str = "Waiting for the first Codex update.",
+    activity_detail: str = "",
     issue_title: str = "",
     issue_position: int = 0,
     issue_total: int = 0,
@@ -301,6 +319,7 @@ def project_workflow_progress(
             event_freshness_seconds=max(0.0, event_freshness_seconds),
             safe_text=_safe_progress_text(activity),
             attempt_elapsed_seconds=max(0.0, active_elapsed_seconds),
+            detail_text=_safe_progress_text(activity_detail),
         ),
         issue_title=_safe_progress_text(issue_title),
         issue_position=max(0, issue_position),
@@ -422,6 +441,10 @@ def _terminal_safe_workflow_progress(
             projection.activity,
             safe_text=_safe_progress_text(
                 projection.activity.safe_text,
+                max_length=300,
+            ),
+            detail_text=_safe_progress_text(
+                projection.activity.detail_text,
                 max_length=300,
             ),
         ),
@@ -786,6 +809,14 @@ def render_workflow_progress(
                 unicode=unicode,
             )
         )
+        if projection.activity.detail_text:
+            lines.extend(
+                _wrap_plain_text(
+                    "Last agent update: "
+                    f"{_safe_progress_text(projection.activity.detail_text)}",
+                    safe_width,
+                )
+            )
     lines.append(rule)
 
     if not color:
@@ -854,6 +885,7 @@ class IssueDashboardSnapshot:
     elapsed_seconds: float = 0.0
     inactivity_seconds: float = 0.0
     activity: str = "Waiting for the first Codex update."
+    activity_detail: str = ""
     max_step_rows: int | None = None
     scheduler_summary: str = ""
 
@@ -888,6 +920,7 @@ def render_issue_dashboard(
         ),
         issue_history=_safe_issue_history(snapshot.issue_history),
         activity=_safe_progress_text(snapshot.activity, max_length=300),
+        activity_detail=_safe_progress_text(snapshot.activity_detail, max_length=300),
         scheduler_summary=_safe_progress_text(
             snapshot.scheduler_summary,
             max_length=200,
@@ -1006,9 +1039,16 @@ def render_issue_dashboard(
                 safe_width,
                 unicode=unicode,
             ),
-            rule_character * safe_width,
         )
     )
+    if snapshot.activity_detail:
+        plain_lines.extend(
+            _wrap_plain_text(
+                f"Last agent update: {snapshot.activity_detail}",
+                safe_width,
+            )
+        )
+    plain_lines.append(rule_character * safe_width)
 
     if not color:
         return "\n".join(plain_lines)
@@ -1110,6 +1150,45 @@ def _fit_plain_text(text: str, width: int, *, unicode: bool) -> str:
     return f"{''.join(characters)}{ellipsis}"
 
 
+def _wrap_plain_text(text: str, width: int) -> list[str]:
+    """Wrap terminal-safe text by display width without losing its tail."""
+    safe_width = max(1, width)
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if display_width(candidate) <= safe_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        while display_width(word) > safe_width:
+            prefix, word = _split_plain_text_prefix(word, safe_width)
+            lines.append(prefix)
+        current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _split_plain_text_prefix(text: str, width: int) -> tuple[str, str]:
+    used_width = 0
+    split_at = 0
+    for index, character in enumerate(text):
+        character_width = display_width(character)
+        if used_width + character_width > width:
+            break
+        used_width += character_width
+        split_at = index + 1
+    if split_at == 0:
+        return text[:1], text[1:]
+    return text[:split_at], text[split_at:]
+
+
 def _color_status_word(text: str, status: DashboardStatus) -> str:
     color = {
         DashboardStatus.PASS: _PASS_COLOR,
@@ -1181,6 +1260,7 @@ def _live_workflow_progress(
     issue_position: int,
     issue_total: int,
     issue_history: tuple[IssueResultSummary, ...] = (),
+    activity_detail: str = "",
 ) -> WorkflowProgress | None:
     if progress is None:
         return None
@@ -1205,6 +1285,7 @@ def _live_workflow_progress(
             event_freshness_seconds=max(0.0, inactivity_seconds),
             safe_text=_safe_progress_text(activity),
             attempt_elapsed_seconds=max(0.0, elapsed_seconds),
+            detail_text=_safe_progress_text(activity_detail),
         ),
         issue_title=_safe_progress_text(issue_title),
         issue_position=max(0, issue_position),
@@ -1306,6 +1387,8 @@ class IssueDashboard:
         self._active_stage = Stage.DEVELOPMENT
         self._pass_number = 1
         self._activity = "Waiting for the first Codex update."
+        self._activity_detail = ""
+        self._last_agent_update = ""
         self._started_at = self._clock()
         self._last_activity_at: float | None = None
         self._frame_index = 0
@@ -1332,6 +1415,8 @@ class IssueDashboard:
             self._started_at = self._clock()
             self._last_activity_at = None
             self._activity = "Waiting for the first Codex update."
+            self._activity_detail = ""
+            self._last_agent_update = ""
             active_index = PIPELINE.index(stage)
             for candidate in _DELIVERY_STAGES:
                 if candidate is stage:
@@ -1373,6 +1458,8 @@ class IssueDashboard:
             self._active_stage = Stage.DEVELOPMENT
             self._pass_number = 1
             self._activity = "Waiting for the first Codex update."
+            self._activity_detail = ""
+            self._last_agent_update = ""
             self._started_at = self._clock()
             self._last_activity_at = None
             self._render_locked()
@@ -1397,6 +1484,7 @@ class IssueDashboard:
         with self._lock:
             if activity:
                 self._activity = _safe_progress_text(activity)
+                self._activity_detail = ""
                 self._last_activity_at = self._clock()
             self._pending_last_result = IssueResultSummary(
                 issue_number=self._issue_number,
@@ -1435,6 +1523,8 @@ class IssueDashboard:
                 self._started_at = self._clock()
                 self._last_activity_at = None
                 self._activity = "Waiting for the first Codex update."
+                self._activity_detail = ""
+                self._last_agent_update = ""
             self._render_locked()
 
     def show_scheduler_status(self, summary: str) -> None:
@@ -1467,7 +1557,18 @@ class IssueDashboard:
             activity = event.activity if event is not None else None
             if activity:
                 normalized = _safe_progress_text(activity)
-                self._activity = normalized.removeprefix("Codex update: ")
+                if normalized.startswith(_CODEX_UPDATE_PREFIX):
+                    self._last_agent_update = normalized.removeprefix(
+                        _CODEX_UPDATE_PREFIX
+                    )
+                    self._activity = self._last_agent_update
+                    self._activity_detail = ""
+                elif normalized in _GENERIC_CODEX_ACTIVITY and self._last_agent_update:
+                    self._activity = normalized
+                    self._activity_detail = self._last_agent_update
+                else:
+                    self._activity = normalized
+                    self._activity_detail = ""
                 self._render_locked()
 
     def finish_role(self, stage: Stage, status: str, summary: str = "") -> None:
@@ -1488,6 +1589,7 @@ class IssueDashboard:
                 self._activity = _safe_progress_text(summary)
             else:
                 self._activity = f"{stage.value.title()} finished: {parsed_status.value}."
+            self._activity_detail = ""
             self._render_locked()
 
     def close(self, activity: str | None = None) -> None:
@@ -1496,6 +1598,7 @@ class IssueDashboard:
             if activity:
                 with self._lock:
                     self._activity = _safe_progress_text(activity)
+                    self._activity_detail = ""
                     self._last_activity_at = self._clock()
                     self._render_locked()
             self._opened = False
@@ -1505,6 +1608,7 @@ class IssueDashboard:
             if self._workflow_progress is not None and activity:
                 with self._lock:
                     self._activity = _safe_progress_text(activity)
+                    self._activity_detail = ""
                     self._last_activity_at = self._clock()
                     self._render_locked()
             return
@@ -1513,6 +1617,7 @@ class IssueDashboard:
         with self._lock:
             if activity:
                 self._activity = _safe_progress_text(activity)
+                self._activity_detail = ""
                 self._last_activity_at = self._clock()
             self._render_locked()
             try:
@@ -1546,6 +1651,7 @@ class IssueDashboard:
         """Restore the active role after verification without resetting its duration."""
         with self._lock:
             self._activity = "Continuing after automatic verification."
+            self._activity_detail = ""
             self._last_activity_at = self._clock()
             self._render_locked()
         self._start_animation()
@@ -1565,10 +1671,18 @@ class IssueDashboard:
         self._thread = None
 
     def _animate(self) -> None:
-        while not self._stop_requested.wait(self._frame_seconds):
-            with self._lock:
-                self._frame_index += 1
-                self._render_locked()
+        from .portable_runtime import PortableRuntimeStopped
+
+        try:
+            while not self._stop_requested.wait(self._frame_seconds):
+                with self._lock:
+                    self._frame_index += 1
+                    self._render_locked()
+        except PortableRuntimeStopped:
+            # A pause is expected to interrupt a redraw when the worker bridge
+            # checks its lifecycle request. The workflow thread owns the durable
+            # pause checkpoint; the display thread must end silently.
+            self._stop_requested.set()
 
     def _render_locked(self) -> None:
         if not self._enabled and self._workflow_progress is None:
@@ -1607,6 +1721,7 @@ class IssueDashboard:
                     elapsed_seconds=elapsed_seconds,
                     inactivity_seconds=inactivity_seconds,
                     activity=self._activity,
+                    activity_detail=self._activity_detail,
                     issue_title=self._issue_title,
                     issue_position=self._position,
                     issue_total=self._total,
@@ -1616,6 +1731,7 @@ class IssueDashboard:
                 elapsed_seconds=elapsed_seconds,
                 inactivity_seconds=inactivity_seconds,
                 activity=self._activity,
+                activity_detail=self._activity_detail,
                 max_step_rows=max(1, terminal_size.lines - 11),
                 scheduler_summary=self._scheduler_summary,
             ),

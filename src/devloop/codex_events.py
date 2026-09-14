@@ -15,6 +15,7 @@ from .terminal_text import compact_terminal_text
 
 
 MAX_ACTIVITY_TEXT_LENGTH = 240
+_ROLE_RESULT_STATUSES = frozenset({"PASS", "FAIL", "BLOCKED"})
 
 
 class CodexTurnOutcome(Enum):
@@ -89,6 +90,9 @@ def render_safe_codex_activity(payload: dict[str, Any] | None) -> str | None:
         )
         if not message:
             return None
+        structured_summary = extract_structured_role_summary(message)
+        if structured_summary:
+            return f"Codex update: {compact_activity_text(structured_summary)}"
         if looks_like_structured_result(message):
             return "Structured role result received."
         return f"Codex update: {compact_activity_text(message)}"
@@ -147,3 +151,26 @@ def looks_like_structured_result(text: str) -> bool:
         return isinstance(json.loads(stripped), dict)
     except json.JSONDecodeError:
         return False
+
+
+def extract_structured_role_summary(text: str) -> str:
+    """Return the bounded progress summary from a valid Dev Loop role result.
+
+    The live panel must not render arbitrary result fields: they can include
+    command text, findings, or file content.  The role-result schema gives us
+    one operator-facing field whose purpose is a concise status update.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```json") and stripped.endswith("```"):
+        stripped = stripped[7:-3].strip()
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    status = payload.get("status")
+    summary = payload.get("summary")
+    if status not in _ROLE_RESULT_STATUSES or not isinstance(summary, str):
+        return ""
+    return summary

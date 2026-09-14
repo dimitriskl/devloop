@@ -1459,6 +1459,30 @@ class StreamingCodexRunnerTests(unittest.TestCase):
             redirected=True,
         )
 
+    def test_structured_role_update_exposes_only_its_safe_summary(self) -> None:
+        activity = render_safe_codex_activity(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": json.dumps(
+                        {
+                            "status": "PASS",
+                            "summary": "Inspecting the connection configuration.",
+                            "changed_files": ["src/secret.py"],
+                            "verification_commands": ["secret command"],
+                        }
+                    ),
+                },
+            }
+        )
+
+        self.assertEqual(
+            activity,
+            "Codex update: Inspecting the connection configuration.",
+        )
+        self.assertNotIn("secret", activity or "")
+
     def test_role_execution_streams_safe_activity_before_process_exit(self) -> None:
         class OpenAfterCompletion:
             def __init__(self) -> None:

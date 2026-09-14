@@ -17,7 +17,12 @@ from unittest import mock
 from textual.containers import Horizontal
 from textual.widgets import Input, OptionList, Static
 
-from devloop.portable_runtime import PortableRunContext, PortableRuntimeBridge
+from devloop.portable_runtime import (
+    PortableRunContext,
+    PortableRuntimeBridge,
+    PortableRuntimeEvent,
+    PortableRuntimeEventKind,
+)
 from devloop.portable_session_catalog import PortableSessionCatalog
 from devloop.portable_session_targets import PortableSessionTarget
 from devloop.portable_sessions import (
@@ -3601,6 +3606,65 @@ class PortableApplicationShellTests(unittest.IsolatedAsyncioTestCase):
                     break
 
             self.assertEqual(app.operation_result, 0)
+
+    async def test_text_input_slash_menu_offers_close_and_exit_aliases(self) -> None:
+        running = PortableSessionSnapshot(
+            session_id="slash-command-session",
+            checkout=Path("slash-command-session").resolve(),
+            status=PortableSessionStatus.RUNNING,
+        )
+
+        class FakeSupervisor:
+            def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
+                return (running,)
+
+            def try_next_event(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+        app = PortableApplicationShell(
+            PortableRuntimeBridge(),
+            session_supervisor=FakeSupervisor(),
+            session_launch=PortableSessionLaunch(
+                session_id="new-session",
+                checkout=Path.cwd(),
+                operation=PortableWorkflowOperation.PLANNING,
+                arguments=(),
+            ),
+        )
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            app._show_input(
+                PortableRuntimeEvent(
+                    kind=PortableRuntimeEventKind.INPUT_REQUESTED,
+                    request_id=41,
+                    prompt="Describe the change",
+                )
+            )
+            input_widget = app.query_one("#portable-input", Input)
+            await pilot.press("/")
+            await pilot.pause()
+
+            commands = app.query_one("#portable-slash-commands", OptionList)
+            self.assertTrue(commands.display)
+            self.assertEqual(
+                [commands.get_option_at_index(index).id for index in range(commands.option_count)],
+                ["/close", "/exit"],
+            )
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            self.assertTrue(app.screen.query_one("#portable-exit-confirmation", OptionList))
+            await pilot.press("escape")
+            await pilot.pause()
+
+            input_widget.value = "/close"
+            input_widget.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertTrue(app.screen.query_one("#portable-exit-confirmation", OptionList))
 
     async def test_system_exit_code_is_preserved(self) -> None:
         def operation() -> int:

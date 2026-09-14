@@ -8,6 +8,7 @@ import unittest
 from devloop.portable_runtime import (
     PortableRuntimeBridge,
     PortableRuntimeEventKind,
+    PortableRuntimeStopped,
     portable_plain_mode_session,
     portable_runtime_session,
 )
@@ -33,6 +34,39 @@ class InteractiveBuffer(io.StringIO):
 
 
 class PortableStatusUiTests(unittest.TestCase):
+    def test_dashboard_animation_exits_cleanly_when_portable_runtime_pauses(self) -> None:
+        class PausingRuntime:
+            def content_size(self, *, fallback: tuple[int, int]) -> tuple[int, int]:
+                return fallback
+
+            def show_screen(self, content: str) -> None:
+                raise PortableRuntimeStopped("Portable worker received PAUSE.")
+
+        class StopAfterOneFrame:
+            def __init__(self) -> None:
+                self._wait_count = 0
+                self.stopped = False
+
+            def wait(self, timeout: float) -> bool:
+                self._wait_count += 1
+                return self._wait_count > 1
+
+            def set(self) -> None:
+                self.stopped = True
+
+        with portable_runtime_session(PausingRuntime()):  # type: ignore[arg-type]
+            dashboard = IssueDashboard(
+                issue_number="0001",
+                issue_title="Pause without a traceback",
+                position=1,
+                total=1,
+            )
+            stop_requested = StopAfterOneFrame()
+            dashboard._stop_requested = stop_requested  # type: ignore[assignment]
+            dashboard._animate()
+
+        self.assertTrue(stop_requested.stopped)
+
     def test_external_wait_owns_screen_and_excludes_wait_from_role_duration(self) -> None:
         bridge = PortableRuntimeBridge()
         timestamp = [0.0]

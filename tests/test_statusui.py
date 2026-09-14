@@ -453,6 +453,59 @@ class IssueDashboardRenderingTests(unittest.TestCase):
         self.assertIn("WAITING   REVIEW      · pass 2 · 00:00:08", rendered)
         self.assertIn("WAITING   QA          · pass 2 · 00:00:05", rendered)
 
+    def test_dashboard_wraps_last_agent_update_during_generic_codex_activity(self) -> None:
+        output = FakeStream()
+        dashboard = statusui.IssueDashboard(
+            issue_number="0001",
+            issue_title="Show live implementation progress",
+            position=1,
+            total=1,
+            stream=output,
+            frame_seconds=60,
+            terminal_size=lambda **_: os.terminal_size((72, 24)),
+        )
+
+        dashboard.begin_role(Stage.DEVELOPMENT, 1)
+        dashboard.show_workflow_progress(
+            statusui.project_workflow_progress(
+                default_portable_workflow(),
+                default_portable_component_catalog(),
+                (
+                    StepRuntimeState(
+                        step_instance_id=DEVELOPMENT_STEP_ID,
+                        issue_id="0001",
+                        status=StepRuntimeStatus.RUNNING,
+                        pass_number=1,
+                    ),
+                ),
+                (),
+                issue_id="0001",
+            )
+        )
+        dashboard.notify_activity(
+            message_activity(
+                "Codex update: Auditing the current worktree and connection "
+                "routing configuration against the requested contract."
+            )
+        )
+        dashboard.notify_activity(
+            StepActivityEvent(
+                kind=StepActivityKind.TOOL_STARTED,
+                activity="Running a repository command.",
+                tool_key="command_execution:progress-test",
+            )
+        )
+        dashboard.close()
+
+        rendered = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.getvalue())
+        self.assertIn("Running a repository command.", rendered)
+        self.assertIn("Last agent update: Auditing the current worktree", rendered)
+        self.assertIn("requested contract.", rendered)
+        self.assertNotIn(
+            "Running a repository command. Last agent update:",
+            rendered,
+        )
+
     def test_next_issue_reuses_card_region_and_shows_run_summary(self) -> None:
         class Clock:
             value = 0.0
