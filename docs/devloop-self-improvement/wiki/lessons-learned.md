@@ -36,6 +36,14 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 - Action: Model closed sets with enums, constraints, or reference data; parse external strings at ingestion and add mutation tests for every unsupported code, label, key, and extra public field.
 - Last seen: 2026-07-25
 
+## Preserve Persisted Values Across DTO Defaults And Alternate Projections
+
+- Applies to: coder, reviewer, QA, DTO defaults, synchronization and specialized API projections
+- Lesson: Changing a DTO default is a behavior change for every producer that omits the field; an alternate projection can silently rewrite an already persisted value when it passes through a converter or sync package.
+- Evidence: Template-connection-routing Issue 0001 QA found that standalone template execution projected flags but omitted a stored Staging connection's `Environment`; the DTO's new Production default was then forwarded by the sync converter, changing the received routing value. Existing focused tests did not cover this path.
+- Action: Before changing a DTO default, enumerate every constructor, LINQ projection, serializer, converter, and specialized endpoint that produces it. Add round-trip regressions for each meaningful persisted enum or flag through ordinary and alternate paths, especially where an omitted value has a non-null default.
+- Last seen: 2026-09-14
+
 ## Validate Authenticated External Endpoints Before Use
 
 - Applies to: coder, reviewer, QA, stored integration configuration and authenticated HTTP clients
@@ -319,10 +327,10 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 ## Check Frontend Dependency Availability Before Angular Gates
 
 - Applies to: coder, reviewer, QA, Angular worktrees and dependency-cache hygiene
-- Lesson: Missing `node_modules`, lockfiles, or Angular builder packages are setup residuals rather than application failures, but restoring dependencies must not leave large untracked caches in the repository.
-- Evidence: Issue 0001 repeatedly could not run Angular build or Karma because `node_modules` was incomplete; restoration then failed with npm cache permission or offline-cache errors, while generated worktree caches could not be removed under the active filesystem policy.
-- Action: Preflight the lockfile, `node_modules`, required builders, and a writable approved cache path before execution; if restoration needs user-profile access or an installation outside the sandbox, stop retrying and hand off one paste-ready operator gate that writes a non-secret workspace result log.
-- Last seen: 2026-07-23
+- Lesson: Missing `node_modules`, lockfiles, Angular builder packages, or writable test/build output roots are setup residuals rather than application failures, but restoring dependencies and redirecting outputs must not leave large untracked caches in the repository.
+- Evidence: Earlier Issue 0001 runs could not start Angular gates because `node_modules` was incomplete and restoration hit cache-permission or offline-cache errors. On 2026-09-14, after focused Karma compilation succeeded, browser startup still failed with `EPERM` while creating the worktree's `dist/test-out` directory; production-build proof remained unavailable.
+- Action: Preflight the lockfile, `node_modules`, required builders, and writable approved cache and build-output paths before execution. Use a repository-supported isolated output workaround when available; otherwise stop repeated retries and hand off one paste-ready operator gate that writes a non-secret workspace result log.
+- Last seen: 2026-09-14
 
 ## Treat Disk-Full Runtime Failures As Infrastructure Blockers
 

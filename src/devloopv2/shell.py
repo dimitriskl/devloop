@@ -20,6 +20,7 @@ from devloop.portable_sessions import (
     PortableSessionSnapshot,
     PortableSessionStatus,
 )
+from devloop.run_review import REVIEW_SCREEN_PATH
 
 from .activity_stream import NOTICE, OUTPUT, PROBLEM, ActivityStream
 from .guidance_store import GuidanceStore, NoActiveIssue
@@ -92,6 +93,15 @@ class MinimalShell(App[None]):
         padding: 0 1;
         overflow: hidden;
     }
+    MinimalShell.completion-review #activity {
+        display: none;
+    }
+    MinimalShell.completion-review #live {
+        height: 1fr;
+        max-height: 100%;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+    }
     #composer {
         height: 1;
         padding: 0 1;
@@ -128,6 +138,8 @@ class MinimalShell(App[None]):
     BINDINGS = [
         Binding("escape", "pause", "Pause", show=False, priority=True),
         Binding("ctrl+c", "interrupt", "Pause or exit", show=False, priority=True),
+        Binding("pageup", "review_page_up", show=False, priority=True),
+        Binding("pagedown", "review_page_down", show=False, priority=True),
     ]
 
     ENABLE_COMMAND_PALETTE = False
@@ -166,7 +178,13 @@ class MinimalShell(App[None]):
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="activity", wrap=True, markup=False, highlight=False)
-        yield Static("", id="live")
+        yield RichLog(
+            id="live",
+            wrap=True,
+            markup=False,
+            highlight=False,
+            auto_scroll=False,
+        )
         yield OptionList(id="slash-commands")
         with Horizontal(id="composer"):
             yield Static(">", id="chevron")
@@ -486,6 +504,14 @@ class MinimalShell(App[None]):
 
     # ---- key actions --------------------------------------------------
 
+    def action_review_page_up(self) -> None:
+        if self.has_class("completion-review"):
+            self.query_one("#live", RichLog).scroll_page_up(animate=False)
+
+    def action_review_page_down(self) -> None:
+        if self.has_class("completion-review"):
+            self.query_one("#live", RichLog).scroll_page_down(animate=False)
+
     def action_pause(self) -> None:
         if self._hide_slash_command_menu():
             self.query_one("#entry", Input).focus()
@@ -552,12 +578,17 @@ class MinimalShell(App[None]):
         """
         content = snapshot.current_screen if snapshot.status in LIVE_STATUSES else ""
         content = content.rstrip()
+        self.set_class(
+            content.lstrip().startswith(REVIEW_SCREEN_PATH),
+            "completion-review",
+        )
         if content == self._live_content:
             return
         self._live_content = content
-        panel = self.query_one("#live", Static)
+        panel = self.query_one("#live", RichLog)
         panel.display = bool(content)
-        panel.update(Text.from_ansi(content))
+        panel.clear()
+        panel.write(Text.from_ansi(content))
 
     def _echo(self, text: str) -> None:
         self.query_one("#activity", RichLog).write(Text(f"> {text}", style="bold"))
@@ -567,5 +598,9 @@ class MinimalShell(App[None]):
 
     def _refresh_hint(self) -> None:
         snapshot = self._snapshot
-        hint = "" if snapshot is None else _HINTS.get(snapshot.status, "")
+        hint = (
+            "completion review - PgUp/PgDn to read, Enter to choose, Esc to pause"
+            if self.has_class("completion-review")
+            else "" if snapshot is None else _HINTS.get(snapshot.status, "")
+        )
         self.query_one("#hint", Static).update(Text(hint, style="dim"))

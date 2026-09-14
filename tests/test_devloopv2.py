@@ -6,7 +6,7 @@ from collections import deque
 from pathlib import Path
 from unittest import mock
 
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Input, OptionList, RichLog, Static
 
 from devloop.issue_reply import issue_reply_context
 from devloop.portable_sessions import (
@@ -675,10 +675,51 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                     snapshot(current_screen="Development\n  coder - 0001 - 00:42")
                 )
                 await self.settle(pilot, supervisor)
-                panel = app.query_one("#live", Static)
+                panel = app.query_one("#live", RichLog)
 
                 self.assertTrue(panel.display)
-                self.assertIn("coder - 0001 - 00:42", str(panel.content))
+                self.assertIn(
+                    "coder - 0001 - 00:42",
+                    "\n".join(line.text for line in panel.lines),
+                )
+
+    async def test_completion_review_uses_the_full_panel_and_can_page_through_it(self) -> None:
+        supervisor = FakeSupervisor()
+        review = "\n".join(
+            (
+                "Dev Loop > Completion Review",
+                "",
+                "WORKFLOW FINISHED - ATTENTION REQUIRED",
+                *(f"Recovery detail {index}" for index in range(80)),
+                "End of completion review.",
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                supervisor.publish(
+                    snapshot(
+                        status=PortableSessionStatus.WAITING_FOR_INPUT,
+                        current_screen=review,
+                    )
+                )
+                await self.settle(pilot, supervisor)
+
+                panel = app.query_one("#live", RichLog)
+                self.assertTrue(app.has_class("completion-review"))
+                self.assertFalse(app.query_one("#activity", RichLog).display)
+                self.assertEqual(panel.styles.overflow_y, "auto")
+                self.assertIn(
+                    "End of completion review.",
+                    "\n".join(line.text for line in panel.lines),
+                )
+                self.assertIn("PgUp/PgDn", str(app.query_one("#hint", Static).content))
+                self.assertGreater(panel.virtual_size.height, panel.size.height)
+
+                await pilot.press("pagedown")
+                await pilot.pause()
+                self.assertGreater(panel.scroll_y, 0)
 
     async def test_the_live_panel_replaces_itself_instead_of_accumulating(self) -> None:
         supervisor = FakeSupervisor()
@@ -690,10 +731,11 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle(pilot, supervisor)
                 supervisor.publish(snapshot(current_screen="frame two"))
                 await self.settle(pilot, supervisor)
-                panel = app.query_one("#live", Static)
+                panel = app.query_one("#live", RichLog)
 
-                self.assertNotIn("frame one", str(panel.content))
-                self.assertIn("frame two", str(panel.content))
+                rendered = "\n".join(line.text for line in panel.lines)
+                self.assertNotIn("frame one", rendered)
+                self.assertIn("frame two", rendered)
 
     async def test_a_stale_live_panel_is_cleared_once_the_run_pauses(self) -> None:
         supervisor = FakeSupervisor()
@@ -711,7 +753,7 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await self.settle(pilot, supervisor)
 
-                self.assertFalse(app.query_one("#live", Static).display)
+                self.assertFalse(app.query_one("#live", RichLog).display)
 
     async def test_a_completed_run_exits_with_the_worker_result(self) -> None:
         supervisor = FakeSupervisor()
