@@ -1,6 +1,7 @@
 """Assemble the supervisor and the minimal shell for one delivery run."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from devloop.portable_sessions import PortableSessionLaunch
@@ -40,4 +41,8 @@ def run_minimal_shell(
         prd_path=prd_path,
     )
     shell.run()
+    if shell.launch_error is not None:
+        # The shell has already been torn down by now; this is the only place
+        # the reason can still reach the operator.
+        print(f"Dev Loop could not start: {shell.launch_error}", file=sys.stderr)
     return shell.exit_code

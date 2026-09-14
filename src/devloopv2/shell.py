@@ -32,6 +32,15 @@ PAUSABLE_STATUSES = frozenset(
         PortableSessionStatus.QUEUED,
     }
 )
+#: Statuses where the worker's live progress panel is still meaningful.
+LIVE_STATUSES = frozenset(
+    {
+        PortableSessionStatus.RUNNING,
+        PortableSessionStatus.QUEUED,
+        PortableSessionStatus.PAUSING,
+        PortableSessionStatus.WAITING_FOR_INPUT,
+    }
+)
 #: Statuses where a bare Enter continues the run.
 CONTINUABLE_STATUSES = frozenset(
     {
@@ -70,6 +79,12 @@ class MinimalShell(App[None]):
         background: $background;
         border: none;
         scrollbar-size-vertical: 1;
+    }
+    #live {
+        height: auto;
+        max-height: 50%;
+        padding: 0 1;
+        overflow: hidden;
     }
     #composer {
         height: 1;
@@ -118,13 +133,17 @@ class MinimalShell(App[None]):
         self._session_id: str | None = None
         self._snapshot: PortableSessionSnapshot | None = None
         self._shown_request: tuple[str, int] | None = None
+        self._live_content = ""
         self._finished = False
         self.exit_code = _INTERRUPTED_EXIT_CODE
+        #: Why the run never started, for the caller to report once the TUI is gone.
+        self.launch_error: str | None = None
 
     # ---- composition -------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="activity", wrap=True, markup=False, highlight=False)
+        yield Static("", id="live")
         with Horizontal(id="composer"):
             yield Static(">", id="chevron")
             yield Input(id="entry")
@@ -164,14 +183,39 @@ class MinimalShell(App[None]):
         try:
             snapshot = self._supervisor.handle_intent(intent)
         except (OSError, RuntimeError, ValueError) as error:
-            self._write(str(error), PROBLEM)
-            self._finish(_LAUNCH_FAILURE_EXIT_CODE)
-            return
+            if not target.resume:
+                self._fail_launch(error)
+                return
+            # A recorded session is not always continuable: one interrupted
+            # before delivery wrote its first checkpoint has nothing to
+            # recover from. Relaunching the same PRD still means "carry on",
+            # so carry on from the beginning rather than refusing to start.
+            self._write(f"Could not continue the earlier session: {error}", PROBLEM)
+            self._write("Starting this PRD from the beginning instead.", NOTICE)
+            try:
+                snapshot = self._supervisor.handle_intent(
+                    PortableSessionIntent(
+                        kind=PortableSessionIntentKind.START,
+                        launch=self._launch,
+                    )
+                )
+            except (OSError, RuntimeError, ValueError) as start_error:
+                self._fail_launch(start_error)
+                return
         # The supervisor decides which session actually took the work, which is
         # not always the id asked for: a launch can be folded into a session the
         # catalog already holds for this checkout.
         self._session_id = snapshot.session_id
         self._absorb(snapshot)
+
+    def _fail_launch(self, error: BaseException) -> None:
+        """Stop before any work starts, keeping the reason for the caller to print.
+
+        The activity area is torn down with the app, so writing the reason there
+        alone would leave the operator staring at an empty prompt.
+        """
+        self.launch_error = str(error)
+        self._finish(_LAUNCH_FAILURE_EXIT_CODE)
 
     def _drain(self) -> None:
         while True:
@@ -186,6 +230,7 @@ class MinimalShell(App[None]):
         for line in self._stream.consume(snapshot):
             self._write(line.text, line.kind)
         self._snapshot = snapshot
+        self._refresh_live(snapshot)
         if (
             snapshot.status is PortableSessionStatus.WAITING_FOR_INPUT
             and snapshot.input_request is not None
@@ -331,6 +376,23 @@ class MinimalShell(App[None]):
         self._write("", OUTPUT)
         for line in prompt_lines(request):
             self._write(line, NOTICE if line.startswith("  ") else OUTPUT)
+
+    def _refresh_live(self, snapshot: PortableSessionSnapshot) -> None:
+        """Mirror the worker's live progress panel just above the prompt.
+
+        ``current_screen`` is a panel the worker re-renders several times a
+        second, not a log entry, so it replaces itself here instead of being
+        appended. Once nothing is running it is cleared rather than left
+        showing a frozen spinner.
+        """
+        content = snapshot.current_screen if snapshot.status in LIVE_STATUSES else ""
+        content = content.rstrip()
+        if content == self._live_content:
+            return
+        self._live_content = content
+        panel = self.query_one("#live", Static)
+        panel.display = bool(content)
+        panel.update(Text.from_ansi(content))
 
     def _echo(self, text: str) -> None:
         self.query_one("#activity", RichLog).write(Text(f"> {text}", style="bold"))

@@ -5,6 +5,8 @@ import unittest
 from collections import deque
 from pathlib import Path
 
+from textual.widgets import Static
+
 from devloop.issue_reply import issue_reply_context
 from devloop.portable_sessions import (
     PortableSessionEvent,
@@ -44,6 +46,7 @@ def snapshot(
     recovery_available: bool = False,
     input_request: PortableSessionInputRequest | None = None,
     progress: PortableSessionProgress = PortableSessionProgress(),
+    current_screen: str = "",
 ) -> PortableSessionSnapshot:
     return PortableSessionSnapshot(
         session_id=session_id,
@@ -57,6 +60,7 @@ def snapshot(
         recovery_available=recovery_available,
         input_request=input_request,
         progress=progress,
+        current_screen=current_screen,
     )
 
 
@@ -303,12 +307,17 @@ class FakeSupervisor:
         self.paused: list[str] = []
         self.shutdowns = 0
         self.reply = snapshot()
+        #: Intent kinds this supervisor refuses, and the error it raises for each.
+        self.refusals: dict[PortableSessionIntentKind, Exception] = {}
 
     def list_sessions(self) -> tuple[PortableSessionSnapshot, ...]:
         return self._sessions
 
     def handle_intent(self, intent: object) -> PortableSessionSnapshot:
         self.intents.append(intent)
+        refusal = self.refusals.get(intent.kind)  # type: ignore[attr-defined]
+        if refusal is not None:
+            raise refusal
         return self.reply
 
     def pause_session(self, session_id: str) -> PortableSessionSnapshot:
@@ -320,6 +329,9 @@ class FakeSupervisor:
 
     def shutdown(self) -> None:
         self.shutdowns += 1
+
+    def pending(self) -> bool:
+        return bool(self._events)
 
     def publish(self, value: PortableSessionSnapshot) -> None:
         self._events.append(PortableSessionEvent(value))
@@ -344,6 +356,15 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
             guidance=GuidanceStore(log_root),
             prd_path=prd_path,
         )
+
+    async def settle(self, pilot, supervisor: FakeSupervisor) -> None:
+        """Wait until the shell's poll timer has actually consumed the queue."""
+        for _ in range(200):
+            if not supervisor.pending():
+                await pilot.pause()
+                return
+            await pilot.pause(0.01)
+        raise AssertionError("the shell never drained the published events")
 
     async def test_a_fresh_prd_starts_a_new_session_without_a_picker(self) -> None:
         supervisor = FakeSupervisor()
@@ -378,6 +399,49 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intent.kind, PortableSessionIntentKind.RESUME)  # type: ignore[attr-defined]
         self.assertEqual(intent.session_id, "earlier")  # type: ignore[attr-defined]
 
+    async def test_an_uncontinuable_earlier_session_falls_back_to_a_fresh_start(
+        self,
+    ) -> None:
+        """Interrupted before its first checkpoint, the earlier session has nothing to recover."""
+        prd = (CHECKOUT / "feature.md").resolve()
+        supervisor = FakeSupervisor(
+            sessions=(
+                snapshot(
+                    session_id="earlier",
+                    status=PortableSessionStatus.INTERRUPTED,
+                    prd_path=prd,
+                ),
+            )
+        )
+        supervisor.refusals[PortableSessionIntentKind.RESUME] = ValueError(
+            "Cannot recover delivery: durable loop state is missing."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory), prd_path=prd)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                self.assertFalse(app._finished)
+
+        self.assertEqual(
+            [intent.kind for intent in supervisor.intents],  # type: ignore[attr-defined]
+            [PortableSessionIntentKind.RESUME, PortableSessionIntentKind.START],
+        )
+        self.assertIsNone(app.launch_error)
+
+    async def test_a_refused_start_keeps_the_reason_for_the_caller(self) -> None:
+        supervisor = FakeSupervisor()
+        supervisor.refusals[PortableSessionIntentKind.START] = RuntimeError(
+            "worktree is leased by another session"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+        self.assertEqual(app.exit_code, 73)
+        self.assertEqual(app.launch_error, "worktree is leased by another session")
+        self.assertEqual(supervisor.shutdowns, 1)
+
     async def test_escape_pauses_the_running_session(self) -> None:
         supervisor = FakeSupervisor()
         with tempfile.TemporaryDirectory() as directory:
@@ -399,7 +463,7 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(supervisor.paused, ["session"])
                 supervisor.publish(snapshot(status=PortableSessionStatus.PAUSED))
-                await pilot.pause()
+                await self.settle(pilot, supervisor)
                 await pilot.press("ctrl+c")
                 await pilot.pause()
 
@@ -426,7 +490,7 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                         input_request=request,
                     )
                 )
-                await pilot.pause()
+                await self.settle(pilot, supervisor)
                 await pilot.press("1", "enter")
                 await pilot.pause()
 
@@ -474,7 +538,7 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 supervisor.publish(snapshot(status=PortableSessionStatus.PAUSED))
-                await pilot.pause()
+                await self.settle(pilot, supervisor)
                 await pilot.press("enter")
                 await pilot.pause()
 
@@ -485,6 +549,57 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
             PortableSessionIntentKind.RESUME,
         )
 
+    async def test_the_workers_live_progress_panel_is_shown_above_the_prompt(
+        self,
+    ) -> None:
+        """`current_screen` is re-rendered several times a second by the worker."""
+        supervisor = FakeSupervisor()
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                supervisor.publish(
+                    snapshot(current_screen="Development\n  coder - 0001 - 00:42")
+                )
+                await self.settle(pilot, supervisor)
+                panel = app.query_one("#live", Static)
+
+                self.assertTrue(panel.display)
+                self.assertIn("coder - 0001 - 00:42", str(panel.content))
+
+    async def test_the_live_panel_replaces_itself_instead_of_accumulating(self) -> None:
+        supervisor = FakeSupervisor()
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                supervisor.publish(snapshot(current_screen="frame one"))
+                await self.settle(pilot, supervisor)
+                supervisor.publish(snapshot(current_screen="frame two"))
+                await self.settle(pilot, supervisor)
+                panel = app.query_one("#live", Static)
+
+                self.assertNotIn("frame one", str(panel.content))
+                self.assertIn("frame two", str(panel.content))
+
+    async def test_a_stale_live_panel_is_cleared_once_the_run_pauses(self) -> None:
+        supervisor = FakeSupervisor()
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                supervisor.publish(snapshot(current_screen="spinner frame"))
+                await self.settle(pilot, supervisor)
+                supervisor.publish(
+                    snapshot(
+                        status=PortableSessionStatus.PAUSED,
+                        current_screen="spinner frame",
+                    )
+                )
+                await self.settle(pilot, supervisor)
+
+                self.assertFalse(app.query_one("#live", Static).display)
+
     async def test_a_completed_run_exits_with_the_worker_result(self) -> None:
         supervisor = FakeSupervisor()
         with tempfile.TemporaryDirectory() as directory:
@@ -494,7 +609,7 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                 supervisor.publish(
                     snapshot(status=PortableSessionStatus.COMPLETED, result=0)
                 )
-                await pilot.pause()
+                await self.settle(pilot, supervisor)
 
         self.assertEqual(app.exit_code, 0)
 
@@ -507,7 +622,7 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                 supervisor.publish(
                     snapshot(status=PortableSessionStatus.FAILED, result=2)
                 )
-                await pilot.pause()
+                await self.settle(pilot, supervisor)
 
         self.assertEqual(app.exit_code, 2)
 
