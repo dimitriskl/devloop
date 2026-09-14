@@ -519,17 +519,27 @@ def _apply_frame_theme(
     last_index = len(lines) - 1
     for index, line in enumerate(lines):
         if index == 0:
-            style = _ANSI_HEADER
+            themed.append(_style_frame_interior(line, _ANSI_HEADER))
         elif footer_start is not None and index > footer_start and index < last_index:
-            style = _ANSI_HEADER
+            themed.append(_style_frame_interior(line, _ANSI_HEADER))
         elif "> " in line:
-            style = _ANSI_SELECTION
+            themed.append(_style_frame_interior(line, _ANSI_SELECTION))
         elif index == last_index or (footer_start is not None and index == footer_start):
-            style = _ANSI_BORDER
+            themed.append(f"{_ANSI_BORDER}{line}{_ANSI_RESET}")
         else:
-            style = _ANSI_WINDOW
-        themed.append(f"{style}{line}{_ANSI_RESET}")
+            themed.append(f"{_ANSI_WINDOW}{line}{_ANSI_RESET}")
     return themed
+
+
+def _style_frame_interior(line: str, style: str) -> str:
+    """Inverse only a framed row's content, retaining visible side borders."""
+    if len(line) < 2:
+        return f"{style}{line}{_ANSI_RESET}"
+    return (
+        f"{_ANSI_BORDER}{line[0]}{_ANSI_RESET}"
+        f"{style}{line[1:-1]}{_ANSI_RESET}"
+        f"{_ANSI_BORDER}{line[-1]}{_ANSI_RESET}"
+    )
 
 
 def _wrap_to_width(text: str, width: int) -> list[str]:
