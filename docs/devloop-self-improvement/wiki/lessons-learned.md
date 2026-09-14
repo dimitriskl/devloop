@@ -327,9 +327,9 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 ## Check Frontend Dependency Availability Before Angular Gates
 
 - Applies to: coder, reviewer, QA, Angular worktrees and dependency-cache hygiene
-- Lesson: Missing `node_modules`, lockfiles, Angular builder packages, or writable test/build output roots are setup residuals rather than application failures, but restoring dependencies and redirecting outputs must not leave large untracked caches in the repository.
-- Evidence: Earlier Issue 0001 runs could not start Angular gates because `node_modules` was incomplete and restoration hit cache-permission or offline-cache errors. On 2026-09-14, after focused Karma compilation succeeded, browser startup still failed with `EPERM` while creating the worktree's `dist/test-out` directory; production-build proof remained unavailable.
-- Action: Preflight the lockfile, `node_modules`, required builders, and writable approved cache and build-output paths before execution. Use a repository-supported isolated output workaround when available; otherwise stop repeated retries and hand off one paste-ready operator gate that writes a non-secret workspace result log.
+- Lesson: Missing `node_modules`, lockfiles, Angular builder packages, or writable test/build output roots are setup residuals rather than application failures. An isolated frontend gate can replace a blocked worktree gate only when its relevant inputs are proven identical before and after execution.
+- Evidence: Earlier Issue 0001 runs could not start Angular gates because `node_modules` was incomplete and restoration hit cache-permission or offline-cache errors. On 2026-09-14, focused Karma compilation then hit `EPERM` creating the worktree's `dist/test-out`; a writable isolated copy with all 1,309 input files hash-matched before and after its focused browser test passed, and final QA also recorded matching touched Angular source/config hashes plus a passing production build.
+- Action: Preflight the lockfile, `node_modules`, required builders, and writable approved cache and build-output paths before execution. When the original worktree output remains blocked, use a repository-supported isolated copy or output path, fingerprint every relevant source/config input before and after the gate, and record both the equivalence check and gate result. Otherwise stop repeated retries and hand off one paste-ready operator gate that writes a non-secret workspace result log.
 - Last seen: 2026-09-14
 
 ## Treat Disk-Full Runtime Failures As Infrastructure Blockers
