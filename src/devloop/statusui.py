@@ -801,12 +801,11 @@ def render_workflow_progress(
         )
         colored_statuses.append((len(lines) - 1, active.status))
         activity_prefix = "AI › " if unicode else "AI > "
-        lines.append(
-            _fit_plain_text(
+        lines.extend(
+            _wrap_plain_text(
                 f"{activity_prefix}"
                 f"{_safe_progress_text(projection.activity.safe_text)}",
                 safe_width,
-                unicode=unicode,
             )
         )
         if projection.activity.detail_text:

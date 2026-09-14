@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest import mock
 
-from textual.widgets import Static
+from textual.widgets import Input, OptionList, Static
 
 from devloop.issue_reply import issue_reply_context
 from devloop.portable_sessions import (
@@ -30,6 +31,7 @@ from devloopv2.guidance_store import (
 from devloopv2.input_prompt import UnresolvedAnswer, prompt_lines, resolve_answer
 from devloopv2.session_target import resolve_session_target
 from devloopv2.shell import MinimalShell
+from devloopv2 import runner
 
 CHECKOUT = Path.cwd().resolve()
 
@@ -337,6 +339,53 @@ class FakeSupervisor:
         self._events.append(PortableSessionEvent(value))
 
 
+class MinimalShellRunnerTests(unittest.TestCase):
+    def test_options_exit_returns_to_the_minimal_shell(self) -> None:
+        launch = PortableSessionLaunch(
+            session_id="fresh",
+            checkout=CHECKOUT,
+            operation=PortableWorkflowOperation.DELIVERY,
+            arguments=("--prd", str(CHECKOUT / "feature.md")),
+        )
+        catalog = mock.Mock()
+        options_shell = mock.Mock(
+            options_requested=True,
+            options_session_id="persisted-session",
+            launch_error=None,
+            exit_code=130,
+        )
+        resumed_shell = mock.Mock(options_requested=False, launch_error=None, exit_code=0)
+        with (
+            mock.patch(
+                "devloop.portable_session_catalog.PortableSessionCatalog",
+                return_value=catalog,
+            ),
+            mock.patch("devloop.portable_sessions.PortableSessionSupervisor"),
+            mock.patch.object(
+                runner,
+                "MinimalShell",
+                side_effect=(options_shell, resumed_shell),
+            ) as shell_type,
+            mock.patch.object(runner, "guidance_store_for"),
+            mock.patch("devloop.cli.run_options_command", return_value=0) as open_options,
+        ):
+            result = runner.run_minimal_shell(
+                launch,
+                prd_path=CHECKOUT / "feature.md",
+                issues_argument=None,
+            )
+
+        self.assertEqual(result, 0)
+        options_shell.run.assert_called_once_with()
+        resumed_shell.run.assert_called_once_with()
+        open_options.assert_called_once_with(())
+        self.assertIsNone(shell_type.call_args_list[0].kwargs["resume_session_id"])
+        self.assertEqual(
+            shell_type.call_args_list[1].kwargs["resume_session_id"],
+            "persisted-session",
+        )
+
+
 class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
     def build(
         self,
@@ -466,6 +515,70 @@ class MinimalShellTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle(pilot, supervisor)
                 await pilot.press("ctrl+c")
                 await pilot.pause()
+
+        self.assertEqual(app.exit_code, 130)
+        self.assertEqual(supervisor.shutdowns, 1)
+
+    async def test_slash_menu_opens_options_after_a_durable_pause(self) -> None:
+        supervisor = FakeSupervisor()
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.press("/")
+                await pilot.pause()
+
+                menu = app.query_one("#slash-commands", OptionList)
+                self.assertTrue(menu.display)
+                self.assertEqual(
+                    [menu.get_option_at_index(index).id for index in range(menu.option_count)],
+                    ["/exit", "/options"],
+                )
+
+                await pilot.press("down", "enter")
+                await pilot.pause()
+                self.assertEqual(supervisor.paused, ["session"])
+                self.assertFalse(app._finished)
+
+                supervisor.publish(snapshot(status=PortableSessionStatus.PAUSED))
+                await self.settle(pilot, supervisor)
+
+        self.assertTrue(app.options_requested)
+        self.assertEqual(app.exit_code, 0)
+        self.assertEqual(supervisor.shutdowns, 1)
+
+    async def test_slash_menu_opens_options_after_an_interrupted_pause(self) -> None:
+        supervisor = FakeSupervisor()
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.build(supervisor, log_root=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                entry = app.query_one("#entry", Input)
+                entry.value = "/options"
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(supervisor.paused, ["session"])
+
+                supervisor.publish(snapshot(status=PortableSessionStatus.INTERRUPTED))
+                await self.settle(pilot, supervisor)
+
+        self.assertTrue(app.options_requested)
+        self.assertEqual(app.exit_code, 0)
+        self.assertEqual(supervisor.shutdowns, 1)
+
+    async def test_exit_slash_command_exits_without_saving_guidance(self) -> None:
+        supervisor = FakeSupervisor()
+        with tempfile.TemporaryDirectory() as directory:
+            log_root = Path(directory) / ".loop.logs"
+            app = self.build(supervisor, log_root=log_root)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                entry = app.query_one("#entry", Input)
+                entry.value = "/exit"
+                await pilot.press("enter")
+                await pilot.pause()
+
+            self.assertFalse(log_root.exists())
 
         self.assertEqual(app.exit_code, 130)
         self.assertEqual(supervisor.shutdowns, 1)

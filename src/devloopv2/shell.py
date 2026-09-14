@@ -4,10 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, OptionList, RichLog, Static
+from textual.widgets.option_list import Option
 
 from devloop.portable_sessions import (
     PortableSessionController,
@@ -22,7 +24,7 @@ from devloop.portable_sessions import (
 from .activity_stream import NOTICE, OUTPUT, PROBLEM, ActivityStream
 from .guidance_store import GuidanceStore, NoActiveIssue
 from .input_prompt import UnresolvedAnswer, prompt_lines, resolve_answer
-from .session_target import resolve_session_target
+from .session_target import SessionTarget, resolve_session_target
 
 #: Statuses where Esc or a first Ctrl+C means "stop at the next checkpoint".
 PAUSABLE_STATUSES = frozenset(
@@ -64,6 +66,10 @@ _STYLES = {OUTPUT: "", NOTICE: "dim", PROBLEM: "bold red"}
 
 _INTERRUPTED_EXIT_CODE = 130
 _LAUNCH_FAILURE_EXIT_CODE = 73
+_SLASH_COMMANDS = (
+    ("/exit", "Exit Dev Loop"),
+    ("/options", "Open Dev Loop Options"),
+)
 
 
 class MinimalShell(App[None]):
@@ -89,6 +95,18 @@ class MinimalShell(App[None]):
     #composer {
         height: 1;
         padding: 0 1;
+    }
+    #slash-commands {
+        display: none;
+        height: auto;
+        max-height: 4;
+        margin: 0 1;
+        border: solid $foreground;
+    }
+    #slash-commands > .option-list--option-highlighted {
+        background: $foreground;
+        color: $background;
+        text-style: bold;
     }
     #chevron {
         width: 2;
@@ -121,6 +139,7 @@ class MinimalShell(App[None]):
         launch: PortableSessionLaunch,
         guidance: GuidanceStore,
         prd_path: Path,
+        resume_session_id: str | None = None,
         poll_interval: float = 0.05,
     ) -> None:
         super().__init__()
@@ -128,6 +147,7 @@ class MinimalShell(App[None]):
         self._launch = launch
         self._guidance = guidance
         self._prd_path = prd_path
+        self._resume_session_id = resume_session_id
         self._poll_interval = poll_interval
         self._stream = ActivityStream()
         self._session_id: str | None = None
@@ -135,6 +155,9 @@ class MinimalShell(App[None]):
         self._shown_request: tuple[str, int] | None = None
         self._live_content = ""
         self._finished = False
+        self._options_pause_requested = False
+        self.options_requested = False
+        self.options_session_id: str | None = None
         self.exit_code = _INTERRUPTED_EXIT_CODE
         #: Why the run never started, for the caller to report once the TUI is gone.
         self.launch_error: str | None = None
@@ -144,6 +167,7 @@ class MinimalShell(App[None]):
     def compose(self) -> ComposeResult:
         yield RichLog(id="activity", wrap=True, markup=False, highlight=False)
         yield Static("", id="live")
+        yield OptionList(id="slash-commands")
         with Horizontal(id="composer"):
             yield Static(">", id="chevron")
             yield Input(id="entry")
@@ -160,10 +184,14 @@ class MinimalShell(App[None]):
     # ---- session lifecycle -------------------------------------------
 
     def _start(self) -> None:
-        target = resolve_session_target(
-            self._supervisor.list_sessions(),
-            new_session_id=self._launch.session_id,
-            prd_path=self._prd_path,
+        target = (
+            SessionTarget(session_id=self._resume_session_id, resume=True)
+            if self._resume_session_id is not None
+            else resolve_session_target(
+                self._supervisor.list_sessions(),
+                new_session_id=self._launch.session_id,
+                prd_path=self._prd_path,
+            )
         )
         self._session_id = target.session_id
         if target.resume:
@@ -231,6 +259,20 @@ class MinimalShell(App[None]):
             self._write(line.text, line.kind)
         self._snapshot = snapshot
         self._refresh_live(snapshot)
+        if self._options_pause_requested:
+            if snapshot.status in {
+                PortableSessionStatus.PAUSED,
+                PortableSessionStatus.INTERRUPTED,
+                PortableSessionStatus.READY,
+            }:
+                self._open_options()
+                return
+            if snapshot.status.terminal:
+                self._options_pause_requested = False
+                self._write(
+                    "Options were not opened because the session ended before pausing.",
+                    PROBLEM,
+                )
         if (
             snapshot.status is PortableSessionStatus.WAITING_FOR_INPUT
             and snapshot.input_request is not None
@@ -267,6 +309,8 @@ class MinimalShell(App[None]):
         snapshot = self._snapshot
         if self._finished or self._session_id is None or snapshot is None:
             return
+        if self._run_slash_command(typed):
+            return
         if (
             snapshot.status is PortableSessionStatus.WAITING_FOR_INPUT
             and snapshot.input_request is not None
@@ -281,6 +325,105 @@ class MinimalShell(App[None]):
             # active issue; it is picked up when the next prompt is built.
             self._echo(typed.strip())
             self._record_guidance(typed.strip())
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "entry":
+            return
+        matching_commands = self._matching_slash_commands(event.value)
+        menu = self.query_one("#slash-commands", OptionList)
+        if not matching_commands:
+            self._hide_slash_command_menu()
+            return
+        selected_id = (
+            menu.get_option_at_index(menu.highlighted).id
+            if menu.highlighted is not None and menu.highlighted < menu.option_count
+            else None
+        )
+        menu.clear_options()
+        menu.add_options(
+            [
+                Option(f"{command:<10} {description}", id=command)
+                for command, description in matching_commands
+            ]
+        )
+        menu.highlighted = next(
+            (
+                index
+                for index, (command, _description) in enumerate(matching_commands)
+                if command == selected_id
+            ),
+            0,
+        )
+        menu.display = True
+
+    @staticmethod
+    def _matching_slash_commands(value: str) -> tuple[tuple[str, str], ...]:
+        query = value.casefold()
+        if not query.startswith("/"):
+            return ()
+        return tuple(
+            (command, description)
+            for command, description in _SLASH_COMMANDS
+            if command.startswith(query)
+        )
+
+    def _hide_slash_command_menu(self) -> bool:
+        menu = self.query_one("#slash-commands", OptionList)
+        was_visible = menu.display
+        menu.display = False
+        menu.clear_options()
+        return was_visible
+
+    def _selected_slash_command(self, typed: str) -> str | None:
+        normalized = typed.strip().casefold()
+        matching_commands = self._matching_slash_commands(normalized)
+        if not matching_commands:
+            return None
+        if any(command == normalized for command, _description in matching_commands):
+            return normalized
+        menu = self.query_one("#slash-commands", OptionList)
+        highlighted = menu.highlighted
+        if highlighted is None or highlighted >= len(matching_commands):
+            return matching_commands[0][0]
+        return matching_commands[highlighted][0]
+
+    def _run_slash_command(self, typed: str) -> bool:
+        command = self._selected_slash_command(typed)
+        if command is None:
+            return False
+        self._hide_slash_command_menu()
+        if command == "/options":
+            self._request_options()
+        else:
+            self._finish(_INTERRUPTED_EXIT_CODE)
+        return True
+
+    def _request_options(self) -> None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return
+        if snapshot.status in CONTINUABLE_STATUSES:
+            self._open_options()
+            return
+        if snapshot.status is PortableSessionStatus.PAUSING:
+            self._options_pause_requested = True
+            self._write("Options will open after the durable pause completes.", NOTICE)
+            return
+        if self._can_pause():
+            self._options_pause_requested = True
+            self.action_pause()
+            self._write("Pausing before opening Dev Loop Options.", NOTICE)
+            return
+        self._write(
+            f"Options are unavailable while the session is {snapshot.status.value}.",
+            PROBLEM,
+        )
+
+    def _open_options(self) -> None:
+        self._options_pause_requested = False
+        self.options_requested = True
+        self.options_session_id = self._session_id
+        self._finish(0)
 
     def _answer(self, request: PortableSessionInputRequest, typed: str) -> None:
         assert self._session_id is not None
@@ -344,6 +487,9 @@ class MinimalShell(App[None]):
     # ---- key actions --------------------------------------------------
 
     def action_pause(self) -> None:
+        if self._hide_slash_command_menu():
+            self.query_one("#entry", Input).focus()
+            return
         if not self._can_pause():
             return
         assert self._session_id is not None
@@ -357,6 +503,25 @@ class MinimalShell(App[None]):
             self.action_pause()
             return
         self._finish(_INTERRUPTED_EXIT_CODE)
+
+    def on_key(self, event: events.Key) -> None:
+        menu = self.query_one("#slash-commands", OptionList)
+        if not menu.display or event.key not in {"up", "down"}:
+            return
+        highlighted = menu.highlighted or 0
+        direction = -1 if event.key == "up" else 1
+        menu.highlighted = max(
+            0,
+            min(menu.option_count - 1, highlighted + direction),
+        )
+        event.prevent_default()
+        event.stop()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "slash-commands":
+            return
+        if isinstance(event.option.id, str):
+            self._run_slash_command(event.option.id)
 
     def _can_pause(self) -> bool:
         return (

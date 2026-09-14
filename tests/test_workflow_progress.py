@@ -278,6 +278,38 @@ class WorkflowProgressProjectionTests(unittest.TestCase):
         )
         self.assertIn("AI > Running focused progress tests.", rendered)
 
+    def test_renderer_wraps_the_primary_agent_activity_without_losing_its_tail(self) -> None:
+        projection = project_workflow_progress(
+            default_portable_workflow(),
+            default_portable_component_catalog(),
+            (
+                StepRuntimeState(
+                    step_instance_id=DEVELOPMENT_STEP_ID,
+                    issue_id="0009",
+                    status=StepRuntimeStatus.RUNNING,
+                    pass_number=1,
+                ),
+            ),
+            (),
+            issue_id="0009",
+            activity=(
+                "The initial combined read was too broad and exposed a large "
+                "pre-existing worktree before the scoped audit finished."
+            ),
+        )
+
+        rendered = render_workflow_progress(
+            projection,
+            width=52,
+            color=False,
+            unicode=False,
+            frame="/",
+        )
+
+        self.assertIn("AI > The initial combined read was too broad", rendered)
+        self.assertIn("scoped audit finished.", rendered)
+        self.assertNotIn("AI > The initial combined read was too broad and...", rendered)
+
     def test_long_workflow_window_keeps_active_step_visible(self) -> None:
         workflow = default_portable_workflow()
         catalog = default_portable_component_catalog()
