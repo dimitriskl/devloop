@@ -182,11 +182,11 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 ## Retry Equivalent Blockers Only After State Changes
 
-- Applies to: blocked retry rounds, resumed runs, required user clarification and automatic verification
-- Lesson: Fresh attempts cannot resolve an unanswered contract decision or an unchanged gate failure; preserve the blocker across retries and resumes until relevant evidence or guidance changes.
-- Evidence: `.compiler-runs/20260909-120435-context.md` records Issue 0003 repeating a strict-mock gate failure. `.compiler-runs/20260909-181154-context.md` records Issue 0004 exhausting another five retries after the earlier five: one attempt documented the proposal, but the required decision remained unanswered and Issue 0005 stayed waiting.
-- Action: Surface one precise required clarification and pause dependent work; never invent the missing contract. Persist a blocker fingerprint across reruns and resume dependent execution only when the answer or corrective evidence arrives; explanatory replies and proposal-only edits do not resolve an approval blocker. For failed gates, resolve the report through `result.json`, inspect its sibling log, and feed the concrete failure into coder rework; a rerun request alone does not establish a fix.
-- Last seen: 2026-09-09
+- Applies to: blocked retry rounds, resumed runs, cross-slice dependencies, required user clarification and automatic verification
+- Lesson: Fresh attempts cannot resolve an unanswered contract decision or an unchanged gate failure; preserve the blocker and suspend every affected slice until relevant evidence or guidance changes.
+- Evidence: `.compiler-runs/20260909-120435-context.md` records Issue 0003 repeating a strict-mock gate failure. `.compiler-runs/20260909-181154-context.md` records Issue 0004 exhausting another five retries after the earlier five. In `.compiler-runs/20260914-221152-context.md`, unresolved FTP compatibility in Issue 0003 and missing SpecificWorkflow routing inputs in Issue 0005 produced repeated no-change BLOCKED attempts across the dependent issue pack.
+- Action: Surface one precise required clarification, record a stable blocker fingerprint, and pause dependent work; never invent the missing contract. Resume only when the answer or corrective evidence changes that fingerprint. For failed gates, resolve the report through `result.json`, inspect its sibling log, and feed the concrete failure into coder rework; a rerun request alone does not establish a fix.
+- Last seen: 2026-09-14
 
 ## Validate Every Component Of Derived Data
 
@@ -496,6 +496,6 @@ Durable, evidence-backed lessons that improve future Dev Loop runs.
 
 - Applies to: agent clarification, explicitly required design approval and resumed attempts
 - Lesson: Explain the observed failure, proposed change and requested scope in plain language before asking for a required decision; a request for explanation is not approval.
-- Evidence: `.compiler-runs/20260909-181154-context.md`, Issue 0004 results from 18:00 through 18:11 record a documented proposal and a reply requesting a plain-English explanation. The results identify an explicit issue prerequisite requiring a decision before implementation; the proposal remained unapproved.
-- Action: Complete authorized analysis and record a reviewable proposal first. Ask one concise question identifying what implementation and testing would cover, who controls installation, and the exact instruction requiring approval. Carry the pending decision across resumes; do not impose a new approval step when existing authorization already covers the work.
-- Last seen: 2026-09-09
+- Evidence: `.compiler-runs/20260909-181154-context.md`, Issue 0004 results from 18:00 through 18:11 record a documented proposal and a reply requesting a plain-English explanation. In `.compiler-runs/20260914-221152-context.md`, Issue 0003 required a decision between a company-authorized FTP action and disabling legacy FTP under mandatory connection-ID validation; Issue 0005 lacked the execution-environment and relay inputs its provider required.
+- Action: Complete authorized analysis and record a reviewable proposal first. Ask one concise question that states the current behavior, the concrete choices, their compatibility impact, and the required implementation and regression scope. Carry the pending decision across resumes; do not impose a new approval step when existing authorization already covers the work.
+- Last seen: 2026-09-14
